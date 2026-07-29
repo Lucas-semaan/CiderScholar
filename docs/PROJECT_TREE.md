@@ -1,7 +1,7 @@
 # Arborescence de référence
 
 ```text
-local-science-rag/
+CiderScholar/
 ├── AGENTS.md                         # règles d’ingénierie du dépôt
 ├── app/
 │   ├── api/                          # routes FastAPI, schémas et gestion d’erreurs
