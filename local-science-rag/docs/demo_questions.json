@@ -1,0 +1,70 @@
+{
+  "schema_version": 1,
+  "questions": [
+    {
+      "id": "direct-mineral-salts",
+      "kind": "direct",
+      "text": "Quel effet la supplémentation du moût en sels minéraux a-t-elle sur la qualité du cidre ? Réponds en prose et cite les sources en APA 7.",
+      "sources": [
+        {
+          "doi": "10.3390/molecules25163640",
+          "title": "The Quality of Ciders Depends on the Must Supplementation with Mineral Salts.",
+          "sha256": "9286363020434ff3bb02308b3a1b1713c29e514a25bbf7a2588a183745110637",
+          "evidence": [
+            { "page": 2, "term": "ammonium sulfate" },
+            { "page": 5, "term": "Enological Properties of Ciders" }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "compare-oxygen-concentrate",
+      "kind": "comparative",
+      "text": "Compare l’oxygénation du moût et l’emploi de jus concentré : quels paramètres de fermentation et de qualité ces deux leviers modifient-ils ? Réponds en prose, sans puces, avec citations APA 7.",
+      "sources": [
+        {
+          "doi": "10.3390/biom10060890",
+          "title": "Effect of Musts Oxygenation at Various Stages of Cider Production on Oenological Parameters, Antioxidant Activity, and Profile of Volatile Cider Compounds",
+          "sha256": "bd1f28ced2a00bcb6d1925c8b93c7c07c2c99f2e04097f5ee1f5ea75cb9dcb36",
+          "evidence": [
+            { "page": 2, "term": "micro-oxygenation" },
+            { "page": 4, "term": "Oenological Parameters of Ciders" }
+          ]
+        },
+        {
+          "doi": "10.3390/foods9101401",
+          "title": "The Effect of Apple Juice Concentration on Cider Fermentation and Properties of the Final Product.",
+          "sha256": "b664cb969e242ef70f2a09797460b4d58b88d1626f76d1824dc7bec4d952ef2d",
+          "evidence": [
+            { "page": 2, "term": "This study used apple juice" },
+            { "page": 4, "term": "Juice Concentration on Free Amino Acid Composition" }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "follow-up-volatiles",
+      "kind": "follow_up",
+      "depends_on": "compare-oxygen-concentrate",
+      "text": "Dans ta comparaison précédente, quel protocole a servi à évaluer les composés volatils, et quelles limites faut-il garder à l’esprit ?",
+      "sources": [
+        {
+          "doi": "10.3390/biom10060890",
+          "title": "Effect of Musts Oxygenation at Various Stages of Cider Production on Oenological Parameters, Antioxidant Activity, and Profile of Volatile Cider Compounds",
+          "sha256": "bd1f28ced2a00bcb6d1925c8b93c7c07c2c99f2e04097f5ee1f5ea75cb9dcb36",
+          "evidence": [
+            { "page": 3, "term": "internal standardization" }
+          ]
+        },
+        {
+          "doi": "10.3390/foods9101401",
+          "title": "The Effect of Apple Juice Concentration on Cider Fermentation and Properties of the Final Product.",
+          "sha256": "b664cb969e242ef70f2a09797460b4d58b88d1626f76d1824dc7bec4d952ef2d",
+          "evidence": [
+            { "page": 3, "term": "GC-MS" }
+          ]
+        }
+      ]
+    }
+  ]
+}

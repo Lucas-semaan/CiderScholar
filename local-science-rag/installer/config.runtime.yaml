@@ -1,0 +1,61 @@
+app:
+  host: 127.0.0.1
+  api_port: 8000
+  offline_mode: false
+  allow_bibliographic_apis: false
+  allow_publisher_automation: false
+  log_level: INFO
+  chat_worker_concurrency: 20
+
+paths:
+  data_dir: data
+  pdf_dir: data/pdf
+  extracted_dir: data/extracted
+  qdrant_dir: data/qdrant
+  models_dir: data/models
+  database_path: data/database/science_rag.sqlite3
+  cache_dir: data/cache
+  exports_dir: data/exports
+
+embeddings:
+  model_name: intfloat/multilingual-e5-base
+  batch_size: 2
+  device: cpu
+  normalize: true
+  max_sequence_length: 512
+  query_prefix: "query: "
+  passage_prefix: "passage: "
+  local_files_only: true
+  trust_remote_code: false
+
+reranker:
+  enabled: false
+  model_name: cross-encoder/mmarco-mMiniLMv2-L12-H384-v1
+  batch_size: 2
+  candidate_limit: 40
+  device: cpu
+  local_files_only: true
+  trust_remote_code: false
+
+deep_research:
+  rrf_k: 60
+  rrf_candidate_limit: 40
+  cross_encoder_candidate_limit: 40
+  retained_fragment_limit: 12
+  contextual_summary_enabled: false
+  contextual_summary_top_k: 12
+  contextual_relevance_threshold: 0.5
+  contextual_relevance_observations_sha256: null
+
+memory:
+  profile: 8gb
+  warning_used_gb: 6.0
+  hard_process_limit_gb: 5.0
+  minimum_available_mb: 1024
+
+distribution:
+  enabled: false
+  synchronized_root: null
+  administrator_archive_root: null
+  expected_folder_name: CiderScholar
+  check_interval_hours: 24

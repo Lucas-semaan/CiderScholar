@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "local-science-rag"
+version = "0.2.2"
+description = "Local, sovereign scientific bibliography and RAG application"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+license = "AGPL-3.0-only"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.setuptools.packages.find]
+include = ["app*", "scripts*"]

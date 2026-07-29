@@ -1,0 +1,760 @@
+from __future__ import annotations
+
+import json
+
+import pytest
+
+from app.llm.argo_client import ArgoProtocolError
+from app.llm.contracts import GenerationMetrics, GenerationResponse
+from app.llm.response_style import ResponseStyle
+from app.models.chatbot import ChatEvidencePassage, ChatEvidenceRecord
+from app.updates.pilot_rag import (
+    CiderAbstractRagService,
+    CiderEvidenceAnswer,
+    CiderEvidenceRagService,
+    CitedEvidenceStatement,
+    _apa_reference,
+    _salvage_grounded_evidence_answer,
+)
+from app.updates.vector_index import BibliographicHybridResult
+
+
+def _record(record_id: str, doi: str) -> BibliographicHybridResult:
+    return BibliographicHybridResult(
+        rank=1,
+        record_id=record_id,
+        title="Cider microbiology",
+        abstract="Yeasts and bacteria influence cider fermentation.",
+        authors=["Ada Test"],
+        journal="Cider Science",
+        publication_year=2025,
+        doi=doi,
+        url=f"https://doi.org/{doi}",
+        sources=["OpenAlex"],
+        lexical_rank=1,
+        vector_rank=1,
+        score=0.1,
+    )
+
+
+def _response(content: str) -> GenerationResponse:
+    return GenerationResponse(
+        model="chat-gpt-oss-20b",
+        content=content,
+        done_reason="stop",
+        metrics=GenerationMetrics(
+            total_duration_seconds=0.1,
+            load_duration_seconds=0.0,
+            prompt_eval_count=50,
+            prompt_eval_duration_seconds=0.0,
+            eval_count=20,
+            eval_duration_seconds=0.1,
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    ("authors", "expected"),
+    [
+        (["Ada Test"], "Test, A."),
+        (["Ada Test", "Bob Doe"], "Test, A., & Doe, B."),
+        (
+            ["Ada Test", "Bob Doe", "Chloé Roe"],
+            "Test, A., Doe, B., & Roe, C.",
+        ),
+    ],
+)
+def test_apa_reference_formats_author_variants(authors: list[str], expected: str) -> None:
+    record = _record("11111111-1111-1111-1111-111111111111", "10.1000/cider")
+    record.authors = authors
+
+    assert _apa_reference(record).startswith(f"{expected} (2025).")
+
+
+def test_apa_reference_does_not_invent_a_missing_author() -> None:
+    record = _record("11111111-1111-1111-1111-111111111111", "10.1000/cider")
+    record.authors = []
+
+    reference = _apa_reference(record)
+
+    assert reference.startswith("Cider microbiology. (2025).")
+    assert "Anonymous" not in reference
+
+
+def test_apa_reference_does_not_invent_a_missing_doi() -> None:
+    record = _record("11111111-1111-1111-1111-111111111111", "10.1000/cider")
+    record.doi = None
+    record.url = None
+
+    reference = _apa_reference(record)
+
+    assert "doi.org" not in reference
+    assert reference.endswith("*Cider Science*.")
+
+
+def test_pilot_rag_constrains_ids_and_renders_abstract_citations() -> None:
+    record = _record("11111111-1111-1111-1111-111111111111", "10.1000/cider")
+
+    class FakeClient:
+        def chat(self, messages, *, json_schema, max_output_tokens):
+            assert max_output_tokens == 4096
+            assert json_schema["properties"]["response_format"] == {
+                "type": "string",
+                "const": "prose",
+            }
+            assert "abstracts" in messages[1]["content"]
+            assert json.loads(messages[1]["content"])["conversation_history"] == [
+                {"role": "user", "content": "Parlons des fermentations."}
+            ]
+            assert "langue du message utilisateur courant" in messages[0]["content"]
+            assert "ton froid, factuel et non promotionnel" in messages[0]["content"]
+            assert "phrases simples" in messages[0]["content"]
+            assert "vocabulaire scientifique précis" in messages[0]["content"]
+            assert "résultats positifs et négatifs pertinents" in messages[0]["content"]
+            assert "faits des biais, erreurs et limites documentés" in messages[0]["content"]
+            assert "amélioration non démontrée" in messages[0]["content"]
+            assert "jamais comme un résultat acquis" in messages[0]["content"]
+            assert "ni emoji, ni émoticône" in messages[0]["content"]
+            assert "ni compliment, ni superlatif non étayé" in messages[0]["content"]
+            assert "response_format=bullet_list seulement" in messages[0]["content"]
+            enum = json_schema["$defs"]["CitedAbstractStatement"]["properties"]["record_ids"][
+                "items"
+            ]["enum"]
+            assert enum == [record.record_id]
+            return _response(
+                json.dumps(
+                    {
+                        "response_format": "prose",
+                        "statements": [
+                            {
+                                "statement": "Les levures pilotent la fermentation.",
+                                "record_ids": [record.record_id],
+                            }
+                        ],
+                        "limitations": ["Un abstract ne remplace pas le texte intégral."],
+                    },
+                    ensure_ascii=False,
+                )
+            )
+
+    result = CiderAbstractRagService(FakeClient()).answer(
+        "Quels microorganismes surveiller ?",
+        [record],
+        conversation_history=[{"role": "user", "content": "Parlons des fermentations."}],
+    )
+
+    assert result.source_record_ids == [record.record_id]
+    assert not result.answer_markdown.startswith("-")
+    assert "(Test, 2025)" in result.answer_markdown
+    assert "## Références" in result.answer_markdown
+    assert "Test, A. (2025). Cider microbiology. *Cider Science*" in result.answer_markdown
+    assert "https://doi.org/10.1000/cider" in result.answer_markdown
+    assert "ne remplace pas le texte intégral" in result.answer_markdown
+    assert result.prompt_tokens == 50
+
+
+def test_evidence_rag_uses_full_text_passages_and_renders_exact_pages() -> None:
+    passage = ChatEvidencePassage(
+        evidence_id="common:article-1:chunk:42",
+        chunk_id=42,
+        section="Results",
+        page_start=4,
+        page_end=5,
+        text="Fermentation at 18 °C increased ester production in the cider trial.",
+    )
+    record = ChatEvidenceRecord(
+        record_id="common:article-1",
+        origin="local_rag",
+        evidence_level="full_text",
+        scope="common",
+        article_id="article-1",
+        title="Temperature and cider aroma",
+        authors=["Ada Test"],
+        doi="10.1000/full-text",
+        journal="Cider Science",
+        publication_year=2025,
+        providers=["local"],
+        url="https://doi.org/10.1000/full-text",
+        passages=[passage],
+    )
+
+    class FakeClient:
+        def chat(self, messages, *, json_schema, max_output_tokens):
+            assert max_output_tokens == 4096
+            assert "jus de pomme standard, commercial ou concentré" in messages[0]["content"]
+            assert (
+                "Une souche inoculée ne constitue jamais une donnée de prévalence"
+                in (messages[0]["content"])
+            )
+            payload = json.loads(messages[1]["content"])
+            assert payload["evidence"][0]["evidence_level"] == "full_text"
+            assert payload["evidence"][0]["page_start"] == 4
+            assert payload["evidence"][0]["text"].startswith("Fermentation at 18")
+            enum = json_schema["$defs"]["CitedEvidenceStatement"]["properties"]["evidence_ids"][
+                "items"
+            ]["enum"]
+            assert enum == [passage.evidence_id]
+            return _response(
+                json.dumps(
+                    {
+                        "response_format": "prose",
+                        "statements": [
+                            {
+                                "statement": (
+                                    "À 18 °C, l'essai a observé une production accrue d'esters."
+                                ),
+                                "evidence_ids": [passage.evidence_id],
+                            }
+                        ],
+                        "limitations": [],
+                    },
+                    ensure_ascii=False,
+                )
+            )
+
+    result = CiderEvidenceRagService(FakeClient()).answer(
+        "Que montre l'article sur la température ?",
+        [record],
+    )
+
+    assert result.source_record_ids == ["common:article-1"]
+    assert result.cited_evidence_ids == [passage.evidence_id]
+    assert "(Test, 2025, pp. 4–5)" in result.answer_markdown
+    assert "abstract ne remplace" not in result.answer_markdown
+
+
+def test_faceted_evidence_rag_keeps_cited_drafts_and_assembles_them() -> None:
+    records = []
+    for index, text in enumerate(
+        [
+            "Apple brandy oak ageing increased esters and oak lactones.",
+            "Cider brandy wood ageing changed phenolic compounds and colour.",
+            "Apple spirit maturation changed volatile compounds over time.",
+        ],
+        start=1,
+    ):
+        passage = ChatEvidencePassage(
+            evidence_id=f"common:article-{index}:chunk:1",
+            chunk_id=1,
+            section="Results",
+            page_start=index,
+            page_end=index,
+            text=text,
+        )
+        records.append(
+            ChatEvidenceRecord(
+                record_id=f"common:article-{index}",
+                origin="local_rag",
+                evidence_level="full_text",
+                scope="common",
+                article_id=f"article-{index}",
+                title=f"Apple brandy study {index}",
+                authors=["Ada Test"],
+                publication_year=2025,
+                providers=["local"],
+                passages=[passage],
+            )
+        )
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def chat(self, messages, *, json_schema, max_output_tokens):
+            self.calls += 1
+            payload = json.loads(messages[1]["content"])
+            enum = json_schema["$defs"]["CitedEvidenceStatement"]["properties"]["evidence_ids"][
+                "items"
+            ]["enum"]
+            assert enum == [
+                "common:article-1:chunk:1",
+                "common:article-2:chunk:1",
+                "common:article-3:chunk:1",
+            ]
+            if self.calls <= 3:
+                assert max_output_tokens == 4096
+                assert json_schema["properties"]["statements"]["maxItems"] == 4
+                assert "facet_drafts" not in payload
+                cited = enum[self.calls - 1]
+            else:
+                assert max_output_tokens == 6144
+                assert json_schema["properties"]["statements"]["maxItems"] == 16
+                assert len(payload["facet_drafts"]) == 3
+                assert "Une étude sur le vin ne prouve jamais" in messages[0]["content"]
+                cited = enum[0]
+            return _response(
+                json.dumps(
+                    {
+                        "response_format": "prose",
+                        "statements": [
+                            {
+                                "statement": "L'étude observe un effet documenté.",
+                                "evidence_ids": [cited],
+                            }
+                        ],
+                        "limitations": [],
+                    },
+                    ensure_ascii=False,
+                )
+            )
+
+    client = FakeClient()
+    result = CiderEvidenceRagService(client).answer_faceted(
+        "Quel est l'impact de l'élevage en barrique sur les arômes et la structure du Calvados ?",
+        records,
+    )
+
+    assert client.calls == 4
+    assert [draft.key for draft in result.facet_drafts] == ["aroma", "structure", "evolution"]
+    assert result.facet_drafts[1].cited_evidence_ids == ["common:article-2:chunk:1"]
+    assert result.prompt_tokens == 200
+    assert result.completion_tokens == 80
+
+
+def test_faceted_answer_salvage_discards_only_an_unsupported_numeric_statement() -> None:
+    passage = ChatEvidencePassage(
+        evidence_id="common:article-1:chunk:1",
+        chunk_id=1,
+        section="Results",
+        page_start=1,
+        page_end=1,
+        text="The observed value was 3.03.",
+    )
+    record = ChatEvidenceRecord(
+        record_id="common:article-1",
+        origin="local_rag",
+        evidence_level="full_text",
+        scope="common",
+        article_id="article-1",
+        title="Grounded numeric study",
+        authors=["Ada Test"],
+        publication_year=2025,
+        providers=["local"],
+        passages=[passage],
+    )
+    answer = CiderEvidenceAnswer(
+        statements=[
+            CitedEvidenceStatement(
+                statement="La valeur observée était de 3,03.",
+                evidence_ids=[passage.evidence_id],
+            ),
+            CitedEvidenceStatement(
+                statement="Une autre valeur était de 4,04.",
+                evidence_ids=[passage.evidence_id],
+            ),
+        ],
+        limitations=[],
+    )
+
+    salvaged = _salvage_grounded_evidence_answer(
+        answer,
+        {passage.evidence_id: (record, passage)},
+        {passage.evidence_id},
+        ResponseStyle.PROSE,
+    )
+
+    assert salvaged is not None
+    assert [statement.statement for statement in salvaged.statements] == [
+        "La valeur observée était de 3,03."
+    ]
+    assert "écartées" in salvaged.limitations[-1]
+
+
+def test_pilot_rag_uses_bullets_only_when_the_requested_format_is_explicit() -> None:
+    record = _record("11111111-1111-1111-1111-111111111111", "10.1000/cider")
+
+    class FakeClient:
+        def chat(self, _messages, **_options):
+            return _response(
+                json.dumps(
+                    {
+                        "response_format": "bullet_list",
+                        "statements": [
+                            {
+                                "statement": "Surveiller les levures.",
+                                "record_ids": [record.record_id],
+                            }
+                        ],
+                        "limitations": ["Cette réponse repose sur un résumé bibliographique."],
+                    },
+                    ensure_ascii=False,
+                )
+            )
+
+    result = CiderAbstractRagService(FakeClient()).answer(
+        "Réponds sous forme de liste à puces.", [record]
+    )
+
+    assert result.answer.response_format == "bullet_list"
+    assert result.answer_markdown.startswith("- Surveiller les levures.")
+
+
+def test_pilot_rag_renders_one_non_empty_bullet_per_statement() -> None:
+    record = _record("11111111-1111-1111-1111-111111111111", "10.1000/cider")
+
+    class FakeClient:
+        def chat(self, _messages, **_options):
+            return _response(
+                json.dumps(
+                    {
+                        "response_format": "bullet_list",
+                        "statements": [
+                            {
+                                "statement": "Surveiller les levures.",
+                                "record_ids": [record.record_id],
+                            },
+                            {
+                                "statement": "Observer les bactéries.",
+                                "record_ids": [record.record_id],
+                            },
+                        ],
+                        "limitations": [],
+                    }
+                )
+            )
+
+    result = CiderAbstractRagService(FakeClient()).answer(
+        "Liste les microorganismes à surveiller.", [record]
+    )
+
+    answer_body = result.answer_markdown.split("\n\n## Références", 1)[0]
+    bullets = [line for line in answer_body.splitlines() if line.strip()]
+    assert len(bullets) == 2
+    assert all(line.startswith("- ") and line[2:].strip() for line in bullets)
+    assert result.answer_markdown.count("Test, A. (2025).") == 1
+
+
+def test_pilot_rag_orders_final_bibliography() -> None:
+    zulu = _record("11111111-1111-1111-1111-111111111111", "10.1000/zulu")
+    zulu.authors = ["Zoé Zulu"]
+    zulu.title = "Zulu study"
+    alpha = _record("22222222-2222-2222-2222-222222222222", "10.1000/alpha")
+    alpha.authors = ["Anne Alpha"]
+    alpha.title = "Alpha study"
+
+    class FakeClient:
+        def chat(self, _messages, **_options):
+            return _response(
+                json.dumps(
+                    {
+                        "response_format": "prose",
+                        "statements": [
+                            {
+                                "statement": "Les microorganismes influencent la fermentation.",
+                                "record_ids": [zulu.record_id, alpha.record_id],
+                            }
+                        ],
+                        "limitations": [],
+                    }
+                )
+            )
+
+    result = CiderAbstractRagService(FakeClient()).answer("Question", [zulu, alpha])
+    references = result.answer_markdown.split("## Références", 1)[1]
+
+    assert references.index("Alpha, A.") < references.index("Zulu, Z.")
+
+
+def test_complete_scientific_prose_response_contract() -> None:
+    first = _record("11111111-1111-1111-1111-111111111111", "10.1000/first")
+    second = _record("22222222-2222-2222-2222-222222222222", "10.1000/second")
+    second.authors = ["Bob Doe"]
+    second.title = "Bacterial activity in cider"
+
+    class FakeClient:
+        def chat(self, _messages, *, json_schema, **_options):
+            assert json_schema["properties"]["response_format"]["const"] == "prose"
+            return _response(
+                json.dumps(
+                    {
+                        "response_format": "prose",
+                        "statements": [
+                            {
+                                "statement": (
+                                    "Les levures et les bactéries influencent la fermentation."
+                                ),
+                                "record_ids": [first.record_id, second.record_id],
+                            },
+                            {
+                                "statement": "Les abstracts ne décrivent pas tous les mécanismes.",
+                                "record_ids": [second.record_id],
+                            },
+                        ],
+                        "limitations": [
+                            "La réponse repose uniquement sur des résumés bibliographiques."
+                        ],
+                    },
+                    ensure_ascii=False,
+                )
+            )
+
+    result = CiderAbstractRagService(FakeClient()).answer(
+        "Quel rôle jouent les microorganismes ?", [first, second]
+    )
+    body, references = result.answer_markdown.split("\n\n## Références\n\n", 1)
+
+    assert result.answer.response_format == "prose"
+    assert "(Test, 2025); (Doe, 2025)" in body
+    assert "La réponse repose uniquement" in body
+    assert all(
+        not paragraph.lstrip().startswith(("-", "*", "•")) for paragraph in body.split("\n\n")
+    )
+    assert references.count("10.1000/first") == 1
+    assert references.count("10.1000/second") == 1
+
+
+def test_pilot_rag_rejects_bullets_when_prose_is_explicitly_requested() -> None:
+    record = _record("11111111-1111-1111-1111-111111111111", "10.1000/cider")
+
+    class FakeClient:
+        def chat(self, _messages, **_options):
+            return _response(
+                json.dumps(
+                    {
+                        "response_format": "bullet_list",
+                        "statements": [
+                            {
+                                "statement": "Surveiller les levures.",
+                                "record_ids": [record.record_id],
+                            }
+                        ],
+                        "limitations": [],
+                    }
+                )
+            )
+
+    with pytest.raises(RuntimeError, match="response style"):
+        CiderAbstractRagService(FakeClient()).answer("Réponds en prose, sans puces.", [record])
+
+
+@pytest.mark.parametrize("marker", ["-", "*", "•"])
+def test_pilot_rag_rejects_list_marker_in_each_prose_paragraph(marker: str) -> None:
+    record = _record("11111111-1111-1111-1111-111111111111", "10.1000/cider")
+
+    class FakeClient:
+        def chat(self, _messages, **_options):
+            return _response(
+                json.dumps(
+                    {
+                        "response_format": "prose",
+                        "statements": [
+                            {
+                                "statement": f"Premier paragraphe.\n\n{marker} Second paragraphe.",
+                                "record_ids": [record.record_id],
+                            }
+                        ],
+                        "limitations": [],
+                    },
+                    ensure_ascii=False,
+                )
+            )
+
+    with pytest.raises(RuntimeError, match="list marker"):
+        CiderAbstractRagService(FakeClient()).answer("Réponds en prose.", [record])
+
+
+def test_pilot_rag_rejects_an_emoji() -> None:
+    record = _record("11111111-1111-1111-1111-111111111111", "10.1000/cider")
+
+    class FakeClient:
+        def chat(self, _messages, **_options):
+            return _response(
+                json.dumps(
+                    {
+                        "response_format": "prose",
+                        "statements": [
+                            {
+                                "statement": "Les levures influencent la fermentation. 🧪",
+                                "record_ids": [record.record_id],
+                            }
+                        ],
+                        "limitations": [],
+                    },
+                    ensure_ascii=False,
+                )
+            )
+
+    with pytest.raises(RuntimeError, match="emoji"):
+        CiderAbstractRagService(FakeClient()).answer("Question", [record])
+
+
+def test_pilot_rag_attempts_only_one_structural_correction() -> None:
+    record = _record("11111111-1111-1111-1111-111111111111", "10.1000/cider")
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def chat(self, _messages, **_options):
+            self.calls += 1
+            return _response(
+                json.dumps(
+                    {
+                        "response_format": "prose",
+                        "statements": [
+                            {
+                                "statement": "- Fragment en liste.",
+                                "record_ids": [record.record_id],
+                            }
+                        ],
+                        "limitations": [],
+                    }
+                )
+            )
+
+    client = FakeClient()
+    with pytest.raises(RuntimeError, match="list marker"):
+        CiderAbstractRagService(client).answer("Réponds en prose.", [record])
+
+    assert client.calls == 2
+
+
+def test_pilot_rag_rejects_known_empty_introduction() -> None:
+    record = _record("11111111-1111-1111-1111-111111111111", "10.1000/cider")
+
+    class FakeClient:
+        def chat(self, _messages, **_options):
+            return _response(
+                json.dumps(
+                    {
+                        "response_format": "prose",
+                        "statements": [
+                            {
+                                "statement": (
+                                    "Excellente question. Les levures influencent la fermentation."
+                                ),
+                                "record_ids": [record.record_id],
+                            }
+                        ],
+                        "limitations": [],
+                    },
+                    ensure_ascii=False,
+                )
+            )
+
+    with pytest.raises(RuntimeError, match="empty introduction"):
+        CiderAbstractRagService(FakeClient()).answer("Question", [record])
+
+
+def test_pilot_rag_rejects_a_citation_outside_supplied_records() -> None:
+    record = _record("11111111-1111-1111-1111-111111111111", "10.1000/cider")
+
+    class FakeClient:
+        def chat(self, _messages, **_options):
+            return _response(
+                json.dumps(
+                    {
+                        "statements": [
+                            {
+                                "statement": "Unsupported claim",
+                                "record_ids": ["22222222-2222-2222-2222-222222222222"],
+                            }
+                        ],
+                        "limitations": [],
+                    }
+                )
+            )
+
+    with pytest.raises(RuntimeError, match="outside"):
+        CiderAbstractRagService(FakeClient()).answer("Question", [record])
+
+
+def test_pilot_rag_retries_an_unsupported_normative_claim() -> None:
+    record = _record("11111111-1111-1111-1111-111111111111", "10.1000/cider")
+    record.abstract = "The experimental cider contained less than 200 mg/L methanol."
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def chat(self, _messages, **_options):
+            self.calls += 1
+            statement = (
+                "Le méthanol doit rester sous 200 mg/L pour respecter les normes."
+                if self.calls == 1
+                else "Dans cette expérience, le méthanol était inférieur à 200 mg/L."
+            )
+            return _response(
+                json.dumps(
+                    {
+                        "statements": [{"statement": statement, "record_ids": [record.record_id]}],
+                        "limitations": [],
+                    },
+                    ensure_ascii=False,
+                )
+            )
+
+    client = FakeClient()
+    result = CiderAbstractRagService(client).answer("Question", [record])
+
+    assert client.calls == 2
+    assert "Dans cette expérience" in result.answer_markdown
+    assert result.prompt_tokens == 100
+
+
+@pytest.mark.parametrize(
+    ("statement", "error"),
+    [
+        (
+            "Le résultat 11111111 montre une fermentation cidricole.",
+            "record id",
+        ),
+        (
+            "Une teneur supérieure à 200 mg/L serait indésirable pour la sécurité.",
+            "safety",
+        ),
+    ],
+)
+def test_pilot_rag_rejects_leaked_ids_and_unsupported_safety_claims(
+    statement: str,
+    error: str,
+) -> None:
+    record = _record("11111111-1111-1111-1111-111111111111", "10.1000/cider")
+    record.abstract = "The experimental cider contained less than 200 mg/L methanol."
+
+    class FakeClient:
+        def chat(self, _messages, **_options):
+            return _response(
+                json.dumps(
+                    {
+                        "statements": [{"statement": statement, "record_ids": [record.record_id]}],
+                        "limitations": [],
+                    },
+                    ensure_ascii=False,
+                )
+            )
+
+    with pytest.raises(RuntimeError, match=error):
+        CiderAbstractRagService(FakeClient()).answer("Question", [record])
+
+
+def test_pilot_rag_retries_one_length_truncation() -> None:
+    record = _record("11111111-1111-1111-1111-111111111111", "10.1000/cider")
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def chat(self, _messages, **_options):
+            self.calls += 1
+            if self.calls == 1:
+                raise ArgoProtocolError("no content (finish_reason=length)")
+            return _response(
+                json.dumps(
+                    {
+                        "statements": [
+                            {
+                                "statement": "Les levures influencent la fermentation.",
+                                "record_ids": [record.record_id],
+                            }
+                        ],
+                        "limitations": [],
+                    }
+                )
+            )
+
+    client = FakeClient()
+    result = CiderAbstractRagService(client).answer("Question", [record])
+
+    assert client.calls == 2
+    assert result.prompt_tokens == 50

@@ -1,0 +1,65 @@
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import { describe, expect, it } from "vitest";
+
+import { ChatComposer } from "./ChatComposer";
+
+const props = {
+  disabled: false,
+  draft: "Question scientifique",
+  error: null,
+  externalSources: false,
+  allowExternalSources: false,
+  deepResearch: false,
+  allowDeepResearch: false,
+  interactionMode: "auto" as const,
+  conversationContextAvailable: false,
+  showSuggestions: false,
+  onDraftChange: () => undefined,
+  onExternalSourcesChange: () => undefined,
+  onDeepResearchChange: () => undefined,
+  onInteractionModeChange: () => undefined,
+  onSubmit: () => undefined,
+};
+
+describe("ChatComposer administrator enrichment", () => {
+  it("offers the mode switch from the plus button", () => {
+    const markup = renderToStaticMarkup(createElement(ChatComposer, props));
+
+    expect(markup).toContain('aria-label="Composer une demande"');
+    expect(markup).toContain("Changer de mode");
+    expect(markup).not.toContain("rounded-full");
+    expect(markup).not.toContain("CiderScholar choisit entre nouvelle recherche et échange");
+    expect(markup).not.toContain("Réponse en prose par défaut");
+  });
+
+  it("hides the external API toggle from user profiles", () => {
+    const markup = renderToStaticMarkup(
+      createElement(ChatComposer, { ...props, allowExternalSources: false }),
+    );
+    expect(markup).not.toContain("APIs bibliographiques");
+  });
+
+  it("shows the external API toggle on the local administrator profile", () => {
+    const markup = renderToStaticMarkup(
+      createElement(ChatComposer, { ...props, allowExternalSources: true }),
+    );
+    expect(markup).toContain("APIs bibliographiques");
+  });
+
+  it("shows deep research only after the promotion gate", () => {
+    const hidden = renderToStaticMarkup(
+      createElement(ChatComposer, { ...props, allowExternalSources: false }),
+    );
+    const promoted = renderToStaticMarkup(
+      createElement(ChatComposer, {
+        ...props,
+        allowExternalSources: false,
+        allowDeepResearch: true,
+      }),
+    );
+
+    expect(hidden).not.toContain("Analyse approfondie");
+    expect(promoted).toContain("Analyse approfondie");
+  });
+});

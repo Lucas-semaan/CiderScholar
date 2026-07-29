@@ -1,0 +1,241 @@
+app:
+  host: 127.0.0.1
+  api_port: 8000
+  offline_mode: false
+  allow_bibliographic_apis: false
+  allow_publisher_automation: false
+  log_level: INFO
+  # La file reste illimitée; jusqu'à 20 réponses complètes peuvent être actives.
+  chat_worker_concurrency: 20
+
+paths:
+  data_dir: data
+  pdf_dir: data/pdf
+  extracted_dir: data/extracted
+  qdrant_dir: data/qdrant
+  models_dir: data/models
+  database_path: data/database/science_rag.sqlite3
+  cache_dir: data/cache
+  exports_dir: data/exports
+  # La clé ARGO chiffrée reste sous data/secrets, jamais dans exports ou SharePoint.
+
+# Signature Ed25519 détachée des paquets communs. Activer après avoir distribué
+# un fichier OpenSSH allowed_signers contenant uniquement les clés administrateur approuvées.
+distribution:
+  signature_required: false
+  allowed_signers_path: null
+
+notifications:
+  # Notification Windows générique, sans question, réponse, source ni identifiant.
+  enabled: false
+
+ingestion:
+  target_tokens: 500
+  max_tokens: 750
+  overlap_tokens: 80
+  min_page_text_characters: 25
+  min_text_page_ratio: 0.15
+  metadata_scan_pages: 3
+  local_import_validation_status: validated
+
+embeddings:
+  model_name: intfloat/multilingual-e5-base
+  optional_large_model: BAAI/bge-m3
+  batch_size: 8
+  device: cpu
+  normalize: true
+  max_sequence_length: 512
+  query_prefix: "query: "
+  passage_prefix: "passage: "
+  local_files_only: true
+  trust_remote_code: false
+
+qdrant:
+  collection_name: science_chunks
+  distance: cosine
+  on_disk_vectors: true
+  on_disk_payload: true
+  default_search_limit: 100
+  score_threshold: null
+
+reranker:
+  enabled: false
+  model_name: cross-encoder/mmarco-mMiniLMv2-L12-H384-v1
+  batch_size: 4
+
+# L'option seule ne suffit pas : data/evaluation/deep-research-activation.json
+# doit aussi contenir un bundle CiderQA valide pour le corpus et le profil mémoire actifs.
+deep_research:
+  enabled: false
+  rrf_k: 60
+  rrf_candidate_limit: 80
+  cross_encoder_candidate_limit: 40
+  retained_fragment_limit: 12
+  contextual_summary_enabled: false
+  contextual_summary_top_k: 12
+  contextual_relevance_threshold: 0.5
+  contextual_relevance_observations_sha256: null
+
+argo:
+  base_url: https://chatbot.argo.inrae.fr/api
+  model: chat-gpt-oss-120b
+  api_key_env: LOCAL_SCIENCE_RAG_ARGO_API_KEY
+  temperature: 0.1
+  max_input_characters: 64000
+  max_output_tokens: 8192
+  request_timeout_seconds: 300
+  model_validation_ttl_seconds: 300
+  verify_tls: true
+
+bibliographic:
+  enabled: false
+  sources:
+    - crossref
+    - europe_pmc
+    - openalex
+    - clarivate
+    - elsevier
+  per_source_limit: 10
+  timeout_seconds: 20
+  max_retries: 2
+  request_delay_seconds: 0.35
+  openalex_base_url: https://api.openalex.org
+  openalex_api_key_env: OPENALEX_KEY
+  crossref_base_url: https://api.crossref.org
+  crossref_email: ""
+  europe_pmc_base_url: https://www.ebi.ac.uk/europepmc/webservices/rest
+  elsevier_base_url: https://api.elsevier.com/content/search/scopus
+  elsevier_api_key_env: ELSEVIER_KEY
+  clarivate_base_url: https://api.clarivate.com/apis/wos-starter/v1
+  clarivate_api_key_env: CLARIVATE_API_KEY
+  clarivate_api_mode: starter
+  clarivate_database: WOS
+  clarivate_expanded_option_view: SR
+
+harvest:
+  enabled: false
+  profile: cider_design
+  cadence_hours: 168
+  per_source_limit: 3
+  request_delay_seconds: 1.0
+  max_records_per_run: 120
+  openalex_free_only: true
+  openalex_max_cost_usd_per_run: 0.05
+  vector_collection_name: bibliographic_abstracts
+
+# Résolution DOI-first du texte intégral. Seuls les PDF légalement accessibles
+# sont téléchargés et ingérés ; l'abstract reste le dernier recours.
+full_text:
+  enabled: false
+  sources:
+    - europe_pmc
+    - istex
+    - core
+    - hal
+    - semantic_scholar
+    - openalex
+    - unpaywall
+    - doaj
+    - crossref
+    - elsevier
+  timeout_seconds: 30
+  request_delay_seconds: 0.2
+  max_retries: 2
+  batch_size: 25
+  max_download_bytes: 104857600
+  max_downloads_per_run: 500
+  availability_cache_hours: 168
+  timeout_cooldown_hours: 6
+  default_rate_limit_cooldown_hours: 1
+  # Après trois 403 consécutifs, ne plus solliciter l'hôte pendant 30 jours.
+  protected_host_cooldown_hours: 720
+  # CORE documente une limite de recherche batch d'une requête par 10 secondes.
+  core_request_delay_seconds: 10
+  repository_request_delay_seconds: 1
+  europe_pmc_base_url: https://www.ebi.ac.uk/europepmc/webservices/rest
+  istex_base_url: https://api.istex.fr
+  istex_token_env: ISTEX_API_TOKEN
+  core_base_url: https://api.core.ac.uk/v3
+  core_api_key_env: CORE_API_KEY
+  hal_base_url: https://api.archives-ouvertes.fr/search
+  semantic_scholar_base_url: https://api.semanticscholar.org/graph/v1
+  semantic_scholar_api_key_env: SEMANTIC_SCHOLAR_API_KEY
+  openalex_base_url: https://api.openalex.org
+  openalex_api_key_env: OPENALEX_KEY
+  unpaywall_base_url: https://api.unpaywall.org/v2
+  doaj_base_url: https://doaj.org/api/search/articles
+  crossref_base_url: https://api.crossref.org
+  elsevier_article_base_url: https://api.elsevier.com/content/article/doi
+  elsevier_api_key_env: ELSEVIER_KEY
+
+# Test explicit d'acquisition authentifiee. Laisser desactive tant qu'un profil
+# autorise n'a pas ete valide avec INRAE et l'editeur concerne.
+publisher_access:
+  enabled: false
+  username_env: CIDERSCHOLAR_LDAP_USERNAME
+  password_env: CIDERSCHOLAR_LDAP_PASSWORD_DPAPI
+  browser_channel: msedge
+  headless: true
+  navigation_timeout_seconds: 60
+  request_delay_seconds: 1.0
+  max_records_per_run: 500
+  max_download_bytes: 104857600
+  profiles: []
+
+retrieval:
+  lexical_weight: 0.35
+  vector_weight: 0.45
+  reranker_weight: 0.20
+  default_article_count: 20
+  rrf_k: 60
+  lexical_default_limit: 100
+  lexical_max_query_characters: 2000
+  lexical_max_terms: 24
+  lexical_min_token_length: 2
+  lexical_prefix_matching: true
+  lexical_prefix_min_length: 4
+  lexical_section_weight: 1.5
+  lexical_text_weight: 1.0
+  hybrid_candidate_limit: 200
+  hybrid_default_limit: 100
+  hybrid_max_query_variants: 6
+
+article_ranking:
+  best_fragment_weight: 0.40
+  top_three_mean_weight: 0.25
+  title_relevance_weight: 0.15
+  abstract_relevance_weight: 0.10
+  central_concept_weight: 0.10
+  top_chunks_per_article: 8
+  diversity_enabled: true
+  diversity_mode: balanced
+  diversity_strength: 0.15
+  near_duplicate_threshold: 0.90
+
+evidence:
+  min_passages_per_article: 3
+  passages_per_article: 5
+  max_passages_per_article: 8
+  candidate_chunks_per_article: 100
+  max_passage_characters: 32000
+  near_duplicate_threshold: 0.85
+  max_findings_per_article: 8
+  max_output_tokens: 1024
+  invalid_json_retries: 1
+
+synthesis:
+  max_articles: 20
+  max_themes: 6
+  max_evidence_items: 80
+  max_evidence_per_theme: 24
+  max_excerpt_characters: 800
+  max_statement_input_characters: 600
+  max_statements_per_section: 8
+  final_statements_per_theme_section: 2
+  max_output_tokens: 2048
+  invalid_json_retries: 1
+
+memory:
+  warning_used_gb: 13.0
+  hard_process_limit_gb: 14.0
+  minimum_available_mb: 512

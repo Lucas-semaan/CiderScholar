@@ -1,0 +1,121 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Segoe UI Variable", "Segoe UI", system-ui, -apple-system, sans-serif;
+  --font-mono:
+    "Cascadia Mono", "Cascadia Code", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
+    monospace;
+
+  /* Palette CiderScope / IFPC */
+  --color-forest-50: #f4f8ed;
+  --color-forest-100: #e8f0da;
+  --color-forest-200: #d1e1b7;
+  --color-forest-300: #afca87;
+  --color-forest-400: #89ae4c;
+  --color-forest-500: #739e27;
+  --color-forest-600: #628d17;
+  --color-forest-700: #537813;
+  --color-forest-800: #456410;
+  --color-forest-900: #38520d;
+  --color-forest-950: #243608;
+  --color-pear-50: #fcfdec;
+  --color-pear-100: #f8fad2;
+  --color-pear-200: #f1f5a6;
+  --color-pear-300: #eaf066;
+  --color-pear-400: #dce346;
+  --color-pear-500: #c4cb2f;
+  --color-pear-600: #9ca223;
+  --color-cider-50: #fdf5e6;
+  --color-cider-100: #fbe7bf;
+  --color-cider-200: #f7ce87;
+  --color-cider-300: #f3b149;
+  --color-cider-400: #f09a1e;
+  --color-cider-500: #ee8c00;
+  --color-cider-600: #d47f00;
+  --color-ink-950: #2a2a2a;
+
+  /* Neutres CiderScope */
+  --color-stone-50: #f6f8f9;
+  --color-slate-50: #f6f8f9;
+  --color-slate-100: #eef1f3;
+  --color-slate-200: #e3e7ea;
+  --color-slate-300: #cfd5da;
+  --color-slate-400: #9ca3af;
+  --color-slate-500: #6b7280;
+  --color-slate-600: #565d67;
+  --color-slate-700: #41464d;
+  --color-slate-800: #2a2a2a;
+  --color-slate-900: #1a1a1a;
+  --color-sky-50: #f2f7fc;
+  --color-sky-100: #e3eff9;
+  --color-sky-200: #c5dff2;
+  --color-sky-600: #67a5db;
+  --color-sky-700: #4b86b8;
+  --color-amber-50: #fdf5e6;
+  --color-amber-200: #f7ce87;
+  --color-amber-700: #d47f00;
+  --color-amber-800: #a96300;
+  --color-red-50: #fbecec;
+  --color-red-200: #edbaba;
+  --color-red-600: #d13a3a;
+  --color-red-700: #c62828;
+  --color-red-800: #a51f1f;
+
+  --radius-xl: 10px;
+  --radius-2xl: 14px;
+  --radius-3xl: 18px;
+  --shadow-soft: 0 1px 3px rgb(0 0 0 / 0.04), 0 1px 2px rgb(0 0 0 / 0.03);
+  --shadow-panel: 0 4px 6px -1px rgb(0 0 0 / 0.05), 0 2px 4px -2px rgb(0 0 0 / 0.04);
+}
+
+@layer base {
+  * {
+    @apply border-slate-200;
+    box-sizing: border-box;
+  }
+
+  html {
+    @apply bg-stone-50 antialiased;
+    scrollbar-gutter: stable;
+  }
+
+  body {
+    @apply m-0 min-h-screen max-w-[100vw] overflow-x-clip bg-stone-50 font-sans text-ink-950;
+    font-size: 14px;
+    line-height: 1.55;
+    text-rendering: optimizeLegibility;
+  }
+
+  h1,
+  h2,
+  h3,
+  h4,
+  h5,
+  h6 {
+    @apply font-bold tracking-[-0.01em];
+  }
+
+  img,
+  svg,
+  canvas,
+  video {
+    max-width: 100%;
+  }
+
+  button,
+  a,
+  input,
+  select,
+  textarea {
+    @apply outline-none;
+  }
+
+  button,
+  [role="button"] {
+    touch-action: manipulation;
+  }
+
+  ::selection {
+    @apply bg-pear-300/50 text-slate-900;
+  }
+}

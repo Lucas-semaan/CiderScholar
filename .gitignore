@@ -1,0 +1,6 @@
+# Private research library and recovery snapshots
+/Docs tests/
+/merge-backups/
+
+# Local data that predates the canonical project data directory
+/local-science-rag/data.pre-canonical-merge-*/
