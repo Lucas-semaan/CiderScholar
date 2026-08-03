@@ -33,12 +33,13 @@ Le contrat rédactionnel est dans
 [`ACCESS_MODEL.md`](ACCESS_MODEL.md). Le parcours de clé ARGO est dans
 [`ARGO_KEY_SETUP.md`](ARGO_KEY_SETUP.md).
 
-## État actuel et responsabilités — 2026-07-27
+## État actuel et responsabilités — 2026-08-03
 
-Le dépôt contient 438 tâches : 394 sont terminées, aucune n’est en cours, 16 sont bloquées et 28
-restent en attente d’actions réelles. Les développements autonomes identifiés sont réalisés ; les
-blocages restants correspondent à des observations CiderQA/expert, un exécuteur système isolé, des
-postes physiques, SharePoint, ARGO réel ou des décisions conditionnelles d’architecture.
+Le dépôt contient 452 tâches : 400 sont terminées, aucune n’est en cours, 19 sont bloquées ou
+partielles et 33 restent en attente d’actions réelles. Les développements autonomes identifiés sont
+réalisés ; les blocages restants correspondent à des observations CiderQA/expert, un exécuteur
+système isolé, des postes physiques, SharePoint, ARGO réel ou des décisions conditionnelles
+d’architecture.
 
 Conformément à la décision du 2026-07-27 de terminer tout le travail autonome, le code en aval est
 désormais réalisé derrière le drapeau d’activation inactif, sans attendre les données humaines. Une
@@ -47,11 +48,12 @@ observable.
 
 Validation consolidée du même état :
 
-- Ruff format et lint : 343 fichiers conformes ;
-- Pytest : 576 tests réussis ;
-- frontend : format, ESLint, TypeScript, 18 fichiers/53 tests Vitest et build Vite réussis ;
-- installeur Windows 0.2.0 : compilation et smoke test réussis, manifeste de 12 998 fichiers,
-  SHA-256 `d0ce39e050feb13c77c9ed9a9c76275aa8cd56c4e7430d4c405ba03a0a145989`.
+- Ruff format et lint : 365 fichiers conformes ;
+- Pytest : 663 tests réussis ;
+- frontend : format, ESLint, TypeScript, 19 fichiers/61 tests Vitest et build Vite réussis ;
+- installeur Windows 0.2.3 : compilation, réinstallation locale et smoke test réussis, manifeste de
+  13 011 fichiers, SHA-256
+  `3f1a3519352d0dc65f8534572c54f1b3597365fb62223b4de60ac3b315bea58a`.
 
 La colonne **Vous / équipe** regroupe ce que le code ne peut pas auto-attester : secrets personnels,
 SharePoint réel, profils Windows distincts, matériel physique, experts et données scientifiques
@@ -1730,6 +1732,85 @@ mode Deep Research sur CiderQA et ne rend jamais l’exécution expérimentale a
   le seuil mémoire une fois la réindexation locale terminée.
   Dépendances : `DRS-025`. Fini lorsque : reprise, annulation, cache, corpus privé et absence de fuite
   sont validés sur les deux profils.
+
+## M11 bis — lecture d’image locale puis accélération GPU distante
+
+Architecture cible et conditions de déclenchement :
+[`VISUAL_SERVER_ARCHITECTURE.md`](VISUAL_SERVER_ARCHITECTURE.md).
+
+- [x] `VIS-001` Découpler les légendes contextuelles du client ARGO.
+  Réalisation : `ContextCaptionRequest` et `ContextCaptionGateway` forment une frontière stricte et
+  versionnée ; `ArgoContextCaptionGateway` adapte le fournisseur actuel sans modifier le résultat,
+  le quota ou le caractère non citable de la légende.
+  Dépendances : `DRS-023`. Fini lorsque : le domaine ne dépend plus directement de `chat`.
+- [x] `VIS-002` Définir l’identité portable d’un artefact visuel et le contrat d’inférence futur.
+  Réalisation : `VisualArtifactDescriptor`, `ImageCaptionRequest`, `ImageCaptionResponse` et
+  `ImageCaptionGateway` couvrent le légendage non citable ; `ScientificFigureAnalysisRequest`,
+  `ScientificFigureAnalysisResponse` et `ScientificFigureAnalysisGateway` couvrent l’observation
+  ciblée par une question. Tous utilisent UUID, SHA-256, page, boîte, dimensions et versions sans
+  chemin local ; la clé d’idempotence couvre image, question, contexte, prompt et profil de modèle.
+  Dépendances : `VIS-001`. Fini lorsque : le même contrat peut être implémenté localement ou par un
+  service GPU sans exposer SQLite, Qdrant ou un chemin Windows.
+- [!] `VIS-003` Mesurer le coût actuel et fixer le budget de lecture d’image.
+  Avancement partiel : deux analyses réelles d’un graphique synthétique avec
+  `qwen3-vl:8b-instruct` ont produit un JSON conforme en 170 s et 169 s sur le poste CPU 16 Go ;
+  l’interface annonce donc +12 à 18 min pour cinq figures séquentielles. Il reste à mesurer rendu,
+  mémoire, qualité et débit sur le jeu CiderQA réel gelé de figures et tableaux.
+  Dépendances : `VIS-002`, `EVL-005` à `EVL-010`. Fini lorsque : les mesures réelles remplacent le
+  benchmark synthétique et fixent le budget d’activation.
+- [x] `VIS-004` Rendre des crops immuables et bornés depuis les pages et boîtes persistées.
+  Réalisation : le renderer local produit uniquement en mémoire un PNG borné, calcule son SHA-256 et
+  construit `VisualArtifactDescriptor` avec hash PDF, page, boîte, taille et dimensions ; aucun
+  chemin ni fichier temporaire ne franchit la frontière fournisseur.
+  Dépendances : `VIS-002`. Fini lorsque : les pixels exacts sont adressés par contenu et supprimés
+  avec la fin de la requête.
+- [x] `VIS-005` Persister la provenance des analyses visuelles séparément des sources.
+  Réalisation : la migration SQLite 26 conserve hash PDF/image/contrat, modèle et révision, prompt,
+  scores, observation, limites, statut et raison de validation sans stocker le crop.
+  Dépendances : `VIS-004`. Fini lorsque : toute observation peut être reliée au rendu et au contrat
+  exacts qui l’ont produite.
+- [x] `VIS-006` Adapter l’analyse locale Ollama derrière une frontière remplaçable.
+  Réalisation : `OllamaScientificFigureAnalysisGateway` reçoit seulement
+  `ScientificFigureAnalysisRequest` et `image: bytes`; le service applicatif conserve PDF, rendu,
+  seuils d’admission et SQLite. La passerelle est injectable et fermée explicitement.
+  Dépendances : `VIS-004`, `VIS-005`. Fini lorsque : une future implémentation GPU peut remplacer
+  Ollama sans modifier la sélection des figures ni la persistance scientifique.
+- [!] `VIS-007` Isoler la capacité visuelle dans l’exécution durable.
+  Avancement partiel : `analyze_figures` est versionné dans les payloads chat/deep research, traverse
+  API et types TypeScript et publie une progression dans le job existant. L’inférence visuelle n’a
+  pas encore son checkpoint ni sa file logique orientée GPU.
+  Dépendances : `VIS-005`, `VIS-006`. Fini lorsque : reprise par figure, annulation entre figures,
+  routage par capacité, concurrence GPU bornée et tests de perte de lease sont validés ensemble.
+- [!] `VIS-008` Valider scientifiquement la lecture des figures avant toute utilisation comme preuve.
+  Avancement partiel : l’admission automatique exige `supports_answer=true`, pertinence ≥ 0,80 et
+  lisibilité ≥ 0,70 ; SQLite conserve `validation_reason=automatic_thresholds_met` et les légendes
+  synthétiques restent non citables. Cette validation automatique n’est pas une validation
+  comparative ou humaine.
+  Action requise au 2026-08-03 : constituer et geler un sous-ensemble CiderQA réel de figures et
+  tableaux, faire annoter lisibilité, pertinence et interprétation par des experts en aveugle, puis
+  comparer le pipeline visuel au retrieval textuel seul. Le rapport doit conserver le hash du jeu,
+  les métriques par type de figure, les désaccords et la décision de promotion. Tant que ce rapport
+  n’existe pas, aucune observation visuelle n’est présentée comme preuve scientifiquement validée.
+  Dépendances : `VIS-003`, `VIS-005`. Fini lorsque : les métriques CiderQA et la revue experte
+  franchissent le seuil adopté sans confondre observation visuelle et texte source.
+- [ ] `VIS-009` Décider la machine GPU, le modèle, sa licence et la politique de confidentialité.
+  Dépendances : `VIS-003`, `VIS-008`. Fini lorsque : GPU/VRAM, modèle, résidence des données,
+  authentification, rétention, sauvegarde et responsabilité d’exploitation sont approuvés.
+- [ ] `VIS-010` Implémenter le service GPU distant et son adaptateur HTTP.
+  Dépendances : `VIS-007`, `VIS-009`. Ne pas commencer avant la décision serveur. Fini lorsque :
+  multipart borné, TLS, authentification de service, idempotence, healthcheck, délais, reprises,
+  contrôle du hash de réponse et journaux sans contenu sont testés.
+- [ ] `VIS-011` Appliquer une politique distincte aux corpus commun et privé.
+  Dépendances : `VIS-009`, `VIS-010`. Fini lorsque : le commun peut être activé par configuration,
+  le privé reste distant désactivé par défaut, le consentement est explicite et la suppression des
+  artefacts est vérifiable.
+- [ ] `VIS-012` Comparer local et distant de bout en bout avant activation.
+  Dépendances : `VIS-010`, `VIS-011`. Fini lorsque : rendu, transfert, file, inférence, persistance,
+  qualité, pannes réseau et coût sont comparés ; le repli local et le circuit breaker sont validés.
+- [ ] `VIS-013` Préparer séparément une éventuelle migration complète de l’application.
+  Dépendances : `VIS-012`. Fini lorsque : reverse proxy, TLS, authentification, sauvegardes, disque
+  local SQLite et service de persistance à écrivain unique sont conçus ; tout remplacement de SQLite
+  ou ajout d’une file externe fait l’objet d’un ADR et d’une modification explicite des règles.
 
 ## M12 — hypothèses et données expérimentales avec humain dans la boucle
 

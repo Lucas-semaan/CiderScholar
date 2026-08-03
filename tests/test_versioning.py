@@ -29,4 +29,4 @@ def test_release_version_is_consistent_across_runtime_and_build_metadata(setting
         lockfile["version"],
         lockfile["packages"][""]["version"],
     }
-    assert versions == {"0.2.2"}
+    assert versions == {"0.2.3"}

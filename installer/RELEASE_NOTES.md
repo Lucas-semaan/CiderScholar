@@ -1,3 +1,14 @@
+# CiderScholar 0.2.3
+
+- La sélection des preuves couvre séparément les axes scientifiques, filtre leur pertinence
+  sémantique avec ARGO et autorise une unique recherche complémentaire ciblée.
+- Le chatbot peut analyser explicitement jusqu'à cinq figures locales après le retrieval textuel,
+  avec un modèle Ollama remplaçable et des seuils stricts de pertinence et de lisibilité.
+- Les observations visuelles admises conservent leur provenance SQLite sans stocker les crops et
+  restent distinctes des citations textuelles.
+- L'option de lecture des figures traverse les travaux durables, Deep Research et l'interface, sans
+  activer de service GPU distant ni envoyer de pixels à ARGO.
+
 # CiderScholar 0.2.2
 
 - La recherche locale utilise en priorité les passages du texte intégral avec leurs pages.
