@@ -87,6 +87,20 @@ argo:
   model_validation_ttl_seconds: 300
   verify_tls: true
 
+figure_analysis:
+  # Analyse locale optionnelle, déclenchée depuis le bouton + du chatbot.
+  enabled: true
+  base_url: http://127.0.0.1:11434
+  model: qwen3-vl:8b-instruct
+  max_figures: 5
+  relevance_threshold: 0.80
+  readability_threshold: 0.70
+  render_scale: 2.0
+  request_timeout_seconds: 240
+  # Estimation affichée avant envoi pour le profil CPU 16 Go de référence.
+  estimated_min_seconds: 720
+  estimated_max_seconds: 1080
+
 bibliographic:
   enabled: false
   sources:

@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
-from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
@@ -15,16 +13,19 @@ from app.deep_research.admission import (
 )
 from app.deep_research.claims import AtomicClaim, AtomicClaimCheckpoint, AtomicClaimEvidence
 from app.deep_research.rendering import SQLiteDeepResearchRenderer
+from app.ingestion.visual_contracts import ContextCaptionRequest, SyntheticCaptionResponse
 from app.ingestion.visual_enrichment import SyntheticCaptionEnricher
 from app.jobs.contracts import DeepResearchPayload
 from app.retrieval.lexical_search import LexicalSearchService
 
 
-class _Client:
-    def chat(self, _messages, **_kwargs):
-        return SimpleNamespace(
-            content=json.dumps({"caption": "Graphique des variations de l’acide malique."})
-        )
+class _Gateway:
+    def __init__(self) -> None:
+        self.requests: list[ContextCaptionRequest] = []
+
+    def caption(self, request: ContextCaptionRequest) -> SyntheticCaptionResponse:
+        self.requests.append(request)
+        return SyntheticCaptionResponse(caption="Graphique des variations de l’acide malique.")
 
 
 def _seed(settings) -> tuple[Database, int, str]:
@@ -79,12 +80,17 @@ def _seed(settings) -> tuple[Database, int, str]:
 def test_synthetic_caption_improves_search_but_returns_only_source_chunk(settings) -> None:
     database, _chunk_id, source_text = _seed(settings)
     original = database.document_elements("visual-article")[0]["original_caption"]
+    gateway = _Gateway()
 
-    count = SyntheticCaptionEnricher(database, _Client()).enrich_article("visual-article")
+    count = SyntheticCaptionEnricher(database, gateway).enrich_article("visual-article")
     stored = database.document_elements("visual-article")[0]
     response = LexicalSearchService(settings, database).search("acide malique")
 
     assert count == 1
+    assert len(gateway.requests) == 1
+    assert gateway.requests[0].element_id == "visual-article:figure-p0004-001"
+    assert gateway.requests[0].bbox == (10.0, 20.0, 300.0, 200.0)
+    assert gateway.requests[0].context.original_caption == original
     assert stored["original_caption"] == original
     assert stored["synthetic_caption"] == "Graphique des variations de l’acide malique."
     assert len(response.results) == 1

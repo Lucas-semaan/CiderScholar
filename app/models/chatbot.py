@@ -16,10 +16,18 @@ class ChatEvidencePassage(BaseModel):
 
     evidence_id: str = Field(min_length=1, max_length=300)
     text: str = Field(min_length=1, max_length=12000)
+    evidence_kind: Literal["text", "figure"] = "text"
     chunk_id: int | None = Field(default=None, gt=0)
     section: str | None = Field(default=None, max_length=200)
     page_start: int | None = Field(default=None, ge=1)
     page_end: int | None = Field(default=None, ge=1)
+    figure_analysis_id: str | None = Field(
+        default=None,
+        pattern=r"^figure-analysis-[0-9a-f]{24}$",
+    )
+    figure_label: str | None = Field(default=None, max_length=500)
+    visual_model: str | None = Field(default=None, max_length=200)
+    source_image_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
 
     @model_validator(mode="after")
     def validate_location(self) -> ChatEvidencePassage:
@@ -30,6 +38,17 @@ class ChatEvidencePassage(BaseModel):
             raise ValueError("evidence page_end cannot precede page_start")
         if self.chunk_id is not None and self.page_start is None:
             raise ValueError("full-text chunk evidence requires page coordinates")
+        figure_fields = (
+            self.figure_analysis_id,
+            self.figure_label,
+            self.visual_model,
+            self.source_image_sha256,
+        )
+        if self.evidence_kind == "figure":
+            if self.page_start != self.page_end or any(value is None for value in figure_fields):
+                raise ValueError("figure evidence requires complete single-page provenance")
+        elif any(value is not None for value in figure_fields):
+            raise ValueError("text evidence cannot carry figure provenance")
         return self
 
 
@@ -76,6 +95,7 @@ class ChatbotSource(BaseModel):
     article_id: str | None = None
     chunk_ids: list[int] = Field(default_factory=list, max_length=8)
     page_ranges: list[str] = Field(default_factory=list, max_length=8)
+    figure_refs: list[str] = Field(default_factory=list, max_length=8)
     title: str
     authors: list[str] = Field(default_factory=list)
     doi: str | None = None
@@ -117,3 +137,7 @@ class ChatbotResult(BaseModel):
     interaction_mode: Literal["research", "conversation"] = "research"
     reused_previous_sources: bool = False
     facet_drafts: list[ChatbotFacetDraft] = Field(default_factory=list, max_length=12)
+    figure_analysis_requested: bool = False
+    figure_analysis_count: int = Field(default=0, ge=0, le=10)
+    figure_analysis_duration_seconds: float = Field(default=0.0, ge=0.0)
+    figure_analysis_model: str | None = Field(default=None, max_length=200)

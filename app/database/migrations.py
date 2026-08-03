@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 
-CURRENT_SCHEMA_VERSION = 25
+CURRENT_SCHEMA_VERSION = 26
 
 MIGRATIONS: dict[int, str] = {
     2: """
@@ -825,6 +825,44 @@ MIGRATIONS: dict[int, str] = {
         );
     """,
     25: """-- Rebuilt by add_background_job_contracts.""",
+    26: """
+        CREATE TABLE IF NOT EXISTS figure_analysis_runs (
+            id TEXT PRIMARY KEY,
+            element_id TEXT NOT NULL REFERENCES document_elements(id) ON DELETE CASCADE,
+            source_document_sha256 TEXT NOT NULL CHECK(length(source_document_sha256) = 64),
+            question_sha256 TEXT NOT NULL CHECK(length(question_sha256) = 64),
+            image_sha256 TEXT NOT NULL CHECK(length(image_sha256) = 64),
+            analysis_contract_sha256 TEXT NOT NULL CHECK(length(analysis_contract_sha256) = 64),
+            model_name TEXT NOT NULL CHECK(length(trim(model_name)) > 0),
+            model_revision TEXT NOT NULL CHECK(length(trim(model_revision)) > 0),
+            prompt_version TEXT NOT NULL CHECK(length(trim(prompt_version)) > 0),
+            figure_type TEXT NOT NULL CHECK(
+                figure_type IN ('graph', 'diagram', 'photo', 'map', 'microscopy', 'other')
+            ),
+            relevance_score REAL NOT NULL CHECK(relevance_score BETWEEN 0.0 AND 1.0),
+            readability_score REAL NOT NULL CHECK(readability_score BETWEEN 0.0 AND 1.0),
+            supports_answer INTEGER NOT NULL CHECK(supports_answer IN (0, 1)),
+            status TEXT NOT NULL CHECK(status IN ('candidate', 'validated', 'rejected')),
+            validation_reason TEXT NOT NULL CHECK(length(trim(validation_reason)) > 0),
+            observation_text TEXT NOT NULL CHECK(length(trim(observation_text)) > 0),
+            visible_variables_json TEXT NOT NULL CHECK(json_valid(visible_variables_json)),
+            visible_units_json TEXT NOT NULL CHECK(json_valid(visible_units_json)),
+            trends_json TEXT NOT NULL CHECK(json_valid(trends_json)),
+            limitations_json TEXT NOT NULL CHECK(json_valid(limitations_json)),
+            duration_seconds REAL NOT NULL CHECK(duration_seconds >= 0.0),
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(
+                element_id, analysis_contract_sha256, image_sha256,
+                model_name, model_revision
+            )
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_figure_analysis_element
+            ON figure_analysis_runs(element_id, created_at DESC);
+
+        CREATE INDEX IF NOT EXISTS idx_figure_analysis_admitted
+            ON figure_analysis_runs(status, relevance_score DESC, readability_score DESC);
+    """,
 }
 
 

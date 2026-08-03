@@ -312,6 +312,54 @@ class ArgoConfig(BaseModel):
         return cleaned
 
 
+class FigureAnalysisConfig(BaseModel):
+    """Bounded local vision analysis used only after textual retrieval."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = True
+    base_url: str = "http://127.0.0.1:11434"
+    model: str = "qwen3-vl:8b-instruct"
+    max_figures: int = Field(default=5, ge=1, le=10)
+    relevance_threshold: float = Field(default=0.80, ge=0.5, le=1.0)
+    readability_threshold: float = Field(default=0.70, ge=0.5, le=1.0)
+    render_scale: float = Field(default=2.0, ge=1.0, le=4.0)
+    request_timeout_seconds: int = Field(default=240, ge=30, le=900)
+    estimated_min_seconds: int = Field(default=720, ge=30, le=3600)
+    estimated_max_seconds: int = Field(default=1080, ge=30, le=3600)
+
+    @field_validator("base_url")
+    @classmethod
+    def enforce_loopback_ollama(cls, value: str) -> str:
+        parsed = urlsplit(value)
+        if (
+            parsed.scheme != "http"
+            or parsed.hostname not in {"127.0.0.1", "localhost"}
+            or parsed.port not in {None, 11434}
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.query
+            or parsed.fragment
+            or parsed.path.rstrip("/")
+        ):
+            raise ValueError("figure_analysis.base_url must be the local Ollama endpoint")
+        return "http://127.0.0.1:11434"
+
+    @field_validator("model")
+    @classmethod
+    def validate_local_model_name(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned or any(character.isspace() for character in cleaned):
+            raise ValueError("figure analysis model name is invalid")
+        return cleaned
+
+    @model_validator(mode="after")
+    def validate_time_estimate(self) -> FigureAnalysisConfig:
+        if self.estimated_max_seconds < self.estimated_min_seconds:
+            raise ValueError("figure analysis maximum estimate must follow the minimum")
+        return self
+
+
 BibliographicSource = Literal["crossref", "europe_pmc", "openalex", "clarivate", "elsevier"]
 
 
@@ -722,6 +770,7 @@ class Settings(BaseModel):
     retrieval: RetrievalConfig = Field(default_factory=RetrievalConfig)
     article_ranking: ArticleRankingConfig = Field(default_factory=ArticleRankingConfig)
     argo: ArgoConfig = Field(default_factory=ArgoConfig)
+    figure_analysis: FigureAnalysisConfig = Field(default_factory=FigureAnalysisConfig)
     bibliographic: BibliographicConfig = Field(default_factory=BibliographicConfig)
     harvest: HarvestConfig = Field(default_factory=HarvestConfig)
     full_text: FullTextConfig = Field(default_factory=FullTextConfig)

@@ -5,15 +5,14 @@ from __future__ import annotations
 import json
 from typing import Any, Protocol
 
-from pydantic import BaseModel, ConfigDict, Field
-
 from app.database.sqlite import Database
-
-
-class SyntheticCaptionResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    caption: str = Field(min_length=1, max_length=4_000)
+from app.ingestion.visual_contracts import (
+    ContextCaptionGateway,
+    ContextCaptionRequest,
+    SyntheticCaptionResponse,
+    VisualCaptionContext,
+    VisualContextCell,
+)
 
 
 class VisualCaptionClient(Protocol):
@@ -41,18 +40,43 @@ _SYSTEM_PROMPT = (
 )
 
 
+class ArgoContextCaptionGateway:
+    """Adapt the current text-only ARGO client to the provider-neutral boundary."""
+
+    def __init__(self, client: VisualCaptionClient) -> None:
+        self.client = client
+
+    def caption(self, request: ContextCaptionRequest) -> SyntheticCaptionResponse:
+        response = self.client.chat(
+            [
+                {"role": "system", "content": _SYSTEM_PROMPT},
+                {
+                    "role": "user",
+                    "content": json.dumps(
+                        request.context.model_dump(mode="json"),
+                        ensure_ascii=False,
+                    ),
+                },
+            ],
+            json_schema=_CAPTION_SCHEMA,
+            temperature=0.0,
+            max_output_tokens=512,
+        )
+        return SyntheticCaptionResponse.model_validate_json(response.content)
+
+
 class SyntheticCaptionEnricher:
     def __init__(
         self,
         database: Database,
-        client: VisualCaptionClient,
+        gateway: ContextCaptionGateway,
         *,
         max_elements: int = 20,
     ) -> None:
         if not 1 <= max_elements <= 100:
             raise ValueError("visual caption enrichment limit must be between 1 and 100")
         self.database = database
-        self.client = client
+        self.gateway = gateway
         self.max_elements = max_elements
 
     def enrich_article(self, article_id: str) -> int:
@@ -61,37 +85,29 @@ class SyntheticCaptionEnricher:
         for element in elements:
             if element["synthetic_caption"] is not None:
                 continue
-            response = self.client.chat(
-                [
-                    {"role": "system", "content": _SYSTEM_PROMPT},
-                    {
-                        "role": "user",
-                        "content": json.dumps(
-                            {
-                                "kind": element["kind"],
-                                "original_caption": element["original_caption"],
-                                "cells": [
-                                    {
-                                        "row": cell["row_index"],
-                                        "column": cell["column_index"],
-                                        "text": str(cell["text"])[:500],
-                                    }
-                                    for cell in element["cells"][:100]
-                                ],
-                                "related_source_excerpts": [
-                                    str(relation["source_excerpt"])[:1000]
-                                    for relation in element["text_relations"][:4]
-                                ],
-                            },
-                            ensure_ascii=False,
-                        ),
-                    },
-                ],
-                json_schema=_CAPTION_SCHEMA,
-                temperature=0.0,
-                max_output_tokens=512,
+            request = ContextCaptionRequest(
+                article_id=article_id,
+                element_id=str(element["id"]),
+                page_number=int(element["page_number"]),
+                bbox=tuple(float(value) for value in element["bbox"]),
+                context=VisualCaptionContext(
+                    kind=element["kind"],
+                    original_caption=element["original_caption"],
+                    cells=[
+                        VisualContextCell(
+                            row=cell["row_index"],
+                            column=cell["column_index"],
+                            text=str(cell["text"])[:500],
+                        )
+                        for cell in element["cells"][:100]
+                    ],
+                    related_source_excerpts=[
+                        str(relation["source_excerpt"])[:1000]
+                        for relation in element["text_relations"][:4]
+                    ],
+                ),
             )
-            generated = SyntheticCaptionResponse.model_validate_json(response.content)
+            generated = self.gateway.caption(request)
             self.database.set_synthetic_document_caption(
                 str(element["id"]),
                 generated.caption,

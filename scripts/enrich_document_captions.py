@@ -8,7 +8,10 @@ from pathlib import Path
 from app.config import load_settings
 from app.corpora import CorpusScope, corpus_paths, settings_for_corpus
 from app.database.sqlite import Database
-from app.ingestion.visual_enrichment import SyntheticCaptionEnricher
+from app.ingestion.visual_enrichment import (
+    ArgoContextCaptionGateway,
+    SyntheticCaptionEnricher,
+)
 from app.llm.argo_client import ArgoClient
 
 
@@ -31,7 +34,8 @@ def main(argv: list[str] | None = None) -> int:
     database = Database(corpus_paths(settings, scope).database_path)
     client = ArgoClient(scoped)
     try:
-        count = SyntheticCaptionEnricher(database, client).enrich_article(arguments.article_id)
+        gateway = ArgoContextCaptionGateway(client)
+        count = SyntheticCaptionEnricher(database, gateway).enrich_article(arguments.article_id)
     finally:
         client.close()
     print(f"article_id={arguments.article_id}")

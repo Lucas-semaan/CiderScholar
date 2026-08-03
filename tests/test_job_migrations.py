@@ -81,7 +81,7 @@ def _insert_job(
 
 
 def test_jobs_use_a_new_append_only_migration(settings) -> None:
-    assert CURRENT_SCHEMA_VERSION == 25
+    assert CURRENT_SCHEMA_VERSION == 26
     assert 13 in MIGRATIONS
     assert 14 in MIGRATIONS
     assert set(range(2, CURRENT_SCHEMA_VERSION + 1)) == set(MIGRATIONS)

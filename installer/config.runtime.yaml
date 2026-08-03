@@ -47,6 +47,18 @@ deep_research:
   contextual_relevance_threshold: 0.5
   contextual_relevance_observations_sha256: null
 
+figure_analysis:
+  enabled: true
+  base_url: http://127.0.0.1:11434
+  model: qwen3-vl:8b-instruct
+  max_figures: 5
+  relevance_threshold: 0.80
+  readability_threshold: 0.70
+  render_scale: 2.0
+  request_timeout_seconds: 240
+  estimated_min_seconds: 720
+  estimated_max_seconds: 1080
+
 memory:
   profile: 8gb
   warning_used_gb: 6.0

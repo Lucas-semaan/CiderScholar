@@ -668,6 +668,171 @@ class Database:
         if cursor.rowcount != 1:
             raise ValueError("document element does not exist")
 
+    def figure_analysis(
+        self,
+        *,
+        element_id: str,
+        analysis_contract_sha256: str,
+        image_sha256: str,
+        model_name: str,
+        model_revision: str,
+    ) -> dict[str, Any] | None:
+        """Load one content-addressed local visual analysis."""
+
+        with closing(self.connect()) as connection:
+            row = connection.execute(
+                """
+                SELECT *
+                FROM figure_analysis_runs
+                WHERE element_id = ?
+                  AND analysis_contract_sha256 = ?
+                  AND image_sha256 = ?
+                  AND model_name = ?
+                  AND model_revision = ?
+                """,
+                (
+                    element_id,
+                    analysis_contract_sha256,
+                    image_sha256,
+                    model_name,
+                    model_revision,
+                ),
+            ).fetchone()
+        return self._figure_analysis_payload(row) if row is not None else None
+
+    def save_figure_analysis(self, analysis: dict[str, Any]) -> dict[str, Any]:
+        """Persist structured visual evidence without storing the rendered image."""
+
+        with closing(self.connect()) as connection, connection:
+            connection.execute(
+                """
+                INSERT INTO figure_analysis_runs (
+                    id, element_id, source_document_sha256, question_sha256,
+                    image_sha256, analysis_contract_sha256, model_name,
+                    model_revision, prompt_version,
+                    figure_type, relevance_score, readability_score,
+                    supports_answer, status, validation_reason, observation_text,
+                    visible_variables_json, visible_units_json, trends_json,
+                    limitations_json, duration_seconds
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(
+                    element_id, analysis_contract_sha256, image_sha256,
+                    model_name, model_revision
+                )
+                DO UPDATE SET
+                    figure_type = excluded.figure_type,
+                    relevance_score = excluded.relevance_score,
+                    readability_score = excluded.readability_score,
+                    supports_answer = excluded.supports_answer,
+                    status = excluded.status,
+                    validation_reason = excluded.validation_reason,
+                    observation_text = excluded.observation_text,
+                    visible_variables_json = excluded.visible_variables_json,
+                    visible_units_json = excluded.visible_units_json,
+                    trends_json = excluded.trends_json,
+                    limitations_json = excluded.limitations_json,
+                    duration_seconds = excluded.duration_seconds,
+                    created_at = CURRENT_TIMESTAMP
+                """,
+                (
+                    analysis["id"],
+                    analysis["element_id"],
+                    analysis["source_document_sha256"],
+                    analysis["question_sha256"],
+                    analysis["image_sha256"],
+                    analysis["analysis_contract_sha256"],
+                    analysis["model_name"],
+                    analysis["model_revision"],
+                    analysis["prompt_version"],
+                    analysis["figure_type"],
+                    analysis["relevance_score"],
+                    analysis["readability_score"],
+                    int(bool(analysis["supports_answer"])),
+                    analysis["status"],
+                    analysis["validation_reason"],
+                    analysis["observation_text"],
+                    json.dumps(analysis.get("visible_variables", []), ensure_ascii=False),
+                    json.dumps(analysis.get("visible_units", []), ensure_ascii=False),
+                    json.dumps(analysis.get("trends", []), ensure_ascii=False),
+                    json.dumps(analysis.get("limitations", []), ensure_ascii=False),
+                    analysis["duration_seconds"],
+                ),
+            )
+            row = connection.execute(
+                """
+                SELECT *
+                FROM figure_analysis_runs
+                WHERE element_id = ?
+                  AND analysis_contract_sha256 = ?
+                  AND image_sha256 = ?
+                  AND model_name = ?
+                  AND model_revision = ?
+                """,
+                (
+                    analysis["element_id"],
+                    analysis["analysis_contract_sha256"],
+                    analysis["image_sha256"],
+                    analysis["model_name"],
+                    analysis["model_revision"],
+                ),
+            ).fetchone()
+        if row is None:
+            raise RuntimeError("figure analysis was not persisted")
+        return self._figure_analysis_payload(row)
+
+    def figure_analysis_citation_source(self, analysis_id: str) -> sqlite3.Row | None:
+        """Return the authoritative article and admitted visual observation."""
+
+        with closing(self.connect()) as connection:
+            return connection.execute(
+                """
+                SELECT
+                    f.id AS figure_analysis_id,
+                    f.observation_text,
+                    f.image_sha256,
+                    f.model_name,
+                    f.model_revision,
+                    f.prompt_version,
+                    f.analysis_contract_sha256,
+                    f.validation_reason,
+                    f.relevance_score,
+                    f.readability_score,
+                    d.id AS element_id,
+                    d.local_element_id,
+                    d.page_number,
+                    d.original_caption,
+                    a.id AS article_id,
+                    a.sha256 AS article_sha256,
+                    a.title,
+                    a.authors,
+                    a.journal,
+                    a.publication_year,
+                    a.doi
+                FROM figure_analysis_runs AS f
+                JOIN document_elements AS d ON d.id = f.element_id
+                JOIN articles AS a ON a.id = d.article_id
+                WHERE f.id = ? AND f.status = 'validated'
+                """,
+                (analysis_id,),
+            ).fetchone()
+
+    @staticmethod
+    def _figure_analysis_payload(row: sqlite3.Row) -> dict[str, Any]:
+        payload = dict(row)
+        for stored, public in (
+            ("visible_variables_json", "visible_variables"),
+            ("visible_units_json", "visible_units"),
+            ("trends_json", "trends"),
+            ("limitations_json", "limitations"),
+        ):
+            value = json.loads(str(payload.pop(stored)))
+            if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+                raise RuntimeError("stored figure analysis list is invalid")
+            payload[public] = value
+        payload["supports_answer"] = bool(payload["supports_answer"])
+        payload["admitted"] = payload["status"] == "validated"
+        return payload
+
     def save_ocr_page_traces(
         self,
         pdf_sha256: str,
@@ -1128,7 +1293,7 @@ class Database:
             rows = connection.execute(
                 f"""
                 SELECT
-                    id, doi, title, abstract, authors, journal, publication_year,
+                    id, sha256, doi, title, abstract, authors, journal, publication_year,
                     language, pdf_path, validation_status, source, created_at, indexed_at
                 FROM articles
                 WHERE id IN ({placeholders})

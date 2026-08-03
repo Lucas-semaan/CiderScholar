@@ -56,6 +56,7 @@ def test_schema_creates_required_tables_and_fts(settings) -> None:
         "document_table_cells",
         "document_element_relations",
         "ocr_page_traces",
+        "figure_analysis_runs",
     } <= names
     assert "chunks_fts" in names
     assert "bibliographic_records_fts" in names
