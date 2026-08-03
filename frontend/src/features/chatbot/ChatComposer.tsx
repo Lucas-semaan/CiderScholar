@@ -18,12 +18,16 @@ interface ChatComposerProps {
   allowExternalSources: boolean;
   deepResearch: boolean;
   allowDeepResearch: boolean;
+  figureAnalysis: boolean;
+  figureAnalysisAvailable: boolean;
+  figureAnalysisEstimate: string;
   interactionMode: ChatInteractionMode;
   conversationContextAvailable: boolean;
   showSuggestions: boolean;
   onDraftChange: (value: string) => void;
   onExternalSourcesChange: (value: boolean) => void;
   onDeepResearchChange: (value: boolean) => void;
+  onFigureAnalysisChange: (value: boolean) => void;
   onInteractionModeChange: (value: ChatInteractionMode) => void;
   onSubmit: FormEventHandler<HTMLFormElement>;
 }
@@ -36,12 +40,16 @@ export function ChatComposer({
   allowExternalSources,
   deepResearch,
   allowDeepResearch,
+  figureAnalysis,
+  figureAnalysisAvailable,
+  figureAnalysisEstimate,
   interactionMode,
   conversationContextAvailable,
   showSuggestions,
   onDraftChange,
   onExternalSourcesChange,
   onDeepResearchChange,
+  onFigureAnalysisChange,
   onInteractionModeChange,
   onSubmit,
 }: ChatComposerProps) {
@@ -112,8 +120,15 @@ export function ChatComposer({
               {modeMenuOpen && (
                 <ChatModeMenu
                   conversationContextAvailable={conversationContextAvailable}
+                  figureAnalysis={figureAnalysis}
+                  figureAnalysisAvailable={figureAnalysisAvailable}
+                  figureAnalysisEstimate={figureAnalysisEstimate}
                   interactionMode={interactionMode}
                   onChoose={chooseMode}
+                  onToggleFigures={(enabled) => {
+                    onFigureAnalysisChange(enabled);
+                    setModeMenuOpen(false);
+                  }}
                   onEscape={() => setModeMenuOpen(false)}
                 />
               )}

@@ -1,5 +1,11 @@
 import type { LucideIcon } from "lucide-react";
-import { BookOpenText, Check, MessageCircleMore, Sparkles } from "lucide-react";
+import {
+  BookOpenText,
+  ChartNoAxesCombined,
+  Check,
+  MessageCircleMore,
+  Sparkles,
+} from "lucide-react";
 
 import { cn } from "@/lib/cn";
 
@@ -7,8 +13,12 @@ import type { ChatInteractionMode } from "./durableChat";
 
 interface ChatModeMenuProps {
   conversationContextAvailable: boolean;
+  figureAnalysis: boolean;
+  figureAnalysisAvailable: boolean;
+  figureAnalysisEstimate: string;
   interactionMode: ChatInteractionMode;
   onChoose: (mode: ChatInteractionMode) => void;
+  onToggleFigures: (enabled: boolean) => void;
   onEscape: () => void;
 }
 
@@ -48,8 +58,12 @@ const modeOptions: ModeOption[] = [
 
 export function ChatModeMenu({
   conversationContextAvailable,
+  figureAnalysis,
+  figureAnalysisAvailable,
+  figureAnalysisEstimate,
   interactionMode,
   onChoose,
+  onToggleFigures,
   onEscape,
 }: ChatModeMenuProps) {
   return (
@@ -87,6 +101,29 @@ export function ChatModeMenu({
           </button>
         );
       })}
+      <div className="my-1 border-t border-slate-100" />
+      <button
+        aria-checked={figureAnalysis}
+        className="flex w-full items-start gap-3 rounded-xl px-3 py-2.5 text-left transition enabled:hover:bg-slate-50 focus-visible:ring-2 focus-visible:ring-forest-600 disabled:cursor-not-allowed disabled:opacity-45"
+        disabled={!figureAnalysisAvailable || interactionMode === "conversation"}
+        onClick={() => onToggleFigures(!figureAnalysis)}
+        role="menuitemcheckbox"
+        type="button"
+      >
+        <ChartNoAxesCombined
+          aria-hidden="true"
+          className="mt-0.5 size-4 shrink-0 text-violet-700"
+        />
+        <span className="min-w-0 flex-1">
+          <span className="block text-sm font-bold text-slate-800">Inclure les figures</span>
+          <span className="mt-0.5 block text-xs leading-5 text-slate-500">
+            {figureAnalysisAvailable
+              ? `Analyse locale des 5 meilleures figures · ${figureAnalysisEstimate}`
+              : "Le modèle visuel local est désactivé."}
+          </span>
+        </span>
+        {figureAnalysis && <Check aria-hidden="true" className="mt-0.5 size-4 text-forest-700" />}
+      </button>
     </div>
   );
 }

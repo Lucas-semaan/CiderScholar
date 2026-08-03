@@ -100,6 +100,7 @@ def enqueue_chat_job(
                     message=payload.message,
                     conversation_id=conversation_id,
                     client_request_id=payload.client_request_id,
+                    analyze_figures=payload.analyze_figures,
                 )
             )
         else:
@@ -109,6 +110,7 @@ def enqueue_chat_job(
                     conversation_id=conversation_id,
                     client_request_id=payload.client_request_id,
                     use_external_sources=payload.use_external_sources,
+                    analyze_figures=payload.analyze_figures,
                     interaction_mode=payload.interaction_mode,
                 )
             )

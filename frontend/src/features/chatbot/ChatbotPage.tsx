@@ -39,6 +39,9 @@ export function ChatbotPage() {
   const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
   const [externalSources, setExternalSources] = useState(false);
+  const [figureAnalysis, setFigureAnalysis] = useState(false);
+  const [figureAnalysisAvailable, setFigureAnalysisAvailable] = useState(false);
+  const [figureAnalysisEstimate, setFigureAnalysisEstimate] = useState("+12 à 18 min");
   const [deepResearch, setDeepResearch] = useState(false);
   const [interactionMode, setInteractionMode] = useState<ChatInteractionMode>("auto");
   const [deepResearchAvailable, setDeepResearchAvailable] = useState(false);
@@ -84,6 +87,13 @@ export function ChatbotPage() {
           setAdministrator(settings.administrator);
           setDeepResearchAvailable(settings.deep_research.available);
           if (!settings.deep_research.available) setDeepResearch(false);
+          setFigureAnalysisAvailable(settings.figure_analysis.available);
+          setFigureAnalysisEstimate(
+            `+${Math.ceil(settings.figure_analysis.estimated_min_seconds / 60)} à ${Math.ceil(
+              settings.figure_analysis.estimated_max_seconds / 60,
+            )} min`,
+          );
+          if (!settings.figure_analysis.available) setFigureAnalysis(false);
         }
       },
       () => {
@@ -170,6 +180,7 @@ export function ChatbotPage() {
     setActiveConversationId(null);
     setMessages([welcomeMessage]);
     setDraft("");
+    setFigureAnalysis(false);
     setInteractionMode("auto");
     setError(null);
     setHistoryOpen(false);
@@ -187,6 +198,7 @@ export function ChatbotPage() {
       setActiveConversationId(conversation.id);
       setMessages([welcomeMessage, ...toConversationMessages(conversation)]);
       setDraft("");
+      setFigureAnalysis(false);
       setInteractionMode("auto");
       setHistoryOpen(false);
     } catch (caught: unknown) {
@@ -292,6 +304,7 @@ export function ChatbotPage() {
     const pending =
       existingPending?.message === question &&
       existingPending.useExternalSources === externalSources &&
+      existingPending.analyzeFigures === figureAnalysis &&
       existingPending.mode === (deepResearch ? "deep_research" : "quick") &&
       existingPending.interactionMode === interactionMode
         ? existingPending
@@ -301,6 +314,7 @@ export function ChatbotPage() {
             undefined,
             deepResearch,
             interactionMode,
+            figureAnalysis,
           );
     pendingSubmissionRef.current = pending;
     setDraft("");
@@ -460,6 +474,9 @@ export function ChatbotPage() {
               draft={draft}
               error={error}
               externalSources={externalSources}
+              figureAnalysis={figureAnalysis}
+              figureAnalysisAvailable={figureAnalysisAvailable}
+              figureAnalysisEstimate={figureAnalysisEstimate}
               interactionMode={interactionMode}
               onDraftChange={setDraft}
               onDeepResearchChange={(enabled) => {
@@ -470,11 +487,16 @@ export function ChatbotPage() {
                 }
               }}
               onExternalSourcesChange={setExternalSources}
+              onFigureAnalysisChange={(enabled) => {
+                setFigureAnalysis(enabled);
+                if (enabled) setInteractionMode("research");
+              }}
               onInteractionModeChange={(mode) => {
                 setInteractionMode(mode);
                 if (mode === "conversation") {
                   setDeepResearch(false);
                   setExternalSources(false);
+                  setFigureAnalysis(false);
                 }
               }}
               onSubmit={(event) => void ask(event)}

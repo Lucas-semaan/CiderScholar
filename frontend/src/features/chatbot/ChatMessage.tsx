@@ -1,5 +1,6 @@
 import {
   Bot,
+  ChartNoAxesCombined,
   Cloud,
   ExternalLink,
   LibraryBig,
@@ -80,6 +81,17 @@ export function ChatMessage({
                   Synthèse en {facetDrafts.length} axe{facetDrafts.length > 1 ? "s" : ""}
                 </Badge>
               )}
+              {(response.figure_analysis_count ?? 0) > 0 && (
+                <Badge tone="info">
+                  <ChartNoAxesCombined aria-hidden="true" className="size-3" />
+                  {response.figure_analysis_count} figure
+                  {response.figure_analysis_count === 1 ? "" : "s"} retenue
+                  {response.figure_analysis_count === 1 ? "" : "s"}
+                  {response.figure_analysis_duration_seconds
+                    ? ` · ${formatResponseTime(response.figure_analysis_duration_seconds * 1000)}`
+                    : ""}
+                </Badge>
+              )}
               <Badge>{response.model}</Badge>
               <Badge>
                 <Timer aria-hidden="true" className="size-3" />
@@ -136,6 +148,11 @@ export function ChatMessage({
                             {source.page_ranges.join(", ")}
                           </Badge>
                         )}
+                        {(source.figure_refs ?? []).map((figure) => (
+                          <Badge key={figure} tone="info">
+                            {figure}
+                          </Badge>
+                        ))}
                         {source.doi && <Badge>{source.doi}</Badge>}
                         {source.providers.map((provider) => (
                           <Badge key={provider}>{provider}</Badge>

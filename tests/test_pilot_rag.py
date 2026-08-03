@@ -14,6 +14,7 @@ from app.updates.pilot_rag import (
     CiderEvidenceRagService,
     CitedEvidenceStatement,
     _apa_reference,
+    _reject_internal_process_leaks,
     _salvage_grounded_evidence_answer,
 )
 from app.updates.vector_index import BibliographicHybridResult
@@ -190,6 +191,12 @@ def test_evidence_rag_uses_full_text_passages_and_renders_exact_pages() -> None:
             assert payload["evidence"][0]["evidence_level"] == "full_text"
             assert payload["evidence"][0]["page_start"] == 4
             assert payload["evidence"][0]["text"].startswith("Fermentation at 18")
+            assert payload["documentary_coverage_notes"] == [
+                "Axe « mécanismes » : couverture documentaire partial."
+            ]
+            assert (
+                "contraintes de prudence, pas des preuves scientifiques" in (messages[0]["content"])
+            )
             enum = json_schema["$defs"]["CitedEvidenceStatement"]["properties"]["evidence_ids"][
                 "items"
             ]["enum"]
@@ -206,7 +213,7 @@ def test_evidence_rag_uses_full_text_passages_and_renders_exact_pages() -> None:
                                 "evidence_ids": [passage.evidence_id],
                             }
                         ],
-                        "limitations": [],
+                        "limitations": ["Les mécanismes moléculaires ne sont pas documentés ici."],
                     },
                     ensure_ascii=False,
                 )
@@ -215,12 +222,14 @@ def test_evidence_rag_uses_full_text_passages_and_renders_exact_pages() -> None:
     result = CiderEvidenceRagService(FakeClient()).answer(
         "Que montre l'article sur la température ?",
         [record],
+        coverage_notes=["Axe « mécanismes » : couverture documentaire partial."],
     )
 
     assert result.source_record_ids == ["common:article-1"]
     assert result.cited_evidence_ids == [passage.evidence_id]
     assert "(Test, 2025, pp. 4–5)" in result.answer_markdown
     assert "abstract ne remplace" not in result.answer_markdown
+    assert "mécanismes moléculaires" in result.answer_markdown
 
 
 def test_faceted_evidence_rag_keeps_cited_drafts_and_assembles_them() -> None:
@@ -357,7 +366,63 @@ def test_faceted_answer_salvage_discards_only_an_unsupported_numeric_statement()
     assert [statement.statement for statement in salvaged.statements] == [
         "La valeur observée était de 3,03."
     ]
-    assert "écartées" in salvaged.limitations[-1]
+    assert "preuves disponibles" in salvaged.limitations[-1]
+    assert "générées" not in salvaged.limitations[-1]
+
+
+@pytest.mark.parametrize(
+    "leak",
+    [
+        "Le RAG n'a retenu qu'une source.",
+        "ARGO a validé cette réponse.",
+        "Click and Read pour ouvrir l'article.",
+        "Aucun chiffre n'a été ajouté.",
+        "Les consignes internes imposent cette limite.",
+        "Le validateur automatique a écarté ce passage.",
+        "Le filtrage sémantique a retenu deux études.",
+        "Le processus de contrôle a écarté cette source.",
+        "Le contrôle de fidélité est satisfaisant.",
+    ],
+)
+def test_reader_facing_answer_rejects_internal_process_leaks(leak: str) -> None:
+    with pytest.raises(RuntimeError, match="internal generation"):
+        _reject_internal_process_leaks([leak])
+
+
+def test_abstract_rag_prompt_keeps_grounding_controls_silent_and_retries_leak() -> None:
+    record = _record("11111111-1111-1111-1111-111111111111", "10.1000/cider")
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def chat(self, messages, **_options):
+            self.calls += 1
+            system = messages[0]["content"]
+            assert "ne mentionne jamais RAG, ARGO" in system
+            assert "contrôles de fidélité sont silencieux" in system
+            statement = (
+                "Le RAG a vérifié que les levures influencent la fermentation."
+                if self.calls == 1
+                else "Les levures influencent la fermentation."
+            )
+            return _response(
+                json.dumps(
+                    {
+                        "response_format": "prose",
+                        "statements": [{"statement": statement, "record_ids": [record.record_id]}],
+                        "limitations": [],
+                    },
+                    ensure_ascii=False,
+                )
+            )
+
+    client = FakeClient()
+    result = CiderAbstractRagService(client).answer("Question", [record])
+
+    assert client.calls == 2
+    assert "RAG" not in result.answer_markdown
+    assert "Les levures influencent" in result.answer_markdown
 
 
 def test_pilot_rag_uses_bullets_only_when_the_requested_format_is_explicit() -> None:

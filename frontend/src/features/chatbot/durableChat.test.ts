@@ -32,6 +32,7 @@ describe("durable chat submission", () => {
     expect(enqueue.mock.calls[1]?.[1].client_request_id).toBe(pending.clientRequestId);
     expect(enqueue.mock.calls[1]?.[1].mode).toBe("quick");
     expect(enqueue.mock.calls[1]?.[1].interaction_mode).toBe("auto");
+    expect(enqueue.mock.calls[1]?.[1].analyze_figures).toBe(false);
   });
 
   it("persists the selected deep-research mode across enqueue retries", async () => {
@@ -63,6 +64,22 @@ describe("durable chat submission", () => {
     await enqueuePendingChat("conversation-1", pending, enqueue);
 
     expect(enqueue.mock.calls[0]?.[1].interaction_mode).toBe("conversation");
+  });
+
+  it("persists the local figure-analysis choice across enqueue retries", async () => {
+    const enqueue = vi.fn().mockResolvedValue({});
+    const pending = createPendingChatSubmission(
+      "Que montrent les figures ?",
+      false,
+      "44444444-4444-4444-8444-444444444444",
+      false,
+      "research",
+      true,
+    );
+
+    await enqueuePendingChat("conversation-1", pending, enqueue);
+
+    expect(enqueue.mock.calls[0]?.[1].analyze_figures).toBe(true);
   });
 
   it("renders the canonical persisted message exactly once", () => {

@@ -166,6 +166,7 @@ export const api = {
         message: string;
         client_request_id: string;
         use_external_sources: boolean;
+        analyze_figures: boolean;
         mode: "quick" | "deep_research";
         interaction_mode: "auto" | "research" | "conversation";
       },

@@ -152,6 +152,7 @@ class ChatAnswerPayload(BaseModel):
     conversation_id: UUID
     client_request_id: UUID
     use_external_sources: bool = False
+    analyze_figures: bool = False
     interaction_mode: Literal["auto", "research", "conversation"] = "auto"
 
     @property
@@ -197,6 +198,7 @@ class DeepResearchPayload(BaseModel):
     message: str = Field(min_length=2, max_length=4000)
     conversation_id: UUID
     client_request_id: UUID
+    analyze_figures: bool = False
 
     @field_validator("message")
     @classmethod

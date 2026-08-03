@@ -28,6 +28,8 @@ class ChatbotAnswerer(Protocol):
         use_external_sources: bool,
         interaction_mode: str,
         previous_sources: Sequence[ChatbotSource],
+        analyze_figures: bool = False,
+        on_figure_analysis: Callable[[], None] | None = None,
         on_argo_reserved: Callable[[], None] | None = None,
         on_argo_response: Callable[[], None] | None = None,
     ) -> ChatbotResult: ...
@@ -68,6 +70,16 @@ class ChatAnswerHandler:
         )
         if enrichment_allowed:
             context.publish(JobStep.ENRICHMENT)
+        figure_step_published = enrichment_allowed
+
+        def publish_figure_analysis() -> None:
+            nonlocal figure_step_published
+            if figure_step_published:
+                return
+            context.check_cancellation()
+            context.publish(JobStep.ENRICHMENT)
+            figure_step_published = True
+
         argo_step_published = False
 
         def publish_argo_after_reservation() -> None:
@@ -89,6 +101,14 @@ class ChatAnswerHandler:
             validation_step_published = True
 
         context.check_cancellation()
+        figure_options = (
+            {
+                "analyze_figures": True,
+                "on_figure_analysis": publish_figure_analysis,
+            }
+            if job.payload.analyze_figures
+            else {}
+        )
         result = self.answer(
             self.settings,
             self.database,
@@ -99,6 +119,7 @@ class ChatAnswerHandler:
             previous_sources=previous_sources,
             on_argo_reserved=publish_argo_after_reservation,
             on_argo_response=publish_validation_after_response,
+            **figure_options,
         )
         return JobHandlerResult(
             assistant_content=result.answer_markdown,

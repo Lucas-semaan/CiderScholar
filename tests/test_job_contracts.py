@@ -141,6 +141,7 @@ def test_chat_answer_payload_is_versioned_bounded_and_strict() -> None:
         conversation_id=conversation_id,
         client_request_id=client_request_id,
         use_external_sources=True,
+        analyze_figures=True,
     )
 
     assert payload.version == 1
@@ -149,6 +150,7 @@ def test_chat_answer_payload_is_versioned_bounded_and_strict() -> None:
     assert payload.client_request_id == client_request_id
     assert payload.idempotency_key == (conversation_id, client_request_id)
     assert payload.use_external_sources is True
+    assert payload.analyze_figures is True
     assert payload.interaction_mode == "auto"
 
     with pytest.raises(ValidationError):
@@ -199,10 +201,12 @@ def test_deep_research_payload_is_strict_versioned_and_idempotent() -> None:
         message="  Analyse   les preuves ",
         conversation_id=conversation_id,
         client_request_id=request_id,
+        analyze_figures=True,
     )
 
     assert payload.message == "Analyse les preuves"
     assert payload.version == 1
+    assert payload.analyze_figures is True
     with pytest.raises(ValidationError):
         DeepResearchPayload(
             message="Analyse",

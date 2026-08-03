@@ -272,6 +272,13 @@ def chatbot_sources_from_evidence(
                     passage.chunk_id for passage in passages if passage.chunk_id is not None
                 ],
                 page_ranges=list(dict.fromkeys(page_ranges)),
+                figure_refs=list(
+                    dict.fromkeys(
+                        passage.figure_label
+                        for passage in passages
+                        if passage.evidence_kind == "figure" and passage.figure_label is not None
+                    )
+                ),
                 title=record.title,
                 authors=record.authors,
                 doi=record.doi,

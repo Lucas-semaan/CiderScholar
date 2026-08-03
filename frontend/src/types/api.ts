@@ -29,6 +29,13 @@ export interface RuntimeSettings {
     message: string;
     bundle_sha256: string | null;
   };
+  figure_analysis: {
+    available: boolean;
+    model: string;
+    max_figures: number;
+    estimated_min_seconds: number;
+    estimated_max_seconds: number;
+  };
   corpus_update: {
     latest_state: "disabled" | "sync_unavailable" | "latest_unavailable" | "invalid" | "available";
     installed_version: string | null;
@@ -367,6 +374,7 @@ export interface ChatbotSource {
   article_id: string | null;
   chunk_ids: number[];
   page_ranges: string[];
+  figure_refs?: string[];
   title: string;
   authors: string[];
   doi: string | null;
@@ -402,6 +410,10 @@ export interface ChatbotResponse {
   interaction_mode: "research" | "conversation";
   reused_previous_sources: boolean;
   facet_drafts?: ChatbotFacetDraft[];
+  figure_analysis_requested?: boolean;
+  figure_analysis_count?: number;
+  figure_analysis_duration_seconds?: number;
+  figure_analysis_model?: string | null;
 }
 
 export interface ChatConversationSummary {

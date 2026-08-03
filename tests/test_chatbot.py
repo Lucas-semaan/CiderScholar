@@ -7,6 +7,15 @@ import pytest
 from app.database.sqlite import Database
 from app.llm.argo_client import ArgoQuotaError
 from app.models.chatbot import ChatbotFacetDraft, ChatEvidencePassage, ChatEvidenceRecord
+from app.retrieval.coverage_assessment import (
+    AxisCoverageAssessment,
+    CoverageAssessmentResult,
+)
+from app.retrieval.semantic_filter import (
+    AxisSemanticAssessment,
+    CandidateSemanticDecision,
+    SemanticFilterResult,
+)
 from app.services.chatbot import (
     chatbot_candidates_from_sources,
     chatbot_sources,
@@ -311,6 +320,302 @@ def test_answer_chatbot_prefers_full_text_over_the_matching_abstract(
     assert result.sources[0].page_ranges == ["7-8"]
 
 
+def test_answer_chatbot_applies_the_multilingual_semantic_selection_before_synthesis(
+    settings,
+    monkeypatch,
+) -> None:
+    relevant = _local(1).model_copy(
+        update={
+            "title": "Protein haze formation in apple juice",
+            "abstract": (
+                "Les protéines du jus de pomme s'agrègent avec les polyphénols et forment "
+                "un trouble colloïdal."
+            ),
+        }
+    )
+    noise = _local(2).model_copy(
+        update={
+            "title": "Patulin quantification by chromatography",
+            "abstract": "Patulin was quantified in apple products by HPLC.",
+        }
+    )
+    captured: dict[str, object] = {}
+
+    class FakeArgoClient:
+        def __init__(self, _settings):
+            pass
+
+        def __enter__(self):
+            return object()
+
+        def __exit__(self, *_args):
+            return None
+
+    def fake_filter_and_coverage(
+        _settings,
+        *,
+        question,
+        axes,
+        evidence,
+        on_argo_reserved,
+    ):
+        del on_argo_reserved
+        assert "stabilité protéique" in question
+        decisions = [
+            CandidateSemanticDecision(
+                candidate_id=record.record_id,
+                relevance="direct" if record.record_id == relevant.record_id else "irrelevant",
+                rationale=(
+                    "Correspondance mécanistique multilingue."
+                    if record.record_id == relevant.record_id
+                    else "Le dosage de patuline ne traite pas la stabilité protéique."
+                ),
+            )
+            for record in evidence
+        ]
+        semantic = SemanticFilterResult(
+            question=question,
+            axes=[AxisSemanticAssessment(axis_key=axis.key, decisions=decisions) for axis in axes],
+            selected_candidate_ids=[relevant.record_id],
+            model="semantic-test",
+            prompt_tokens=7,
+            completion_tokens=5,
+        )
+        coverage = CoverageAssessmentResult(
+            question=question,
+            axes=[
+                AxisCoverageAssessment(
+                    axis_key=axis.key,
+                    status="covered",
+                    supporting_candidate_ids=[relevant.record_id],
+                    assessment="L'axe est directement documenté.",
+                )
+                for axis in axes
+            ],
+            model="coverage-test",
+            prompt_tokens=11,
+            completion_tokens=3,
+        )
+        return semantic, coverage
+
+    class FakeEvidenceService:
+        def __init__(self, _client):
+            pass
+
+        @staticmethod
+        def _result(records, **options):
+            captured["records"] = records
+            captured["coverage_notes"] = options["coverage_notes"]
+            return SimpleNamespace(
+                answer_markdown="La stabilité dépend des interactions protéines-polyphénols.",
+                cited_evidence_ids=[f"{relevant.record_id}:abstract"],
+                source_record_ids=[relevant.record_id],
+                model="answer-test",
+                prompt_tokens=2,
+                completion_tokens=1,
+                facet_drafts=[],
+            )
+
+        def answer(self, _question, records, **options):
+            return self._result(records, **options)
+
+        def answer_faceted(self, _question, records, **options):
+            return self._result(records, **options)
+
+    monkeypatch.setattr(
+        "app.services.workflows.search_common_corpus_abstracts",
+        lambda *_args, **_kwargs: [relevant, noise],
+    )
+    monkeypatch.setattr(
+        "app.services.workflows.search_common_corpus_full_text_evidence",
+        lambda *_args, **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        "app.services.workflows._semantic_filter_and_coverage",
+        fake_filter_and_coverage,
+    )
+    monkeypatch.setattr("app.services.workflows.ArgoClient", FakeArgoClient)
+    monkeypatch.setattr(
+        "app.services.workflows.CiderEvidenceRagService",
+        FakeEvidenceService,
+    )
+
+    result = answer_chatbot(
+        settings,
+        Database(settings.paths.database_path),
+        message="Fais un état de l'art sur la stabilité protéique des jus de pomme.",
+        history=[],
+        use_external_sources=False,
+    )
+
+    assert [record.record_id for record in captured["records"]] == [relevant.record_id]
+    assert captured["coverage_notes"] == []
+    assert result.prompt_tokens == 20
+    assert result.completion_tokens == 9
+    assert [source.record_id for source in result.sources] == [relevant.record_id]
+
+
+def test_answer_chatbot_runs_only_one_targeted_follow_up_for_an_uncovered_axis(
+    settings,
+    monkeypatch,
+) -> None:
+    initial = _local(1).model_copy(
+        update={
+            "title": "Apple juice haze-active proteins",
+            "abstract": "Haze-active proteins were detected in apple juice.",
+        }
+    )
+    supplemental = _local(2).model_copy(
+        update={
+            "title": "Protein polyphenol aggregation mechanisms",
+            "abstract": (
+                "Protein-polyphenol aggregation and heat treatment governed colloidal haze."
+            ),
+        }
+    )
+    calls = {"abstract": 0, "full_text": 0, "assessment": 0}
+    captured: dict[str, object] = {}
+
+    class FakeArgoClient:
+        def __init__(self, _settings):
+            pass
+
+        def __enter__(self):
+            return object()
+
+        def __exit__(self, *_args):
+            return None
+
+    def fake_abstract_search(*_args, **options):
+        calls["abstract"] += 1
+        if calls["abstract"] == 1:
+            return [initial]
+        captured["follow_up_query"] = options["query"]
+        return [supplemental]
+
+    def fake_full_text_search(*_args, **options):
+        calls["full_text"] += 1
+        if calls["full_text"] == 2:
+            captured["follow_up_axis_queries"] = options["axis_queries"]
+        return []
+
+    def fake_filter_and_coverage(
+        _settings,
+        *,
+        question,
+        axes,
+        evidence,
+        on_argo_reserved,
+    ):
+        del on_argo_reserved
+        calls["assessment"] += 1
+        decisions = [
+            CandidateSemanticDecision(
+                candidate_id=record.record_id,
+                relevance="direct",
+                rationale="Preuve scientifiquement liée à l'axe.",
+            )
+            for record in evidence
+        ]
+        selected_ids = [record.record_id for record in evidence]
+        semantic = SemanticFilterResult(
+            question=question,
+            axes=[AxisSemanticAssessment(axis_key=axis.key, decisions=decisions) for axis in axes],
+            selected_candidate_ids=selected_ids,
+            model="semantic-test",
+            prompt_tokens=5,
+            completion_tokens=3,
+        )
+        is_first_pass = calls["assessment"] == 1
+        coverage = CoverageAssessmentResult(
+            question=question,
+            axes=[
+                AxisCoverageAssessment(
+                    axis_key=axis.key,
+                    status="partial" if is_first_pass else "covered",
+                    supporting_candidate_ids=[initial.record_id],
+                    assessment=(
+                        "Le mécanisme manque."
+                        if is_first_pass
+                        else "Le mécanisme est maintenant couvert."
+                    ),
+                    missing_information=(
+                        ["Mécanismes d'agrégation protéines-polyphénols"] if is_first_pass else []
+                    ),
+                    suggested_queries=(
+                        ["apple juice protein polyphenol aggregation haze"] if is_first_pass else []
+                    ),
+                )
+                for axis in axes
+            ],
+            model="coverage-test",
+            prompt_tokens=4,
+            completion_tokens=2,
+        )
+        return semantic, coverage
+
+    class FakeEvidenceService:
+        def __init__(self, _client):
+            pass
+
+        @staticmethod
+        def _result(records, **options):
+            captured["records"] = records
+            captured["coverage_notes"] = options["coverage_notes"]
+            return SimpleNamespace(
+                answer_markdown="Synthèse complétée.",
+                cited_evidence_ids=[f"{supplemental.record_id}:abstract"],
+                source_record_ids=[supplemental.record_id],
+                model="answer-test",
+                prompt_tokens=2,
+                completion_tokens=1,
+                facet_drafts=[],
+            )
+
+        def answer(self, _question, records, **options):
+            return self._result(records, **options)
+
+        def answer_faceted(self, _question, records, **options):
+            return self._result(records, **options)
+
+    monkeypatch.setattr(
+        "app.services.workflows.search_common_corpus_abstracts",
+        fake_abstract_search,
+    )
+    monkeypatch.setattr(
+        "app.services.workflows.search_common_corpus_full_text_evidence",
+        fake_full_text_search,
+    )
+    monkeypatch.setattr(
+        "app.services.workflows._semantic_filter_and_coverage",
+        fake_filter_and_coverage,
+    )
+    monkeypatch.setattr("app.services.workflows.ArgoClient", FakeArgoClient)
+    monkeypatch.setattr(
+        "app.services.workflows.CiderEvidenceRagService",
+        FakeEvidenceService,
+    )
+
+    result = answer_chatbot(
+        settings,
+        Database(settings.paths.database_path),
+        message="Fais un état de l'art sur la stabilité protéique des jus de pomme.",
+        history=[],
+        use_external_sources=False,
+    )
+
+    assert calls == {"abstract": 2, "full_text": 2, "assessment": 2}
+    assert captured["follow_up_query"] == "apple juice protein polyphenol aggregation haze"
+    assert captured["follow_up_axis_queries"]
+    assert {record.record_id for record in captured["records"]} == {
+        initial.record_id,
+        supplemental.record_id,
+    }
+    assert captured["coverage_notes"] == []
+    assert result.prompt_tokens == 20
+    assert result.completion_tokens == 11
+
+
 def test_answer_chatbot_never_downgrades_planning_when_argo_quota_is_reached(
     settings,
     monkeypatch,
@@ -411,9 +716,14 @@ def test_answer_chatbot_uses_faceted_drafts_for_multi_axis_research(
         "app.services.workflows.search_common_corpus_abstracts",
         lambda *_args, **_kwargs: [candidate],
     )
+
+    def fake_full_text_retrieval(*_args, **options):
+        captured["axis_queries"] = options["axis_queries"]
+        return []
+
     monkeypatch.setattr(
         "app.services.workflows.search_common_corpus_full_text_evidence",
-        lambda *_args, **_kwargs: [],
+        fake_full_text_retrieval,
     )
     monkeypatch.setattr("app.services.workflows.ArgoClient", FakeArgoClient)
     monkeypatch.setattr(
@@ -434,6 +744,7 @@ def test_answer_chatbot_uses_faceted_drafts_for_multi_axis_research(
         "structure",
         "evolution",
     }
+    assert set(captured["axis_queries"]) == {"aroma", "structure", "evolution"}
     assert captured["records"][0].doi == "10.1000/apple-brandy"
     assert result.answer_markdown == "Réponse finale assemblée."
     assert result.facet_drafts == [draft]

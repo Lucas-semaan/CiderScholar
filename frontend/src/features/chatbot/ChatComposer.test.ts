@@ -3,6 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
 import { ChatComposer } from "./ChatComposer";
+import { ChatModeMenu } from "./ChatModeMenu";
 
 const props = {
   disabled: false,
@@ -12,12 +13,16 @@ const props = {
   allowExternalSources: false,
   deepResearch: false,
   allowDeepResearch: false,
+  figureAnalysis: false,
+  figureAnalysisAvailable: true,
+  figureAnalysisEstimate: "+12 à 18 min",
   interactionMode: "auto" as const,
   conversationContextAvailable: false,
   showSuggestions: false,
   onDraftChange: () => undefined,
   onExternalSourcesChange: () => undefined,
   onDeepResearchChange: () => undefined,
+  onFigureAnalysisChange: () => undefined,
   onInteractionModeChange: () => undefined,
   onSubmit: () => undefined,
 };
@@ -31,6 +36,25 @@ describe("ChatComposer administrator enrichment", () => {
     expect(markup).not.toContain("rounded-full");
     expect(markup).not.toContain("CiderScholar choisit entre nouvelle recherche et échange");
     expect(markup).not.toContain("Réponse en prose par défaut");
+  });
+
+  it("offers local figure analysis with its estimated time in the plus menu", () => {
+    const markup = renderToStaticMarkup(
+      createElement(ChatModeMenu, {
+        conversationContextAvailable: false,
+        figureAnalysis: false,
+        figureAnalysisAvailable: true,
+        figureAnalysisEstimate: "+12 à 18 min",
+        interactionMode: "research",
+        onChoose: () => undefined,
+        onEscape: () => undefined,
+        onToggleFigures: () => undefined,
+      }),
+    );
+
+    expect(markup).toContain("Inclure les figures");
+    expect(markup).toContain("+12 à 18 min");
+    expect(markup).toContain('role="menuitemcheckbox"');
   });
 
   it("hides the external API toggle from user profiles", () => {

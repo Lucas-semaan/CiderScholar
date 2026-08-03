@@ -39,6 +39,7 @@ class ChatJobSubmitRequest(ApiModel):
     message: str = Field(min_length=2, max_length=4000)
     client_request_id: UUID
     use_external_sources: bool = False
+    analyze_figures: bool = False
     mode: Literal["quick", "deep_research"] = "quick"
     interaction_mode: Literal["auto", "research", "conversation"] = "auto"
 

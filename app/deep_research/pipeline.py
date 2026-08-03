@@ -43,6 +43,12 @@ from app.deep_research.retrieval import (
 from app.deep_research.verification import SemanticClaimVerificationStage
 from app.jobs.contracts import DeepResearchPayload
 from app.llm.argo_client import ArgoClient
+from app.llm.figure_analysis import (
+    FigureAnalysisBatch,
+    FigureAnalysisUnavailable,
+    FigureSourceReference,
+    OllamaFigureAnalysisService,
+)
 from app.retrieval.multi_corpus import (
     MultiCorpusLexicalSearchService,
     MultiCorpusVectorSearchService,
@@ -98,10 +104,16 @@ class DeepResearchPreparationOperations:
     renderer: SQLiteDeepResearchRenderer
     response_cache: DeepResearchResponseCache | None
     gap_assessor: ResearchGapAssessor | None = None
+    figure_analyzer: OllamaFigureAnalysisService | None = None
     _cache_resolution: dict[
         tuple[str, str],
         tuple[DeepResearchCacheSignature | None, DeepResearchCacheEntry | None],
     ] = field(default_factory=dict, init=False, repr=False)
+    _figure_batches: dict[tuple[str, str], FigureAnalysisBatch] = field(
+        default_factory=dict,
+        init=False,
+        repr=False,
+    )
 
     @staticmethod
     def _run_key(payload: DeepResearchPayload) -> tuple[str, str]:
@@ -114,7 +126,7 @@ class DeepResearchPreparationOperations:
         key = self._run_key(payload)
         resolved = self._cache_resolution.get(key)
         if resolved is None:
-            if self.response_cache is None:
+            if self.response_cache is None or payload.analyze_figures:
                 resolved = (None, None)
             else:
                 signature = self.response_cache.signature(payload.message)
@@ -222,7 +234,49 @@ class DeepResearchPreparationOperations:
             )
         ]
         self.citation_traversal.traverse(payload, citation_fragments)
-        self.claim_extraction.extract(payload, citation_fragments)
+        figure_fragments: list[CitationSourceFragment] = []
+        if payload.analyze_figures and self.figure_analyzer is not None:
+            references = [
+                FigureSourceReference(
+                    scope=fragment.scope,
+                    article_id=fragment.article_id,
+                    chunk_id=fragment.chunk_id,
+                    page_start=fragment.page_start,
+                    page_end=fragment.page_end,
+                    rank=index,
+                )
+                for index, fragment in enumerate(citation_fragments)
+            ]
+            try:
+                batch = self.figure_analyzer.analyze(payload.message, references)
+            except FigureAnalysisUnavailable:
+                batch = FigureAnalysisBatch(
+                    processed_count=0,
+                    admitted=[],
+                    warnings=["L’analyse locale des figures est indisponible."],
+                    duration_seconds=0.0,
+                    model_name=self.figure_analyzer.config.model,
+                )
+            self._figure_batches[self._run_key(payload)] = batch
+            figure_fragments = [
+                CitationSourceFragment(
+                    evidence_kind="figure",
+                    scope=figure.scope,
+                    article_id=figure.article_id,
+                    chunk_id=figure.related_chunk_id,
+                    page_start=figure.page_number,
+                    page_end=figure.page_number,
+                    text=figure.observation_text,
+                    figure_analysis_id=figure.analysis_id,
+                    figure_label=figure.figure_label,
+                )
+                for figure in batch.admitted
+            ]
+        text_limit = max(0, 24 - len(figure_fragments))
+        self.claim_extraction.extract(
+            payload,
+            [*figure_fragments, *citation_fragments[:text_limit]],
+        )
 
     def verify(self, payload: DeepResearchPayload) -> None:
         if self._resolve_cache(payload)[1] is not None:
@@ -334,6 +388,27 @@ class DeepResearchPreparationOperations:
                 if rendered is not None
                 else []
             ),
+            "figure_analysis": self._figure_analysis_details(payload),
+        }
+
+    def _figure_analysis_details(self, payload: DeepResearchPayload) -> dict[str, object]:
+        batch = self._figure_batches.get(self._run_key(payload))
+        if batch is None:
+            return {
+                "requested": payload.analyze_figures,
+                "processed_count": 0,
+                "admitted_count": 0,
+                "duration_seconds": 0.0,
+                "model": self.figure_analyzer.config.model if self.figure_analyzer else None,
+                "warnings": [],
+            }
+        return {
+            "requested": payload.analyze_figures,
+            "processed_count": batch.processed_count,
+            "admitted_count": len(batch.admitted),
+            "duration_seconds": batch.duration_seconds,
+            "model": batch.model_name,
+            "warnings": batch.warnings,
         }
 
     def close(self) -> None:
@@ -344,6 +419,8 @@ class DeepResearchPreparationOperations:
         reranker = self.retrieval.reranker
         if reranker is not None:
             reranker.close()
+        if self.figure_analyzer is not None:
+            self.figure_analyzer.close()
 
 
 def build_deep_research_operations(
@@ -371,7 +448,7 @@ def build_deep_research_operations(
     ):
         assessor = ArgoResearchGapAssessor(summarizer.client)
     return DeepResearchPreparationOperations(
-        DeepResearchRetrievalStage(
+        retrieval=DeepResearchRetrievalStage(
             lexical or MultiCorpusLexicalSearchService.from_settings(settings),
             vector or MultiCorpusVectorSearchService.from_settings(settings),
             checkpoint_root,
@@ -383,25 +460,25 @@ def build_deep_research_operations(
             retained_fragment_limit=settings.deep_research.retained_fragment_limit,
             text_loader=SQLiteFragmentTextLoader(settings),
         ),
-        summarizer,
-        ResearchLoopStore(checkpoint_root),
-        CitationTraversalStage(
+        contextual_summarizer=summarizer,
+        research_loop=ResearchLoopStore(checkpoint_root),
+        citation_traversal=CitationTraversalStage(
             SQLiteCitationTargetResolver(settings),
             checkpoint_root,
         ),
-        AtomicClaimExtractionStage(
+        claim_extraction=AtomicClaimExtractionStage(
             summarizer.client if settings.deep_research.contextual_summary_enabled else None,
             checkpoint_root,
         ),
-        SemanticClaimVerificationStage(
+        claim_verification=SemanticClaimVerificationStage(
             summarizer.client if settings.deep_research.contextual_summary_enabled else None,
             checkpoint_root,
         ),
-        EpistemicAssessmentStage(checkpoint_root),
-        ClaimAdmissionStage(checkpoint_root),
-        DeepResearchAbstentionStage(checkpoint_root),
-        SQLiteDeepResearchRenderer(settings, checkpoint_root),
-        (
+        epistemic_assessment=EpistemicAssessmentStage(checkpoint_root),
+        claim_admission=ClaimAdmissionStage(checkpoint_root),
+        abstention=DeepResearchAbstentionStage(checkpoint_root),
+        renderer=SQLiteDeepResearchRenderer(settings, checkpoint_root),
+        response_cache=(
             DeepResearchResponseCache(
                 settings,
                 settings.paths.cache_dir / "deep_research_responses",
@@ -409,5 +486,8 @@ def build_deep_research_operations(
             if enable_response_cache
             else None
         ),
-        assessor,
+        gap_assessor=assessor,
+        figure_analyzer=(
+            OllamaFigureAnalysisService(settings) if settings.figure_analysis.enabled else None
+        ),
     )

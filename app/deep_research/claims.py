@@ -23,6 +23,7 @@ _SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+")
 class AtomicClaimEvidence(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    evidence_kind: Literal["text", "figure"] = "text"
     scope: CorpusScope
     article_id: str = Field(min_length=1, max_length=200)
     chunk_id: int = Field(ge=1)
@@ -30,6 +31,21 @@ class AtomicClaimEvidence(BaseModel):
     page_end: int = Field(ge=1)
     source_excerpt: str = Field(min_length=1, max_length=1_200)
     source_text_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    figure_analysis_id: str | None = Field(
+        default=None,
+        pattern=r"^figure-analysis-[0-9a-f]{24}$",
+    )
+    figure_label: str | None = Field(default=None, min_length=1, max_length=500)
+
+    @model_validator(mode="after")
+    def validate_visual_source(self) -> AtomicClaimEvidence:
+        figure_fields = (self.figure_analysis_id, self.figure_label)
+        if self.evidence_kind == "figure":
+            if any(value is None for value in figure_fields) or self.page_start != self.page_end:
+                raise ValueError("visual claim evidence requires complete figure provenance")
+        elif any(value is not None for value in figure_fields):
+            raise ValueError("text claim evidence cannot carry figure provenance")
+        return self
 
 
 class AtomicClaim(BaseModel):
@@ -53,10 +69,12 @@ class AtomicClaim(BaseModel):
     def unique_evidence(self) -> AtomicClaim:
         identities = {
             (
+                item.evidence_kind,
                 item.scope,
                 item.article_id,
                 item.chunk_id,
                 item.source_excerpt,
+                item.figure_analysis_id,
             )
             for item in self.evidence
         }
@@ -158,7 +176,9 @@ _DRAFT_SCHEMA: dict[str, Any] = {
 _SYSTEM_PROMPT = (
     "Extrais uniquement des affirmations atomiques répondant à la question depuis les extraits "
     "fournis. Une affirmation doit relever d'un seul rôle : résultat observé, interprétation ou "
-    "recommandation. Ne mélange jamais ces rôles. Copie au moins un source_excerpt exactement, "
+    "recommandation. Une source evidence_kind=figure est une observation visuelle locale validée : "
+    "elle ne soutient que les tendances explicitement écrites dans son extrait. Ne mélange jamais "
+    "ces rôles. Copie au moins un source_excerpt exactement, "
     "sans le reformuler. N'ajoute aucun fait absent et réponds seulement avec l'objet JSON demandé."
 )
 
@@ -221,6 +241,8 @@ class AtomicClaimExtractionStage:
                                 "sources": [
                                     {
                                         "source_key": key,
+                                        "evidence_kind": source_map[key].evidence_kind,
+                                        "figure_label": source_map[key].figure_label,
                                         "allowed_excerpts": allowed_excerpts[key],
                                     }
                                     for key in source_map
@@ -271,6 +293,7 @@ class AtomicClaimExtractionStage:
                     raise ValueError("atomic claim excerpt is not verbatim local text")
                 evidence.append(
                     AtomicClaimEvidence(
+                        evidence_kind=fragment.evidence_kind,
                         scope=fragment.scope,
                         article_id=fragment.article_id,
                         chunk_id=fragment.chunk_id,
@@ -278,6 +301,8 @@ class AtomicClaimExtractionStage:
                         page_end=fragment.page_end,
                         source_excerpt=item.source_excerpt,
                         source_text_sha256=hashlib.sha256(fragment.text.encode()).hexdigest(),
+                        figure_analysis_id=fragment.figure_analysis_id,
+                        figure_label=fragment.figure_label,
                     )
                 )
             identity = json.dumps(
@@ -285,7 +310,14 @@ class AtomicClaimExtractionStage:
                     "statement": draft.statement,
                     "role": draft.role,
                     "evidence": [
-                        (item.scope, item.article_id, item.chunk_id, item.source_excerpt)
+                        (
+                            item.evidence_kind,
+                            item.scope,
+                            item.article_id,
+                            item.chunk_id,
+                            item.source_excerpt,
+                            item.figure_analysis_id,
+                        )
                         for item in evidence
                     ],
                 },

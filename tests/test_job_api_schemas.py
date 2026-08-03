@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from contextlib import closing
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
@@ -199,6 +200,7 @@ def test_chat_submission_atomically_returns_accepted_job_and_user_message(settin
                 "message": "Question asynchrone",
                 "client_request_id": str(uuid4()),
                 "use_external_sources": False,
+                "analyze_figures": True,
             },
         )
 
@@ -215,6 +217,10 @@ def test_chat_submission_atomically_returns_accepted_job_and_user_message(settin
         assert connection.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 1
         assert connection.execute("SELECT COUNT(*) FROM job_events").fetchone()[0] == 1
         assert connection.execute("SELECT COUNT(*) FROM chat_messages").fetchone()[0] == 1
+        stored_payload = json.loads(
+            connection.execute("SELECT payload_json FROM jobs").fetchone()["payload_json"]
+        )
+    assert stored_payload["analyze_figures"] is True
 
 
 def test_deep_research_submission_fails_closed_without_promotion(settings) -> None:

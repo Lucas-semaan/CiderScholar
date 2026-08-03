@@ -13,6 +13,7 @@ export type ChatInteractionMode = "auto" | "research" | "conversation";
 export interface PendingChatSubmission {
   message: string;
   useExternalSources: boolean;
+  analyzeFigures: boolean;
   mode: "quick" | "deep_research";
   interactionMode: ChatInteractionMode;
   clientRequestId: string;
@@ -38,10 +39,12 @@ export function createPendingChatSubmission(
   clientRequestId = crypto.randomUUID(),
   deepResearch = false,
   interactionMode: ChatInteractionMode = "auto",
+  analyzeFigures = false,
 ): PendingChatSubmission {
   return {
     message,
     useExternalSources,
+    analyzeFigures,
     mode: deepResearch ? "deep_research" : "quick",
     interactionMode: deepResearch ? "research" : interactionMode,
     clientRequestId,
@@ -57,6 +60,7 @@ export function enqueuePendingChat(
     message: submission.message,
     client_request_id: submission.clientRequestId,
     use_external_sources: submission.useExternalSources,
+    analyze_figures: submission.analyzeFigures,
     mode: submission.mode,
     interaction_mode: submission.interactionMode,
   });

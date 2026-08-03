@@ -29,12 +29,28 @@ _DOI_TRAILING_PUNCTUATION = ".,;:)]}>\"'"
 class CitationSourceFragment(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    evidence_kind: Literal["text", "figure"] = "text"
     scope: CorpusScope
     article_id: str = Field(min_length=1, max_length=200)
     chunk_id: int = Field(ge=1)
     page_start: int = Field(ge=1)
     page_end: int = Field(ge=1)
     text: str = Field(min_length=1)
+    figure_analysis_id: str | None = Field(
+        default=None,
+        pattern=r"^figure-analysis-[0-9a-f]{24}$",
+    )
+    figure_label: str | None = Field(default=None, min_length=1, max_length=500)
+
+    @model_validator(mode="after")
+    def validate_figure_provenance(self) -> CitationSourceFragment:
+        figure_fields = (self.figure_analysis_id, self.figure_label)
+        if self.evidence_kind == "figure":
+            if any(value is None for value in figure_fields) or self.page_start != self.page_end:
+                raise ValueError("visual source fragment requires complete figure provenance")
+        elif any(value is not None for value in figure_fields):
+            raise ValueError("text source fragment cannot carry figure provenance")
+        return self
 
 
 class ResolvedCitationTarget(BaseModel):

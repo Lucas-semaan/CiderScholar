@@ -132,6 +132,13 @@ def runtime_payload(settings: Settings) -> dict[str, Any]:
         "administrator": load_local_profile() is LocalProfile.ADMIN,
         "memory": asdict(memory),
         "deep_research": deep_research.model_dump(mode="json"),
+        "figure_analysis": {
+            "available": settings.figure_analysis.enabled,
+            "model": settings.figure_analysis.model,
+            "max_figures": settings.figure_analysis.max_figures,
+            "estimated_min_seconds": settings.figure_analysis.estimated_min_seconds,
+            "estimated_max_seconds": settings.figure_analysis.estimated_max_seconds,
+        },
         "corpus_update": {
             **corpus_update.model_dump(mode="json"),
             "published_at": (

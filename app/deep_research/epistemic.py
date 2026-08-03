@@ -23,6 +23,8 @@ def _computed_level(
 ) -> EpistemicLevel:
     if not verification.supported:
         return "hypothese"
+    if any(evidence.evidence_kind == "figure" for evidence in claim.evidence):
+        return "deduction"
     if claim.role == "result":
         return "observation_directe"
     return "deduction"
@@ -34,6 +36,7 @@ class EpistemicClaimAssessment(BaseModel):
     claim_id: str = Field(pattern=r"^claim-[0-9a-f]{20}$")
     source_role: Literal["result", "interpretation", "recommendation"]
     semantically_supported: bool
+    visual_evidence: bool = False
     level: EpistemicLevel
 
     @model_validator(mode="after")
@@ -41,6 +44,8 @@ class EpistemicClaimAssessment(BaseModel):
         expected: EpistemicLevel
         if not self.semantically_supported:
             expected = "hypothese"
+        elif self.visual_evidence:
+            expected = "deduction"
         elif self.source_role == "result":
             expected = "observation_directe"
         else:
@@ -102,6 +107,9 @@ class EpistemicAssessmentStage:
                     claim_id=claim.claim_id,
                     source_role=claim.role,
                     semantically_supported=verification_by_claim[claim.claim_id].supported,
+                    visual_evidence=any(
+                        evidence.evidence_kind == "figure" for evidence in claim.evidence
+                    ),
                     level=_computed_level(claim, verification_by_claim[claim.claim_id]),
                 )
                 for claim in claims.claims

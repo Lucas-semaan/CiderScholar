@@ -108,6 +108,7 @@ describe("API client", () => {
       message: "Question",
       client_request_id: "request-1",
       use_external_sources: false,
+      analyze_figures: true,
       mode: "quick",
       interaction_mode: "auto",
     });
@@ -128,6 +129,7 @@ describe("API client", () => {
           message: "Question",
           client_request_id: "request-1",
           use_external_sources: false,
+          analyze_figures: true,
           mode: "quick",
           interaction_mode: "auto",
         }),

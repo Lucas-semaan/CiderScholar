@@ -30,8 +30,14 @@ from app.ingestion.embeddings import (
     local_model_path,
 )
 from app.ingestion.pipeline import IngestionPipeline, IngestionReport
-from app.llm.argo_client import ArgoClient, ArgoError
+from app.llm.argo_client import ArgoClient, ArgoError, ArgoQuotaError
 from app.llm.article_evidence import ArticleEvidenceExtractor, EvidencePassageSelector
+from app.llm.figure_analysis import (
+    FigureAnalysisUnavailable,
+    OllamaFigureAnalysisService,
+    attach_figure_evidence,
+    figure_references_from_chat_records,
+)
 from app.llm.final_synthesis import (
     HierarchicalSynthesisService,
     SynthesisExecutionResult,
@@ -48,11 +54,21 @@ from app.retrieval.article_ranking import (
     ArticleRankingService,
     RankedArticle,
 )
+from app.retrieval.axis_coverage import (
+    canonical_article_key,
+    merge_axis_rankings,
+    select_with_axis_coverage,
+)
+from app.retrieval.coverage_assessment import (
+    ArgoEvidenceCoverageAssessor,
+    CoverageAssessmentResult,
+)
 from app.retrieval.hybrid_search import HybridChunkResult, HybridSearchService
 from app.retrieval.lexical_search import LexicalSearchService
 from app.retrieval.query_planning import (
     ArgoQueryPlanningService,
     QueryPlanningResult,
+    ResearchAxis,
     deterministic_query_plan,
 )
 from app.retrieval.reranker import (
@@ -64,6 +80,10 @@ from app.retrieval.scientific_intent import (
     ScientificIntent,
     analyze_scientific_intent,
     score_scientific_text,
+)
+from app.retrieval.semantic_filter import (
+    ArgoSemanticEvidenceFilter,
+    SemanticFilterResult,
 )
 from app.retrieval.vector_search import QdrantLocalIndex, VectorSearchService
 from app.services.chatbot import (
@@ -616,6 +636,7 @@ def search_common_corpus_full_text_evidence(
     article_count: int = 6,
     article_ids: Sequence[str] | None = None,
     search_queries: Sequence[str] = (),
+    axis_queries: Mapping[str, Sequence[str]] | None = None,
     intent_override: ScientificIntent | None = None,
 ) -> list[ChatEvidenceRecord]:
     """Hybrid-search full articles, causally rerank them, then hydrate passages."""
@@ -658,6 +679,27 @@ def search_common_corpus_full_text_evidence(
         variants.append(fallback_variant)
         known_variant_texts.add(fallback_variant.text.casefold())
     candidate_article_count = min(max(article_count * 5, 40), 100)
+    cleaned_axis_queries = {
+        axis_key.strip(): list(
+            dict.fromkeys(
+                " ".join(axis_query.split())[:2000]
+                for axis_query in queries
+                if len(" ".join(axis_query.split())) >= 2
+            )
+        )[:maximum_variant_count]
+        for axis_key, queries in (axis_queries or {}).items()
+        if axis_key.strip()
+    }
+    cleaned_axis_queries = dict(
+        list((axis_key, queries) for axis_key, queries in cleaned_axis_queries.items() if queries)[
+            :4
+        ]
+    )
+    # One axis does not need a separate pool: the global search already covers it.
+    if len(cleaned_axis_queries) < 2:
+        cleaned_axis_queries = {}
+    axis_candidate_count = min(max(article_count * 2, 12), 30)
+    axis_rankings: dict[str, Sequence[RankedArticle]] = {}
     if local_model_path(scoped_settings).is_dir():
         backend = SentenceTransformerBackend(scoped_settings)
         ranking_service = ArticleRankingService(
@@ -683,6 +725,16 @@ def search_common_corpus_full_text_evidence(
                 central_concepts=intent.central_concepts() or None,
                 article_ids=article_ids,
             )
+            for axis_key, queries in cleaned_axis_queries.items():
+                axis_query = queries[0]
+                axis_ranking = ranking_service.search(
+                    axis_query,
+                    query_variants=queries,
+                    article_count=axis_candidate_count,
+                    diversity_mode="none",
+                    article_ids=article_ids,
+                )
+                axis_rankings[axis_key] = axis_ranking.articles
         finally:
             ranking_service.close()
     else:
@@ -695,13 +747,37 @@ def search_common_corpus_full_text_evidence(
             central_concepts=intent.central_concepts() or None,
             article_ids=article_ids,
         )
+        for axis_key, queries in cleaned_axis_queries.items():
+            axis_variants = [
+                QueryVariant(
+                    text=axis_query,
+                    language="mixed",
+                    derivation="argo_plan",
+                    matched_terms=["argo_axis_query"],
+                    anchor_terms=[],
+                    scope_tier="strict",
+                )
+                for axis_query in queries
+            ]
+            axis_ranking = _lexical_full_text_ranking(
+                scoped_settings,
+                database,
+                query=queries[0],
+                variants=axis_variants,
+                article_count=axis_candidate_count,
+                central_concepts=None,
+                article_ids=article_ids,
+            )
+            axis_rankings[axis_key] = axis_ranking.articles
+
+    coverage_pool = merge_axis_rankings(ranking.articles, axis_rankings)
 
     chunk_rows = database.chunk_details_by_ids(
-        [chunk_id for article in ranking.articles for chunk_id in article.top_chunk_ids]
+        [chunk_id for article in coverage_pool.articles for chunk_id in article.top_chunk_ids]
     )
     relevance_by_article = {}
     reranker_candidates: list[RerankerCandidate] = []
-    for article in ranking.articles:
+    for article in coverage_pool.articles:
         passage_text = "\n".join(
             str(chunk_rows[chunk_id]["text"])
             for chunk_id in article.top_chunk_ids
@@ -744,9 +820,9 @@ def search_common_corpus_full_text_evidence(
     reranker_position = {
         result.candidate_id: position for position, result in enumerate(reranked, start=1)
     }
-    articles_by_id = {article.article_id: article for article in ranking.articles}
+    articles_by_id = {article.article_id: article for article in coverage_pool.articles}
     assessed_articles: list[tuple[float, RankedArticle]] = []
-    for article in ranking.articles:
+    for article in coverage_pool.articles:
         relevance = relevance_by_article[article.article_id]
         cross_encoder_signal = 1.0 / reranker_position.get(
             article.article_id,
@@ -773,28 +849,23 @@ def search_common_corpus_full_text_evidence(
         )
     )
 
-    selected_articles: list[RankedArticle] = []
-    selected_ids: set[str] = set()
+    selection_axis_ranks = dict(coverage_pool.axis_ranks)
     for facet in intent.facets:
-        candidate = next(
-            (
-                article
-                for _score, article in assessed_articles
-                if article.article_id not in selected_ids
-                and facet.key in relevance_by_article[article.article_id].matched_facets
-            ),
-            None,
-        )
-        if candidate is not None:
-            selected_articles.append(candidate)
-            selected_ids.add(candidate.article_id)
-    for _score, article in assessed_articles:
-        if len(selected_articles) >= article_count:
-            break
-        if article.article_id in selected_ids:
+        if facet.key in selection_axis_ranks:
             continue
-        selected_articles.append(article)
-        selected_ids.add(article.article_id)
+        fallback_ranks = {
+            canonical_article_key(article): rank
+            for rank, (_score, article) in enumerate(assessed_articles, start=1)
+            if facet.key in relevance_by_article[article.article_id].matched_facets
+        }
+        if fallback_ranks:
+            selection_axis_ranks[facet.key] = fallback_ranks
+
+    selected_articles = select_with_axis_coverage(
+        assessed_articles,
+        article_count=article_count,
+        axis_ranks=selection_axis_ranks,
+    )
 
     selector = EvidencePassageSelector(scoped_settings, database)
     records: list[ChatEvidenceRecord] = []
@@ -1141,6 +1212,84 @@ def answer_from_harvested_abstracts(
         return CiderAbstractRagService(llm).answer(question, search_response.results)
 
 
+def _semantic_filter_and_coverage(
+    settings: Settings,
+    *,
+    question: str,
+    axes: Sequence[ResearchAxis],
+    evidence: Sequence[ChatEvidenceRecord],
+    on_argo_reserved: Callable[[], None] | None,
+) -> tuple[SemanticFilterResult, CoverageAssessmentResult]:
+    """Filter evidence by scientific meaning, then assess each planned axis."""
+
+    with ArgoClient(settings) as llm:
+        semantic_filter = ArgoSemanticEvidenceFilter(llm).filter_records(
+            question,
+            axes,
+            evidence,
+            on_argo_reserved=on_argo_reserved,
+        )
+        coverage = ArgoEvidenceCoverageAssessor(llm).assess(
+            question,
+            axes,
+            evidence,
+            semantic_filter,
+            on_argo_reserved=on_argo_reserved,
+        )
+    return semantic_filter, coverage
+
+
+def _coverage_follow_up_queries(
+    axes: Sequence[ResearchAxis],
+    coverage: CoverageAssessmentResult,
+    *,
+    include_all_axes: bool = False,
+) -> dict[str, list[str]]:
+    """Return bounded follow-up queries only for axes not proven covered."""
+
+    coverage_by_key = {assessment.axis_key: assessment for assessment in coverage.axes}
+    follow_up: dict[str, list[str]] = {}
+    for axis in axes:
+        assessment = coverage_by_key.get(axis.key)
+        if not include_all_axes and assessment is not None and assessment.status == "covered":
+            continue
+        generated = [] if assessment is None else assessment.suggested_queries
+        queries = list(
+            dict.fromkeys(
+                " ".join(query.split())[:600]
+                for query in [*generated, *axis.search_queries]
+                if len(" ".join(query.split())) >= 2
+            )
+        )[:4]
+        if queries:
+            follow_up[axis.key] = queries
+    return follow_up
+
+
+def _coverage_notes(
+    axes: Sequence[ResearchAxis],
+    coverage: CoverageAssessmentResult | None,
+) -> list[str]:
+    """Translate a reliable incomplete-coverage assessment into synthesis constraints."""
+
+    if coverage is None or coverage.used_fallback:
+        return []
+    labels = {axis.key: axis.label for axis in axes}
+    notes: list[str] = []
+    for assessment in coverage.axes:
+        if assessment.status == "covered":
+            continue
+        missing = "; ".join(assessment.missing_information[:3])
+        note = (
+            f"Axe « {labels.get(assessment.axis_key, assessment.axis_key)} » : "
+            f"couverture documentaire {assessment.status}."
+        )
+        if missing:
+            note += f" Informations encore non documentées : {missing}."
+        notes.append(note[:700])
+    return notes
+
+
 def answer_chatbot(
     settings: Settings,
     database: Database,
@@ -1148,8 +1297,10 @@ def answer_chatbot(
     message: str,
     history: Sequence[Mapping[str, str]],
     use_external_sources: bool,
+    analyze_figures: bool = False,
     interaction_mode: str = "research",
     previous_sources: Sequence[ChatbotSource] = (),
+    on_figure_analysis: Callable[[], None] | None = None,
     on_argo_reserved: Callable[[], None] | None = None,
     on_argo_response: Callable[[], None] | None = None,
 ) -> ChatbotResult:
@@ -1197,6 +1348,7 @@ def answer_chatbot(
             duration_seconds=perf_counter() - started,
             interaction_mode="conversation",
             reused_previous_sources=True,
+            figure_analysis_requested=analyze_figures,
         )
     warnings: list[str] = []
     planning: QueryPlanningResult
@@ -1250,6 +1402,7 @@ def answer_chatbot(
             query=retrieval_query,
             article_count=8,
             search_queries=search_queries,
+            axis_queries={axis.key: axis.search_queries for axis in planning.plan.axes},
             intent_override=intent,
         )
     except Exception as exc:
@@ -1296,6 +1449,193 @@ def answer_chatbot(
             for error in external_report.errors
         )
 
+    semantic_prompt_tokens = 0
+    semantic_completion_tokens = 0
+    coverage_prompt_tokens = 0
+    coverage_completion_tokens = 0
+    semantic_filter: SemanticFilterResult | None = None
+    coverage: CoverageAssessmentResult | None = None
+    try:
+        semantic_filter, coverage = _semantic_filter_and_coverage(
+            settings,
+            question=retrieval_query,
+            axes=planning.plan.axes,
+            evidence=evidence,
+            on_argo_reserved=on_argo_reserved,
+        )
+    except ArgoQuotaError:
+        raise
+    except Exception as exc:
+        warnings.append(
+            "Le contrôle sémantique des preuves est indisponible "
+            f"({type(exc).__name__}); les candidats classés localement sont conservés."
+        )
+    else:
+        semantic_prompt_tokens += semantic_filter.prompt_tokens
+        semantic_completion_tokens += semantic_filter.completion_tokens
+        coverage_prompt_tokens += coverage.prompt_tokens
+        coverage_completion_tokens += coverage.completion_tokens
+        if semantic_filter.used_fallback:
+            warnings.append(
+                "Le filtrage sémantique multilingue est partiellement indisponible ; "
+                "les candidats concernés ont été conservés par prudence."
+            )
+        if coverage.used_fallback:
+            warnings.append(
+                "La couverture documentaire n'a pas pu être vérifiée par l'API ; "
+                "la synthèse conserve le classement scientifique local."
+            )
+
+    filtered_evidence = (
+        evidence if semantic_filter is None else semantic_filter.selected_records(evidence)
+    )
+    needs_follow_up = (
+        semantic_filter is not None
+        and coverage is not None
+        and (
+            not filtered_evidence
+            or (
+                not coverage.used_fallback
+                and any(assessment.status != "covered" for assessment in coverage.axes)
+            )
+        )
+    )
+    if needs_follow_up:
+        follow_up_by_axis = _coverage_follow_up_queries(
+            planning.plan.axes,
+            coverage,
+            include_all_axes=not filtered_evidence,
+        )
+        follow_up_queries = list(
+            dict.fromkeys(query for queries in follow_up_by_axis.values() for query in queries)
+        )[:8]
+        if follow_up_queries:
+            try:
+                supplemental_abstracts = _serialized_chat_retrieval(
+                    search_common_corpus_abstracts,
+                    settings,
+                    query=follow_up_queries[0],
+                    limit=15,
+                    search_queries=follow_up_queries,
+                    intent_override=intent,
+                )
+            except Exception as exc:
+                supplemental_abstracts = []
+                warnings.append(
+                    "La recherche complémentaire dans les abstracts est indisponible "
+                    f"({type(exc).__name__}); conservation de la première sélection."
+                )
+            try:
+                supplemental_full_text = _serialized_chat_retrieval(
+                    search_common_corpus_full_text_evidence,
+                    settings,
+                    query=follow_up_queries[0],
+                    article_count=8,
+                    search_queries=follow_up_queries,
+                    axis_queries=follow_up_by_axis,
+                    intent_override=intent,
+                )
+            except Exception as exc:
+                supplemental_full_text = []
+                warnings.append(
+                    "La recherche complémentaire dans les textes intégraux est indisponible "
+                    f"({type(exc).__name__}); les abstracts complémentaires sont conservés."
+                )
+            expanded_evidence = merge_chat_evidence(
+                [
+                    *(record for record in evidence if record.evidence_level == "full_text"),
+                    *supplemental_full_text,
+                ],
+                [
+                    *(record for record in evidence if record.evidence_level == "abstract"),
+                    *abstract_candidates_to_chat_evidence(supplemental_abstracts),
+                ],
+                query=retrieval_query,
+                limit=20,
+                intent_override=intent,
+            )
+            original_signature = [(record.record_id, record.evidence_level) for record in evidence]
+            expanded_signature = [
+                (record.record_id, record.evidence_level) for record in expanded_evidence
+            ]
+            if expanded_signature != original_signature:
+                previous_coverage = coverage
+                try:
+                    second_semantic_filter, second_coverage = _semantic_filter_and_coverage(
+                        settings,
+                        question=retrieval_query,
+                        axes=planning.plan.axes,
+                        evidence=expanded_evidence,
+                        on_argo_reserved=on_argo_reserved,
+                    )
+                except ArgoQuotaError:
+                    raise
+                except Exception as exc:
+                    warnings.append(
+                        "Le second contrôle sémantique est indisponible "
+                        f"({type(exc).__name__}); conservation de la première sélection."
+                    )
+                else:
+                    semantic_prompt_tokens += second_semantic_filter.prompt_tokens
+                    semantic_completion_tokens += second_semantic_filter.completion_tokens
+                    coverage_prompt_tokens += second_coverage.prompt_tokens
+                    coverage_completion_tokens += second_coverage.completion_tokens
+                    if second_semantic_filter.used_fallback:
+                        warnings.append(
+                            "Le second filtrage sémantique n'a pas pu qualifier les nouveaux "
+                            "candidats ; conservation de la première sélection validée."
+                        )
+                    else:
+                        semantic_filter = second_semantic_filter
+                        filtered_evidence = second_semantic_filter.selected_records(
+                            expanded_evidence
+                        )
+                        coverage = (
+                            previous_coverage if second_coverage.used_fallback else second_coverage
+                        )
+
+    evidence = filtered_evidence
+    if not evidence:
+        raise ChatbotNoSourcesError(
+            "aucune preuve sémantiquement pertinente n'est disponible pour cette question"
+        )
+    coverage_notes = _coverage_notes(planning.plan.axes, coverage)
+    if coverage_notes:
+        warnings.append(
+            "La couverture documentaire reste partielle pour : "
+            + ", ".join(
+                axis.label
+                for axis, assessment in zip(planning.plan.axes, coverage.axes, strict=True)
+                if assessment.status != "covered"
+            )
+            + "."
+        )
+
+    figure_analysis_count = 0
+    figure_analysis_duration = 0.0
+    figure_analysis_model: str | None = None
+    if analyze_figures:
+        try:
+            with OllamaFigureAnalysisService(settings) as figure_service:
+                figure_batch = figure_service.analyze(
+                    retrieval_query,
+                    figure_references_from_chat_records(evidence),
+                    on_analysis_started=on_figure_analysis,
+                )
+        except FigureAnalysisUnavailable as exc:
+            warnings.append(str(exc))
+        except Exception as exc:
+            warnings.append(
+                "L’analyse locale des figures est indisponible "
+                f"({type(exc).__name__}); la réponse reste fondée sur le texte."
+            )
+        else:
+            evidence = attach_figure_evidence(evidence, figure_batch.admitted)
+            warnings.extend(figure_batch.warnings)
+            figure_analysis_count = len(figure_batch.admitted)
+            figure_analysis_duration = figure_batch.duration_seconds
+            figure_analysis_model = figure_batch.model_name
+
     with ArgoClient(settings) as llm:
         rag = CiderEvidenceRagService(llm)
         if planning.plan.requires_faceted_answer:
@@ -1304,6 +1644,7 @@ def answer_chatbot(
                 evidence,
                 facets=intent.facets,
                 conversation_history=context,
+                coverage_notes=coverage_notes,
                 on_argo_reserved=on_argo_reserved,
                 on_argo_response=on_argo_response,
             )
@@ -1312,6 +1653,7 @@ def answer_chatbot(
                 message,
                 evidence,
                 conversation_history=context,
+                coverage_notes=coverage_notes,
                 on_argo_reserved=on_argo_reserved,
                 on_argo_response=on_argo_response,
             )
@@ -1326,12 +1668,26 @@ def answer_chatbot(
         local_result_count=sum(record.origin == "local_rag" for record in evidence),
         external_result_count=external_count,
         external_enrichment_used=any(source.origin == "external_api" for source in sources),
-        prompt_tokens=planning.prompt_tokens + answer.prompt_tokens,
-        completion_tokens=planning.completion_tokens + answer.completion_tokens,
+        prompt_tokens=(
+            planning.prompt_tokens
+            + semantic_prompt_tokens
+            + coverage_prompt_tokens
+            + answer.prompt_tokens
+        ),
+        completion_tokens=(
+            planning.completion_tokens
+            + semantic_completion_tokens
+            + coverage_completion_tokens
+            + answer.completion_tokens
+        ),
         duration_seconds=perf_counter() - started,
         interaction_mode="research",
         reused_previous_sources=False,
         facet_drafts=getattr(answer, "facet_drafts", []),
+        figure_analysis_requested=analyze_figures,
+        figure_analysis_count=figure_analysis_count,
+        figure_analysis_duration_seconds=figure_analysis_duration,
+        figure_analysis_model=figure_analysis_model,
     )
 
 
