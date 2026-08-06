@@ -137,12 +137,11 @@ class CitationTargetResolver(Protocol):
 
 
 class SQLiteCitationTargetResolver:
-    """Resolve DOI targets only from the two authoritative local databases."""
+    """Resolve DOI targets only from the authoritative common database."""
 
     def __init__(self, settings: Settings) -> None:
         self.databases = {
-            scope: Database(corpus_paths(settings, scope).database_path)
-            for scope in (CorpusScope.COMMON, CorpusScope.PRIVATE)
+            CorpusScope.COMMON: Database(corpus_paths(settings, CorpusScope.COMMON).database_path)
         }
 
     def resolve(
@@ -152,11 +151,10 @@ class SQLiteCitationTargetResolver:
         source_article_id: str,
         target_doi: str,
     ) -> ResolvedCitationTarget | None:
-        for scope in (source_scope, *(item for item in self.databases if item != source_scope)):
-            row = self.databases[scope].article_with_first_chunk_by_doi(target_doi)
-            if row is None:
-                continue
-            if scope == source_scope and str(row["article_id"]) == source_article_id:
+        scope = CorpusScope.COMMON
+        row = self.databases[scope].article_with_first_chunk_by_doi(target_doi)
+        if row is not None:
+            if str(row["article_id"]) == source_article_id:
                 return None
             if row["chunk_id"] is None:
                 return ResolvedCitationTarget(

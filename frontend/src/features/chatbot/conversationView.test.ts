@@ -61,12 +61,53 @@ describe("stored conversation compatibility", () => {
     expect(message?.response?.reused_previous_sources).toBe(false);
     expect(source).toMatchObject({
       evidence_level: "abstract",
-      scope: null,
       article_id: null,
       chunk_ids: [],
       page_ranges: [],
       authors: [],
       providers: ["OpenAlex"],
+    });
+  });
+
+  it("keeps a terminal job notice visible as an assistant message", () => {
+    const conversation = {
+      id: "conversation-failed",
+      title: "Evaluation bloquee",
+      created_at: "2026-08-06T01:00:00Z",
+      updated_at: "2026-08-06T01:01:00Z",
+      message_count: 1,
+      last_message: "Reponse non produite.",
+      active_job_count: 0,
+      favorite: false,
+      active_jobs: [],
+      messages: [
+        {
+          id: "message-failed",
+          role: "assistant",
+          content: "**Reponse non produite.** La validation scientifique a echoue.",
+          response: {
+            kind: "job_terminal_notice",
+            job_id: "job-failed",
+            state: "failed",
+            error_code: "scientific_validation_failed",
+            diagnostic_code: "invalid_schema",
+          },
+          response_time_milliseconds: null,
+          created_at: "2026-08-06T01:01:00Z",
+          helpful: null,
+        },
+      ],
+    } as ChatConversation;
+
+    const [message] = toConversationMessages(conversation);
+
+    expect(message?.response).toBeUndefined();
+    expect(message?.terminalNotice).toEqual({
+      kind: "job_terminal_notice",
+      job_id: "job-failed",
+      state: "failed",
+      error_code: "scientific_validation_failed",
+      diagnostic_code: "invalid_schema",
     });
   });
 });

@@ -35,8 +35,8 @@ class FakeLexical:
                     scope=CorpusScope.COMMON,
                 )
             ],
-            duration_seconds_by_scope={CorpusScope.COMMON: 0.1, CorpusScope.PRIVATE: 0.1},
-            duration_seconds=0.2,
+            duration_seconds_by_scope={CorpusScope.COMMON: 0.1},
+            duration_seconds=0.1,
         )
 
 
@@ -52,21 +52,21 @@ class FakeVector:
             results=[
                 VectorSearchResult(
                     chunk_id=7,
-                    article_id="private-article",
+                    article_id="common-vector-article",
                     score=0.8,
                     section="Discussion",
                     page_start=4,
                     page_end=5,
-                    text="private full text sentinel",
-                    scope=CorpusScope.PRIVATE,
+                    text="common vector sentinel",
+                    scope=CorpusScope.COMMON,
                 )
             ],
-            duration_seconds_by_scope={CorpusScope.COMMON: 0.1, CorpusScope.PRIVATE: 0.1},
-            duration_seconds=0.2,
+            duration_seconds_by_scope={CorpusScope.COMMON: 0.1},
+            duration_seconds=0.1,
         )
 
 
-def test_deep_research_queries_both_scopes_and_persists_only_scoped_references(
+def test_deep_research_queries_common_scope_and_persists_only_references(
     tmp_path,
 ) -> None:
     lexical = FakeLexical()
@@ -78,13 +78,13 @@ def test_deep_research_queries_both_scopes_and_persists_only_scoped_references(
     )
     snapshot = DeepResearchRetrievalStage(lexical, vector, tmp_path).search(payload)
 
-    assert lexical.scopes == (CorpusScope.COMMON, CorpusScope.PRIVATE)
-    assert vector.scopes == (CorpusScope.COMMON, CorpusScope.PRIVATE)
+    assert lexical.scopes == (CorpusScope.COMMON,)
+    assert vector.scopes == (CorpusScope.COMMON,)
     assert len(snapshot.variants) >= 1
     assert snapshot.variants[0].derivation == "original"
     assert {(hit.scope, hit.chunk_id) for hit in snapshot.hits} == {
         (CorpusScope.COMMON, 1),
-        (CorpusScope.PRIVATE, 7),
+        (CorpusScope.COMMON, 7),
     }
     assert all(hit.method == "rrf" for hit in snapshot.hits)
     assert all(hit.rrf_score == sum(hit.source_contributions.values()) for hit in snapshot.hits)
@@ -98,7 +98,6 @@ def test_deep_research_queries_both_scopes_and_persists_only_scoped_references(
     persisted = next(tmp_path.rglob("retrieval.json")).read_text(encoding="utf-8")
     assert "sentinel" not in persisted
     assert '"scope": "common"' in persisted
-    assert '"scope": "private"' in persisted
     assert '"variants"' in persisted
 
 

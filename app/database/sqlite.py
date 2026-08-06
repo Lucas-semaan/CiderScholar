@@ -1096,13 +1096,15 @@ class Database:
             )
             return int(cursor.rowcount)
 
-    def list_articles(self, *, limit: int = 500) -> list[sqlite3.Row]:
-        if not 1 <= limit <= 5000:
-            raise ValueError("article list limit must be between 1 and 5000")
+    def list_articles(self, *, limit: int | None = None) -> list[sqlite3.Row]:
+        if limit is not None and limit < 1:
+            raise ValueError("article list limit must be positive")
+        limit_clause = "" if limit is None else "LIMIT ?"
+        parameters: tuple[int, ...] = () if limit is None else (limit,)
         with closing(self.connect()) as connection:
             return list(
                 connection.execute(
-                    """
+                    f"""
                     SELECT
                         a.id, a.title, a.doi, a.journal, a.publication_year,
                         a.language, a.validation_status, a.pdf_path, a.source,
@@ -1114,9 +1116,9 @@ class Database:
                     LEFT JOIN chunks AS c ON c.article_id = a.id
                     GROUP BY a.id
                     ORDER BY a.created_at DESC, a.id
-                    LIMIT ?
+                    {limit_clause}
                     """,
-                    (limit,),
+                    parameters,
                 )
             )
 

@@ -33,7 +33,7 @@ def _payload() -> DeepResearchPayload:
 
 def _fragment() -> CitationSourceFragment:
     return CitationSourceFragment(
-        scope=CorpusScope.PRIVATE,
+        scope=CorpusScope.COMMON,
         article_id="article-claims",
         chunk_id=7,
         page_start=4,
@@ -74,7 +74,7 @@ def test_atomic_claim_has_one_role_and_verbatim_local_excerpt(tmp_path) -> None:
     assert claim.role == "result"
     assert len(claim.evidence) == 1
     assert claim.evidence[0].source_excerpt == excerpt
-    assert claim.evidence[0].scope is CorpusScope.PRIVATE
+    assert claim.evidence[0].scope is CorpusScope.COMMON
     assert claim.evidence[0].article_id == "article-claims"
     assert claim.evidence[0].chunk_id == 7
     assert stage.load(payload) == checkpoint

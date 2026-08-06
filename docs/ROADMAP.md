@@ -33,13 +33,13 @@ Le contrat rédactionnel est dans
 [`ACCESS_MODEL.md`](ACCESS_MODEL.md). Le parcours de clé ARGO est dans
 [`ARGO_KEY_SETUP.md`](ARGO_KEY_SETUP.md).
 
-## État actuel et responsabilités — 2026-08-03
+## État actuel et responsabilités — 2026-08-05
 
-Le dépôt contient 452 tâches : 400 sont terminées, aucune n’est en cours, 19 sont bloquées ou
-partielles et 33 restent en attente d’actions réelles. Les développements autonomes identifiés sont
-réalisés ; les blocages restants correspondent à des observations CiderQA/expert, un exécuteur
-système isolé, des postes physiques, SharePoint, ARGO réel ou des décisions conditionnelles
-d’architecture.
+Le dépôt contient 458 tâches : 400 sont terminées, une est en cours, 19 sont bloquées ou partielles
+et 38 restent en attente d’actions réelles. La priorité en cours est la stabilisation du chatbot ; les
+évolutions de forme du Corpus restent en attente de sa validation. Les autres blocages correspondent
+à des observations CiderQA/expert, un exécuteur système isolé, des postes physiques, SharePoint,
+ARGO réel ou des décisions conditionnelles d’architecture.
 
 Conformément à la décision du 2026-07-27 de terminer tout le travail autonome, le code en aval est
 désormais réalisé derrière le drapeau d’activation inactif, sans attendre les données humaines. Une
@@ -1977,6 +1977,82 @@ Architecture cible et conditions de déclenchement :
   n’existe pas déjà comme article complet commun, conserve les provenances fournisseur et `legacy`,
   reconstruit la collection vectorielle d’abstracts et les expose comme preuves d’abstract du corpus
   commun. Une arrivée ultérieure du PDF portant le même DOI donne priorité à l’article complet.
+
+## Prochaine mise à jour — stabilisation du chatbot puis corpus documentaire unifié
+
+Décision produit du 2026-08-05 : le **chatbot fonctionnel et validé** est le préalable à toute
+modification de forme de l’application. Son travail est déjà en cours ; aucun changement visuel du
+corpus ne commence avant sa validation. La mise à jour suivante portera ensuite une seule vue
+documentaire du **Corpus**, sans exposer la différence technique entre PDF importé, fragments,
+indexation ou notice bibliographique collectée.
+
+Elle inclura aussi un diagnostic opérationnel des travaux durables : étape réellement atteinte,
+durée, heartbeat du worker, état de la file et pression mémoire. Les informations restent agrégées
+et ne contiennent ni question, ni réponse, ni clé ; elles doivent permettre de distinguer une
+progression lente, une saturation locale et un worker indisponible.
+
+### Contrat fonctionnel confirmé
+
+- Le terme utilisateur unique est **Corpus**. Aucun écran, onglet, badge ou texte d’aide ne présente
+  une catégorie concurrente telle que « PDF local », « PDF indexé », « fragments », « indexation »
+  ou « notice collectée ».
+- Le Corpus affiche une fiche documentaire pour toute information disponible : PDF ajouté au corpus
+  commun, référence bibliographique collectée ou abstract connu. L’ajout d’un PDF le fait apparaître
+  automatiquement dans cette liste ; il ne dépend pas d’une création manuelle supplémentaire.
+- Une fiche réunit, seulement lorsqu’ils sont connus, titre, auteurs, année, revue, DOI, abstract et
+  provenances bibliographiques. Une absence de donnée reste explicite et n’est jamais complétée par
+  une inférence.
+- Lorsque plusieurs enregistrements désignent le même DOI normalisé, ils sont représentés par une
+  seule fiche et l’article complet est prioritaire. Un abstract sans PDF n’est exposé que si son DOI
+  complet est valide et normalisé ; aucun rapprochement n’est déduit du seul titre, des auteurs ou de
+  l’année.
+- Cette unification est une projection de lecture : les stockages scientifiques existants conservent
+  leurs responsabilités et ne sont ni fusionnés ni recopiés pour les besoins de l’interface.
+- Les opérations d’import, de réparation et de publication restent des fonctions d’administration
+  séparées. Elles n’ajoutent aucun état technique à la liste documentaire du Corpus.
+
+- [ ] `UI-031` Aligner le découpage de progression du chatbot sur le travail réellement exécuté.
+  Le premier appel ARGO de planification ne doit plus déclencher prématurément le libellé
+  `Génération de la réponse`. La progression distingue au minimum planification, recherche,
+  sélection des preuves, génération, validation scientifique et persistance, dans cet ordre réel.
+  Les événements restent durables et ne révèlent ni question, ni réponse, ni détail de prompt.
+  Dépendances : `JOB-003`, `WRK-007`, `UI-007`. Fini lorsque : une chronologie testée montre que
+  `Génération de la réponse` commence seulement après la sélection des preuves et qu’aucune recherche
+  vectorielle n’est présentée sous ce libellé.
+
+- [~] `COR-031` Stabiliser et valider le chatbot avant toute évolution de forme du corpus.
+  Avancement : le correctif du chatbot est en cours dans un travail séparé ; son comportement doit
+  être validé avant de commencer les tâches `COR-032` à `COR-035`.
+  Dépendances : `UI-031`.
+  Fini lorsque : une question représentative reçoit une réponse traçable du chatbot et les
+  validations automatisées concernées passent sans régression.
+
+- [ ] `COR-032` Définir la projection documentaire unifiée du Corpus.
+  La projection réunit les articles disposant d’un PDF et les abstracts acceptés associés à un DOI
+  vérifié. Un abstract de même DOI enrichit l’article sans créer une seconde entrée ; l’article
+  complet est toujours prioritaire. Une référence sans abstract ou sans DOI vérifié reste une donnée
+  technique invisible. Dépendances : `COR-031`. Fini lorsque : le contrat retourne une fiche par DOI
+  vérifié, étiquetée `Full article` ou `Abstract only`, sans doublon.
+
+- [ ] `COR-033` Exposer la liste documentaire unifiée par l’API du Corpus.
+  Les informations rendues sont titre, auteurs, année, revue, DOI, abstract lorsqu’il existe et
+  provenance bibliographique lorsqu’elle existe. La recherche par mot-clé couvre aussi les fragments
+  extraits et les abstracts vérifiés ; l’API permet d’ouvrir le PDF explicitement sélectionné quand il
+  existe. Dépendances : `COR-032`. Fini lorsque : les deux niveaux sont recherchables sans doublon de
+  DOI et qu’un DOI invalide ne peut produire une fiche `Abstract only`.
+
+- [ ] `COR-034` Faire du Corpus l’unique vue documentaire de l’interface.
+  L’interface présente tous les documents sous l’intitulé `Base documentaire`, avec une vue de
+  recherche et une vue opérationnelle d’import/indexation. Aucun onglet `Notices documentaires` n’est
+  exposé. Dépendances : `COR-033`. Fini lorsque : articles complets et abstracts seuls apparaissent
+  dans la même liste avec les badges `Full article` et `Abstract only`.
+
+- [ ] `COR-035` Vérifier la migration d’interface et préparer la prochaine mise à jour.
+  Les contrats FastAPI, client TypeScript, types, tests et documentation sont mis à jour ensemble ;
+  la version de publication n’est préparée qu’après validation de `COR-031` à `COR-034`.
+  Dépendances : `COR-034`. Fini lorsque : les validations backend et frontend passent, la note de
+  version décrit la vue documentaire unifiée du Corpus et aucun libellé utilisateur ne présente une
+  séparation technique.
 
 ## Critères de sortie globaux
 

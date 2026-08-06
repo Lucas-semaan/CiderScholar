@@ -7,9 +7,9 @@ from pathlib import Path
 from typing import Annotated, Literal
 from uuid import UUID, uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from app.jobs.contracts import JobPublic
+from app.jobs.contracts import JobPublic, JobState, JobStep, JobType
 from app.memory_profiles import MemoryProfileName
 from app.suggestions.models import (
     DoiSuggestionSource,
@@ -20,6 +20,43 @@ from app.suggestions.models import (
 
 class ApiModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
+
+
+class DiagnosticActiveJob(ApiModel):
+    """Safe durable-job metadata for an operator-facing diagnostic view."""
+
+    id: UUID
+    type: JobType
+    state: JobState
+    step: JobStep
+    created_at: datetime
+    heartbeat_at: datetime | None = None
+
+
+class DiagnosticWorker(ApiModel):
+    state: Literal["healthy", "stale"]
+    heartbeat_at: datetime | None = None
+    heartbeat_age_seconds: int | None = Field(default=None, ge=0)
+
+
+class DiagnosticProcess(ApiModel):
+    api_rss_bytes: int | None = Field(default=None, ge=0)
+    worker_rss_bytes: int | None = Field(default=None, ge=0)
+    system_available_bytes: int | None = Field(default=None, ge=0)
+
+
+class DiagnosticWarning(ApiModel):
+    code: str = Field(min_length=1, max_length=100, pattern=r"^[a-z0-9_]+$")
+    severity: Literal["info", "warning"]
+    message: str = Field(min_length=1, max_length=300)
+
+
+class SystemDiagnostics(ApiModel):
+    checked_at: datetime
+    worker: DiagnosticWorker
+    process: DiagnosticProcess
+    active_jobs: list[DiagnosticActiveJob] = Field(max_length=100)
+    warnings: list[DiagnosticWarning] = Field(max_length=20)
 
 
 class ArgoKeyRequest(ApiModel):
@@ -42,6 +79,48 @@ class ChatJobSubmitRequest(ApiModel):
     analyze_figures: bool = False
     mode: Literal["quick", "deep_research"] = "quick"
     interaction_mode: Literal["auto", "research", "conversation"] = "auto"
+    evaluation_run_id: str | None = Field(
+        default=None,
+        pattern=r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,79}$",
+    )
+    evaluation_question_id: str | None = Field(
+        default=None,
+        pattern=r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,79}$",
+    )
+    evaluation_profile: Literal["p0", "p1", "p2"] | None = None
+
+    @field_validator("message")
+    @classmethod
+    def clean_message(cls, value: str) -> str:
+        cleaned = " ".join(value.split())
+        if len(cleaned) < 2:
+            raise ValueError("message must contain at least two characters")
+        return cleaned
+
+    @model_validator(mode="after")
+    def validate_evaluation_request(self) -> ChatJobSubmitRequest:
+        metadata = (
+            self.evaluation_run_id,
+            self.evaluation_question_id,
+            self.evaluation_profile,
+        )
+        if not any(metadata):
+            return self
+        if not all(metadata):
+            raise ValueError("evaluation run, question and profile must be supplied together")
+        if self.mode != "quick" or self.interaction_mode != "research":
+            raise ValueError("evaluation questions require quick isolated research mode")
+        if self.use_external_sources:
+            raise ValueError("evaluation questions cannot use external sources")
+        return self
+
+
+class EvaluationJobSubmitRequest(ApiModel):
+    message: str = Field(min_length=2, max_length=4000)
+    client_request_id: UUID
+    run_id: str = Field(pattern=r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,79}$")
+    question_id: str = Field(pattern=r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,79}$")
+    profile: Literal["p0", "p1", "p2"]
 
     @field_validator("message")
     @classmethod

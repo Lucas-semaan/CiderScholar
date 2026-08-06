@@ -1,4 +1,4 @@
-"""Durable handlers for long synthesis and private local ingestion."""
+"""Durable handlers for long synthesis and corpus ingestion."""
 
 from __future__ import annotations
 
@@ -9,14 +9,13 @@ from time import monotonic
 from typing import Any, Protocol
 
 from app.config import Settings
-from app.corpora import CorpusScope, settings_for_corpus
 from app.database.sqlite import Database
 from app.ingestion.pipeline import IngestionReport
 from app.jobs.contracts import (
+    CorpusIngestionPayload,
     JobStep,
     JobType,
     LongSynthesisPayload,
-    PrivateIngestionPayload,
 )
 from app.jobs.repository import JobRecord
 from app.jobs.worker import JobHandlerResult, JobProgressContext
@@ -34,7 +33,7 @@ class SynthesisRunner(Protocol):
     ) -> Any: ...
 
 
-class PrivateIngester(Protocol):
+class CorpusIngester(Protocol):
     def __call__(
         self,
         settings: Settings,
@@ -75,29 +74,28 @@ class LongSynthesisHandler:
 
 
 @dataclass(slots=True)
-class PrivateIngestionHandler:
+class CorpusIngestionHandler:
     settings: Settings
     database: Database
-    ingest: PrivateIngester = ingest_paths
+    ingest: CorpusIngester = ingest_paths
     clock: Callable[[], float] = monotonic
 
     def handle(self, job: JobRecord, context: JobProgressContext) -> JobHandlerResult:
-        if job.type is not JobType.PRIVATE_INGESTION or not isinstance(
-            job.payload, PrivateIngestionPayload
+        if job.type is not JobType.CORPUS_INGESTION or not isinstance(
+            job.payload, CorpusIngestionPayload
         ):
-            raise ValueError("private-ingestion handler received another job type")
+            raise ValueError("corpus-ingestion handler received another job type")
         started_at = self.clock()
-        private_settings = settings_for_corpus(self.settings, CorpusScope.PRIVATE)
-        root = private_settings.paths.pdf_dir.resolve()
+        root = self.settings.paths.pdf_dir.resolve()
         paths = [self._resolve_staged_pdf(root, item) for item in job.payload.staged_files]
         context.check_cancellation()
-        context.publish(JobStep.INGESTION, technical_message="private_ingestion.started")
+        context.publish(JobStep.INGESTION, technical_message="corpus_ingestion.started")
 
         def progress(_completed: int, _total: int, _name: str, _state: str) -> None:
             context.check_cancellation()
 
         reports = self.ingest(
-            private_settings,
+            self.settings,
             self.database,
             paths,
             progress=progress,
@@ -109,7 +107,7 @@ class PrivateIngestionHandler:
         context.check_cancellation()
         return JobHandlerResult(
             assistant_content=(
-                f"Ingestion privée terminée : {len(reports)} document(s), "
+                f"Ingestion terminée : {len(reports)} document(s), "
                 f"{counts['chunks_ready']} prêt(s), {counts['duplicate']} doublon(s), "
                 f"{counts['ocr_required']} à OCRiser, {counts['failed']} en échec."
             ),
@@ -123,7 +121,7 @@ class PrivateIngestionHandler:
         try:
             candidate.relative_to(root)
         except ValueError as error:
-            raise ValueError("private staged PDF escapes its configured directory") from error
+            raise ValueError("staged PDF escapes its configured directory") from error
         if not candidate.is_file() or candidate.suffix.casefold() != ".pdf":
-            raise FileNotFoundError("a staged private PDF is unavailable")
+            raise FileNotFoundError("a staged PDF is unavailable")
         return candidate

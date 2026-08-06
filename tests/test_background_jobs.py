@@ -4,18 +4,17 @@ from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from uuid import uuid4
 
-from app.database.sqlite import Database
 from app.ingestion.pipeline import IngestionReport
-from app.jobs.background_handlers import LongSynthesisHandler, PrivateIngestionHandler
+from app.jobs.background_handlers import CorpusIngestionHandler, LongSynthesisHandler
 from app.jobs.contracts import (
+    CorpusIngestionPayload,
     JobState,
     JobStep,
     LongSynthesisPayload,
-    PrivateIngestionPayload,
 )
 from app.jobs.repository import (
+    CORPUS_INGESTION_CONVERSATION_ID,
     LONG_SYNTHESIS_CONVERSATION_ID,
-    PRIVATE_INGESTION_CONVERSATION_ID,
     JobRepository,
 )
 from app.jobs.worker import DurableJobWorker, JobHandlerRegistry
@@ -79,26 +78,24 @@ def test_long_synthesis_is_idempotently_queued_and_completed(settings) -> None:
     assert JobStep.SYNTHESIS.value in steps
 
 
-def test_private_ingestion_uses_only_staged_private_pdf_and_persists_counts(settings) -> None:
+def test_corpus_ingestion_uses_only_staged_corpus_pdf_and_persists_counts(settings) -> None:
     repository = JobRepository(settings.paths.database_path)
     repository.initialize()
-    private_database = Database(settings.paths.private_database_path)
-    private_database.initialize()
-    staged = settings.paths.private_pdf_dir / "uploads" / "digest-private.pdf"
+    staged = settings.paths.pdf_dir / "uploads" / "digest.pdf"
     staged.parent.mkdir(parents=True, exist_ok=True)
     staged.write_bytes(b"%PDF-1.4")
-    payload = PrivateIngestionPayload(
+    payload = CorpusIngestionPayload(
         staged_files=[f"uploads/{staged.name}"],
-        conversation_id=PRIVATE_INGESTION_CONVERSATION_ID,
+        conversation_id=CORPUS_INGESTION_CONVERSATION_ID,
         client_request_id=uuid4(),
     )
     now = datetime(2026, 7, 27, 12, tzinfo=UTC)
-    queued = repository.enqueue_private_ingestion(payload, now=now)
+    queued = repository.enqueue_corpus_ingestion(payload, now=now)
     received = []
 
     def ingest(_settings, database, paths, *, progress=None):
         received.extend(paths)
-        assert database.path == settings.paths.private_database_path
+        assert database.path == settings.paths.database_path
         if progress:
             progress(0, 1, paths[0].name, "ingestion")
         return [
@@ -114,9 +111,9 @@ def test_private_ingestion_uses_only_staged_private_pdf_and_persists_counts(sett
         repository=repository,
         registry=JobHandlerRegistry(
             {
-                queued.type: PrivateIngestionHandler(
+                queued.type: CorpusIngestionHandler(
                     settings,
-                    private_database,
+                    repository.database,
                     ingest=ingest,
                 )
             }

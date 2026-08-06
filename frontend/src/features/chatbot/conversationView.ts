@@ -1,8 +1,8 @@
 import type {
-  ChatbotResponse,
   ChatbotSource,
   ChatConversation,
   ChatConversationSummary,
+  StoredChatResponse,
 } from "@/types/api";
 
 import type { ChatMessage } from "./chatSession";
@@ -24,7 +24,6 @@ function normalizeStoredSource(source: ChatbotSource): ChatbotSource {
   return {
     ...source,
     evidence_level: source.evidence_level ?? "abstract",
-    scope: source.scope ?? null,
     article_id: source.article_id ?? null,
     chunk_ids: source.chunk_ids ?? [],
     page_ranges: source.page_ranges ?? [],
@@ -33,27 +32,39 @@ function normalizeStoredSource(source: ChatbotSource): ChatbotSource {
   };
 }
 
-export function normalizeStoredResponse(response: ChatbotResponse): ChatbotResponse {
+export function normalizeStoredResponse(response: StoredChatResponse): StoredChatResponse {
+  if ("kind" in response) {
+    return response;
+  }
   return {
     ...response,
     sources: (response.sources ?? []).map(normalizeStoredSource),
     warnings: response.warnings ?? [],
+    generation_status: response.generation_status ?? "generated",
+    diagnostic_code: response.diagnostic_code ?? null,
     interaction_mode: response.interaction_mode ?? "research",
     reused_previous_sources: response.reused_previous_sources ?? false,
   };
 }
 
 export function toConversationMessages(conversation: ChatConversation): ChatMessage[] {
-  return conversation.messages.map((message) => ({
-    id: message.id,
-    role: message.role,
-    content: message.content,
-    ...(message.response ? { response: normalizeStoredResponse(message.response) } : {}),
-    ...(message.response_time_milliseconds !== null
-      ? { responseTimeMilliseconds: message.response_time_milliseconds }
-      : {}),
-    helpful: message.helpful,
-  }));
+  return conversation.messages.map((message) => {
+    const storedResponse = message.response ? normalizeStoredResponse(message.response) : undefined;
+    return {
+      id: message.id,
+      role: message.role,
+      content: message.content,
+      ...(storedResponse && "kind" in storedResponse
+        ? { terminalNotice: storedResponse }
+        : storedResponse
+          ? { response: storedResponse }
+          : {}),
+      ...(message.response_time_milliseconds !== null
+        ? { responseTimeMilliseconds: message.response_time_milliseconds }
+        : {}),
+      helpful: message.helpful,
+    };
+  });
 }
 
 export function toSummary(conversation: ChatConversation): ChatConversationSummary {

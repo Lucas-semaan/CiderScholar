@@ -15,7 +15,7 @@ son sous-dossier `corpus`. Une icône de nuage seule signifie que la synchronisa
 ## Le corpus ou E5 est signalé comme corrompu
 
 Ne pas lancer de chat. Réinstaller CiderScholar depuis l’exécutable et le hash publiés ensemble. Les
-conversations, documents privés et secrets sont conservés. Si le modèle reste invalide, désinstaller,
+conversations et secrets sont conservés. Si le modèle reste invalide, désinstaller,
 choisir de conserver les données, puis réinstaller ; contacter l’administrateur avec la version et le
 message affiché, sans joindre de PDF ni de contenu de chat.
 
@@ -29,5 +29,4 @@ le problème persiste, transmettre uniquement la version, le type de travail, l�
 
 Une mise à jour n’est jamais appliquée pendant un travail actif. Attendre la fin visible dans le chat,
 arrêter CiderScholar, puis lancer le nouvel installateur SharePoint. Le répertoire `UserData` séparé
-préserve corpus, conversations, file, documents privés, configuration et secrets.
-
+préserve corpus, conversations, file, configuration et secrets.

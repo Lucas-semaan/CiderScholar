@@ -31,7 +31,7 @@ class WindowsJobNotifier:
             JobType.DEEP_RESEARCH: "Analyse approfondie",
             JobType.WEEKLY_MAINTENANCE: "Maintenance du corpus",
             JobType.LONG_SYNTHESIS: "Synthèse longue",
-            JobType.PRIVATE_INGESTION: "Ingestion privée",
+            JobType.CORPUS_INGESTION: "Ingestion du corpus",
         }[job.type]
         state = {
             JobState.SUCCEEDED: "terminée",

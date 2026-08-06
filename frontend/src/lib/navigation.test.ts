@@ -17,21 +17,15 @@ describe("navigation destinations", () => {
 
   it("keeps PDF documents inside the documentary database", () => {
     expect(librarySectionFromQuery("pdf")).toBe("pdf");
-    expect(librarySectionFromQuery("private")).toBe("records");
     expect(librarySectionFromQuery("unknown")).toBe("records");
     expect(appDestinations.corpusActivity).toBe("/bibliotheque?section=pdf&tab=activity");
   });
 
-  it("routes common and private corpus cards to their own content", () => {
-    expect(corpusDestinations("common")).toEqual({
+  it("routes corpus cards to the common corpus", () => {
+    expect(corpusDestinations()).toEqual({
       articles: "/bibliotheque?section=pdf&tab=articles#articles",
       assistant: "/",
       activity: "/bibliotheque?section=pdf&tab=activity",
-    });
-    expect(corpusDestinations("private")).toEqual({
-      articles: "/bibliotheque?section=private&tab=articles#articles",
-      assistant: "/",
-      activity: "/bibliotheque?section=private&tab=activity",
     });
   });
 

@@ -22,6 +22,7 @@ describe("API client", () => {
       theme: "biochimie",
       source: "openalex",
       abstract: "with",
+      availability: "full_text",
       limit: 25,
       offset: 50,
     });
@@ -30,6 +31,7 @@ describe("API client", () => {
     expect(requestedUrl).toContain("query=polyph%C3%A9nols+cidre");
     expect(requestedUrl).toContain("statuses=accepted%2Creview");
     expect(requestedUrl).toContain("theme=biochimie");
+    expect(requestedUrl).toContain("availability=full_text");
   });
 
   it("turns backend failures into typed errors", async () => {
@@ -44,6 +46,20 @@ describe("API client", () => {
     );
 
     await expect(api.system.overview()).rejects.toEqual(new ApiError("Requête invalide", 422));
+  });
+
+  it("loads local runtime diagnostics from the dedicated system route", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ active_jobs: 0, worker: {}, process: {}, warnings: [] }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await api.system.diagnostics();
+
+    expect(fetchMock).toHaveBeenCalledWith("/api/system/diagnostics", expect.anything());
   });
 
   it("sends review rejections without a second confirmation payload", async () => {
@@ -143,7 +159,39 @@ describe("API client", () => {
     );
   });
 
-  it("keeps common and private corpus operations scoped to their respective routes", async () => {
+  it("submits evaluation cells through the conversation-isolating endpoint", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({}), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await api.jobs.enqueueEvaluation({
+      message: "Question immuable",
+      client_request_id: "request-1",
+      run_id: "run-1",
+      question_id: "Q1",
+      profile: "p0",
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/chatbot/evaluation/jobs",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          message: "Question immuable",
+          client_request_id: "request-1",
+          run_id: "run-1",
+          question_id: "Q1",
+          profile: "p0",
+        }),
+      }),
+    );
+  });
+
+  it("sends corpus operations to the common corpus routes", async () => {
     const fetchMock = vi.fn().mockImplementation(() =>
       Promise.resolve(
         new Response(JSON.stringify({}), {
@@ -155,14 +203,14 @@ describe("API client", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     await api.corpus.folder("C:\\Articles", true);
-    await api.privateCorpus.index(false);
-    await api.privateCorpus.reindex("article/id");
+    await api.corpus.index(false);
+    await api.corpus.reindex("article/id");
     await api.corpus.remove("article/id");
 
     expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
       "/api/corpus/folder",
-      "/api/private-corpus/index",
-      "/api/private-corpus/article/id/reindex",
+      "/api/corpus/index",
+      "/api/corpus/article/id/reindex",
       "/api/corpus/article/id",
     ]);
     expect(fetchMock.mock.calls[0]?.[1]).toEqual(

@@ -5,20 +5,11 @@ export const appDestinations = {
   scientificAssistant: "/",
   documentaryRecords: "/bibliotheque",
   localPdfs: "/bibliotheque?section=pdf&tab=articles",
-  privateDocuments: "/bibliotheque?section=private&tab=articles",
   savedAnalyses: "/syntheses",
   corpusActivity: "/bibliotheque?section=pdf&tab=activity",
-  privateCorpusActivity: "/bibliotheque?section=private&tab=activity",
 } as const;
 
-export function corpusDestinations(scope: "common" | "private") {
-  if (scope === "private") {
-    return {
-      articles: `${appDestinations.privateDocuments}#articles`,
-      assistant: appDestinations.scientificAssistant,
-      activity: appDestinations.privateCorpusActivity,
-    };
-  }
+export function corpusDestinations() {
   return {
     articles: `${appDestinations.localPdfs}#articles`,
     assistant: appDestinations.scientificAssistant,

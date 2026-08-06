@@ -280,7 +280,7 @@ def test_hierarchical_synthesis_renders_only_sqlite_citations(settings) -> None:
     assert article_enum == article_ids
 
 
-def test_private_synthesis_preserves_origin_in_citations_and_bibliography(settings) -> None:
+def test_synthesis_preserves_common_origin_in_citations_and_bibliography(settings) -> None:
     database = Database(settings.paths.database_path)
     database.initialize()
     evidence = _seed_query(database, article_count=1)
@@ -299,15 +299,14 @@ def test_private_synthesis_preserves_origin_in_citations_and_bibliography(settin
             settings,
             database,
             llm,
-            scope=CorpusScope.PRIVATE,
+            scope=CorpusScope.COMMON,
         )
         .synthesize(query_id="query-synthesis")
         .result
     )
 
-    assert "[Document privé · article-1, p. 2]" in result.answer_markdown
-    assert "Corpus commun" not in result.answer_markdown
-    assert result.bibliography[0].scope is CorpusScope.PRIVATE
+    assert "[Corpus commun · article-1, p. 2]" in result.answer_markdown
+    assert result.bibliography[0].scope is CorpusScope.COMMON
 
 
 def test_invalid_evidence_id_is_retried_before_theme_persistence(settings) -> None:

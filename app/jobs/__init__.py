@@ -1,6 +1,6 @@
 """Durable local job contracts and persistence."""
 
-from app.jobs.background_handlers import LongSynthesisHandler, PrivateIngestionHandler
+from app.jobs.background_handlers import CorpusIngestionHandler, LongSynthesisHandler
 from app.jobs.chat_handler import ChatAnswerHandler, ChatbotAnswerer
 from app.jobs.contracts import (
     ACTIVE_JOB_STATES,
@@ -12,6 +12,7 @@ from app.jobs.contracts import (
     MAX_JOB_ATTEMPTS,
     RESERVED_FUTURE_JOB_TYPES,
     ChatAnswerPayload,
+    CorpusIngestionPayload,
     JobErrorDisposition,
     JobErrorKind,
     JobPublic,
@@ -20,7 +21,6 @@ from app.jobs.contracts import (
     JobStep,
     JobType,
     LongSynthesisPayload,
-    PrivateIngestionPayload,
     can_transition,
     retry_delay_after,
 )
@@ -59,8 +59,8 @@ __all__ = [
     "ChatbotAnswerer",
     "LongSynthesisHandler",
     "LongSynthesisPayload",
-    "PrivateIngestionHandler",
-    "PrivateIngestionPayload",
+    "CorpusIngestionHandler",
+    "CorpusIngestionPayload",
     "JobErrorDisposition",
     "JobErrorKind",
     "JobPublic",

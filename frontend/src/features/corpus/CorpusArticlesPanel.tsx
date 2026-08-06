@@ -41,8 +41,8 @@ export function CorpusArticlesPanel({
     <Card className="scroll-mt-6 overflow-hidden" id="articles">
       <CardHeader className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div>
-          <h2 className="font-bold text-slate-900">Documents actifs</h2>
-          <p className="mt-1 text-xs text-slate-500">Métadonnées et couverture d’indexation</p>
+          <h2 className="font-bold text-slate-900">Documents avec texte intégral</h2>
+          <p className="mt-1 text-xs text-slate-500">PDF, métadonnées et couverture d’indexation</p>
         </div>
         <Button loading={busy === "index"} onClick={onIndex} variant="secondary">
           <RefreshCw aria-hidden="true" className="size-4" />
@@ -54,7 +54,7 @@ export function CorpusArticlesPanel({
           <EmptyState
             description="Importez un PDF scientifique pour créer les premiers fragments."
             icon={RefreshCw}
-            title="Le corpus est vide"
+            title="Aucun PDF dans la base"
           />
         </CardBody>
       ) : (

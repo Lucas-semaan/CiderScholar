@@ -1,55 +1,39 @@
-# Isolation des corpus
+# Corpus scientifique commun
 
-## Guide utilisateur : partagé ou privé ?
+CiderScholar utilise un unique corpus scientifique pour tous les écrans,
+imports, recherches et synthèses. Ses PDF, extractions, base SQLite et index
+Qdrant résident sous `data/common`.
 
-| Élément | Corpus commun | Documents privés |
-|---|---|---|
-| Qui peut le lire ? | Tous les postes qui installent la même version du corpus | Uniquement l'utilisateur de ce poste |
-| Qui peut le modifier ? | Le profil administrateur local pendant une mise à jour validée | L'utilisateur, depuis l'onglet `Documents privés` |
-| Où sont les PDF et index ? | `data/common` | `data/private` |
-| Une mise à jour commune le remplace ? | Oui, après vérification et avec archivage de la version précédente | Non, ses hashes doivent rester identiques |
-| Sauvegarde et restauration | Distribuées avec le paquet de corpus administrateur | Commandes `backup_private_corpus.py` et `restore_private_corpus.py` |
-| Peut-il devenir une suggestion partagée ? | Déjà partagé | Seulement après une action explicite de l'utilisateur |
-| Étiquette dans les résultats et citations | `Corpus commun` | `Document privé` |
+La vue « Base documentaire » et la recherche locale sont strictement centrées
+sur les PDF présents. Les métadonnées bibliographiques peuvent enrichir un PDF
+par DOI ou servir temporairement à son acquisition, mais une référence sans PDF
+n’est ni un document visible ni une source du RAG local.
 
-La recherche PDF interroge par défaut les deux espaces, mais le filtre permet de limiter la portée.
-Un DOI présent dans les deux espaces ne produit qu'un résultat commun. Sans DOI, les deux documents
-restent distincts. Une source privée n'est jamais envoyée, suggérée ou présentée comme commune sans
-action explicite.
+Les résultats et citations portent donc toujours l’étiquette `Corpus commun`.
+La recherche ne filtre plus de portée et la liste des articles n’est pas
+tronquée à 5 000 éléments.
 
-## Décision SQLite
+`GET /api/corpus/{article_id}/pdf` ouvre le fichier source correspondant à un
+identifiant d’article explicitement sélectionné dans cette base.
 
-Le corpus commun et l’espace privé utilisent deux fichiers SQLite indépendants :
-`data/common/database/science_rag.sqlite3` et
-`data/private/database/science_rag.sqlite3`. Ils ne sont jamais attachés à la même connexion.
-Les lectures multi-corpus ouvrent, interrogent puis ferment chaque base séquentiellement et
-fusionnent des résultats qui conservent leur `scope`. Une identité technique est donc le couple
-`(scope, id)` ; un identifiant seul n’est pas global.
+## Migration des installations existantes
 
-Cette séparation permet de remplacer atomiquement le corpus commun et de sauvegarder ou restaurer
-le privé sans recopier l’autre espace. La base historique `data/database/science_rag.sqlite3` peut
-être copiée une fois avec `python scripts/migrate_legacy_corpus.py` depuis un profil administrateur ;
-la commande conserve la source pour permettre le contrôle du nombre d'articles et des DOI.
-La commande ciblée `python scripts/migrate_legacy_abstracts.py` réimporte dans le corpus commun les
-abstracts bibliographiques historiques acceptés qui ne possèdent pas encore d'article complet au
-même DOI, puis reconstruit uniquement leur collection vectorielle locale. Elle ne recopie ni PDF ni
-index de chunks. Les notices rejetées ne sont jamais copiées ; les notices sans DOI restent distinctes
-faute de preuve d'identité.
+Exécuter une fois :
 
-## Décision Qdrant
+```powershell
+python -m scripts.merge_legacy_split_corpus
+python -m scripts.transfer_legacy_vectors
+```
 
-Chaque portée possède son propre stockage Qdrant local sous `data/common/qdrant` ou
-`data/private/qdrant`. Le nom de collection peut rester identique car les stockages physiques sont
-distincts. Les index sont ouverts et fermés séquentiellement afin de respecter les postes 8 Go et
-un point Qdrant n’est hydraté qu’avec la base SQLite de la même portée.
+La première commande consolide les articles, fragments, éléments documentaires,
+traces OCR et PDF gérés des anciens emplacements dans `data/common`. Elle crée
+une sauvegarde SQLite préalable sous `data/backups` et ne supprime pas les
+sources historiques. La seconde commande remappe directement les vecteurs
+existants vers les nouveaux identifiants de fragments, sans recalculer les
+embeddings déjà indexés.
 
-Il est interdit de fusionner physiquement les points communs et privés ou de recopier le texte des
-fragments dans Qdrant.
+## Sauvegarde
 
-## Identité et déduplication
-
-Le DOI normalisé est la seule preuve inter-corpus disponible dans une projection de recherche ; le
-commun est prioritaire à DOI égal. Sans DOI, aucun rapprochement de titre, auteurs ou année ne
-supprime un résultat : ces champs peuvent être identiques pour des documents réellement distincts.
-Un futur hash de fichier vérifié pourra constituer une preuve explicite, mais le repli actuel reste
-le couple `(scope, article_id)`.
+`python -m scripts.backup_corpus` crée une archive vérifiée du corpus commun.
+`python -m scripts.restore_corpus archive.zip` remplace atomiquement ce corpus
+et conserve la version précédente sous `data/backups/corpus/rollback`.

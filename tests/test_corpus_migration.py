@@ -99,7 +99,6 @@ def test_legacy_migration_preserves_article_count_doi_and_chunk_ids(settings, tm
     assert rows[0]["doi"] == doi
     assert common.article_chunk_ids("legacy-article") == [original_chunk_id]
     assert str(rows[0]["pdf_path"]).startswith(str(settings.paths.common_pdf_dir))
-    assert not settings.paths.private_database_path.exists()
 
 
 def test_legacy_migration_is_admin_only(settings, tmp_path) -> None:
@@ -213,15 +212,26 @@ def test_legacy_abstracts_without_full_text_are_indexed_searched_and_citable(
         FakeBackend(),
         close_backend=False,
     )
+    invalid_doi_id = "55555555-5555-4555-8555-555555555555"
+    _seed_legacy_abstract(
+        common,
+        record_id=invalid_doi_id,
+        doi="https://doi.org/10.1000/not-normalized",
+        title="Invalid DOI representation",
+        abstract="Pomologyinvalid appears only in this abstract.",
+    )
     monkeypatch.setattr(workflows, "SentenceTransformerBackend", lambda _settings: FakeBackend())
-
     results = workflows.search_common_corpus_abstracts(
         settings,
         query="microbial succession cider",
         limit=5,
     )
+    invalid_doi_results = workflows.search_common_corpus_abstracts(
+        settings,
+        query="pomologyinvalid",
+        limit=5,
+    )
     sources = chatbot_sources(results, [results[0].record_id])
-
     assert index_report.records_indexed == 1
     assert prune_report.records_pruned == 1
     assert results[0].record_id == f"common-abstract:{abstract_id}"
@@ -229,3 +239,6 @@ def test_legacy_abstracts_without_full_text_are_indexed_searched_and_citable(
     assert sources[0].scope is CorpusScope.COMMON
     assert sources[0].evidence_level == "abstract"
     assert set(sources[0].providers) == {"OpenAlex", "legacy"}
+    assert all(
+        result.record_id != f"common-abstract:{invalid_doi_id}" for result in invalid_doi_results
+    )

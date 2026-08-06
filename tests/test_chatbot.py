@@ -5,7 +5,11 @@ from types import SimpleNamespace
 import pytest
 
 from app.database.sqlite import Database
-from app.llm.argo_client import ArgoQuotaError
+from app.llm.argo_client import (
+    ArgoQuotaError,
+    ArgoScientificValidationError,
+    ScientificValidationReason,
+)
 from app.models.chatbot import ChatbotFacetDraft, ChatEvidencePassage, ChatEvidenceRecord
 from app.retrieval.coverage_assessment import (
     AxisCoverageAssessment,
@@ -358,8 +362,10 @@ def test_answer_chatbot_applies_the_multilingual_semantic_selection_before_synth
         axes,
         evidence,
         on_argo_reserved,
+        on_coverage_started,
     ):
         del on_argo_reserved
+        on_coverage_started()
         assert "stabilité protéique" in question
         decisions = [
             CandidateSemanticDecision(
@@ -440,12 +446,14 @@ def test_answer_chatbot_applies_the_multilingual_semantic_selection_before_synth
         FakeEvidenceService,
     )
 
+    progress_stages = []
     result = answer_chatbot(
         settings,
         Database(settings.paths.database_path),
         message="Fais un état de l'art sur la stabilité protéique des jus de pomme.",
         history=[],
         use_external_sources=False,
+        on_progress=progress_stages.append,
     )
 
     assert [record.record_id for record in captured["records"]] == [relevant.record_id]
@@ -453,6 +461,14 @@ def test_answer_chatbot_applies_the_multilingual_semantic_selection_before_synth
     assert result.prompt_tokens == 20
     assert result.completion_tokens == 9
     assert [source.record_id for source in result.sources] == [relevant.record_id]
+    assert progress_stages == [
+        "planning",
+        "search",
+        "reranking",
+        "evidence_selection",
+        "coverage",
+        "generation",
+    ]
 
 
 def test_answer_chatbot_runs_only_one_targeted_follow_up_for_an_uncovered_axis(
@@ -506,8 +522,10 @@ def test_answer_chatbot_runs_only_one_targeted_follow_up_for_an_uncovered_axis(
         axes,
         evidence,
         on_argo_reserved,
+        on_coverage_started,
     ):
         del on_argo_reserved
+        on_coverage_started()
         calls["assessment"] += 1
         decisions = [
             CandidateSemanticDecision(
@@ -655,6 +673,268 @@ def test_answer_chatbot_never_downgrades_planning_when_argo_quota_is_reached(
             history=[],
             use_external_sources=False,
         )
+
+
+def test_answer_chatbot_returns_extracts_when_argo_synthesis_is_invalid(
+    settings,
+    monkeypatch,
+) -> None:
+    candidate = _local(1)
+
+    class FakeArgoClient:
+        def __init__(self, _settings):
+            pass
+
+        def __enter__(self):
+            return object()
+
+        def __exit__(self, *_args):
+            return None
+
+    class InvalidEvidenceService:
+        def __init__(self, _client):
+            pass
+
+        def answer(self, *_args, **_kwargs):
+            raise ArgoScientificValidationError(
+                "unsupported numeric claim",
+                reason=ScientificValidationReason.UNSUPPORTED_NUMERIC_CLAIM,
+            )
+
+        def answer_faceted(self, *_args, **_kwargs):
+            return self.answer()
+
+    monkeypatch.setattr(
+        "app.services.workflows.search_common_corpus_abstracts",
+        lambda *_args, **_kwargs: [candidate],
+    )
+    monkeypatch.setattr(
+        "app.services.workflows.search_common_corpus_full_text_evidence",
+        lambda *_args, **_kwargs: [],
+    )
+    monkeypatch.setattr("app.services.workflows.ArgoClient", FakeArgoClient)
+    monkeypatch.setattr(
+        "app.services.workflows.CiderEvidenceRagService",
+        InvalidEvidenceService,
+    )
+
+    result = answer_chatbot(
+        settings,
+        Database(settings.paths.database_path),
+        message="Quels facteurs influencent la fermentation ?",
+        history=[],
+        use_external_sources=False,
+    )
+
+    assert result.generation_status == "extractive_fallback"
+    assert result.diagnostic_code == "unsupported_numeric_claim"
+    assert result.model == "deterministic-evidence-fallback"
+    assert [source.record_id for source in result.sources] == [candidate.record_id]
+    assert "passages les mieux classés" in result.answer_markdown
+
+
+def test_answer_chatbot_returns_a_diagnostic_when_retrieval_is_empty(
+    settings,
+    monkeypatch,
+) -> None:
+    class FakeArgoClient:
+        def __init__(self, _settings):
+            pass
+
+        def __enter__(self):
+            return object()
+
+        def __exit__(self, *_args):
+            return None
+
+    monkeypatch.setattr(
+        "app.services.workflows.search_common_corpus_abstracts",
+        lambda *_args, **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        "app.services.workflows.search_harvested_abstracts",
+        lambda *_args, **_kwargs: SimpleNamespace(results=[]),
+    )
+    monkeypatch.setattr(
+        "app.services.workflows.search_common_corpus_full_text_evidence",
+        lambda *_args, **_kwargs: [],
+    )
+    monkeypatch.setattr("app.services.workflows.ArgoClient", FakeArgoClient)
+
+    result = answer_chatbot(
+        settings,
+        Database(settings.paths.database_path),
+        message="Question dont le retrieval est simulé vide",
+        history=[],
+        use_external_sources=False,
+    )
+
+    assert result.generation_status == "diagnostic_only"
+    assert result.diagnostic_code == "retrieval_no_qualified_evidence"
+    assert result.sources == []
+    assert "anomalie de retrieval" in result.answer_markdown
+
+
+def test_answer_chatbot_returns_a_diagnostic_when_local_retrieval_crashes(
+    settings,
+    monkeypatch,
+) -> None:
+    class FakeArgoClient:
+        def __init__(self, _settings):
+            pass
+
+        def __enter__(self):
+            return object()
+
+        def __exit__(self, *_args):
+            return None
+
+    def fail_retrieval(*_args, **_kwargs):
+        raise RuntimeError("simulated local retrieval failure")
+
+    monkeypatch.setattr(
+        "app.services.workflows.search_common_corpus_abstracts",
+        fail_retrieval,
+    )
+    monkeypatch.setattr(
+        "app.services.workflows.search_harvested_abstracts",
+        fail_retrieval,
+    )
+    monkeypatch.setattr(
+        "app.services.workflows.search_common_corpus_full_text_evidence",
+        fail_retrieval,
+    )
+    monkeypatch.setattr("app.services.workflows.ArgoClient", FakeArgoClient)
+
+    result = answer_chatbot(
+        settings,
+        Database(settings.paths.database_path),
+        message="Question avec panne de retrieval simulée",
+        history=[],
+        use_external_sources=False,
+    )
+
+    assert result.generation_status == "diagnostic_only"
+    assert result.diagnostic_code == "retrieval_unavailable"
+    assert any("RuntimeError" in warning for warning in result.warnings)
+
+
+def test_answer_chatbot_exposes_retrieved_evidence_when_semantic_filter_selects_nothing(
+    settings,
+    monkeypatch,
+) -> None:
+    candidate = _local(1)
+    evidence = ChatEvidenceRecord(
+        record_id=candidate.record_id,
+        origin="local_rag",
+        evidence_level="abstract",
+        scope="common",
+        title=candidate.title,
+        authors=candidate.authors,
+        doi=candidate.doi,
+        journal=candidate.journal,
+        publication_year=candidate.publication_year,
+        providers=candidate.sources,
+        evidence_grade="D",
+        passages=[
+            ChatEvidencePassage(
+                evidence_id=f"{candidate.record_id}:abstract",
+                text=candidate.abstract,
+            )
+        ],
+    )
+
+    class FakeArgoClient:
+        def __init__(self, _settings):
+            pass
+
+        def __enter__(self):
+            return object()
+
+        def __exit__(self, *_args):
+            return None
+
+    def reject_all(
+        _settings,
+        *,
+        question,
+        axes,
+        evidence,
+        on_argo_reserved,
+        on_coverage_started,
+    ):
+        del evidence, on_argo_reserved
+        on_coverage_started()
+        semantic = SemanticFilterResult(
+            question=question,
+            axes=[
+                AxisSemanticAssessment(
+                    axis_key=axis.key,
+                    decisions=[
+                        CandidateSemanticDecision(
+                            candidate_id=candidate.record_id,
+                            relevance="irrelevant",
+                            rationale="Rejet simulé pour tester le repli.",
+                        )
+                    ],
+                )
+                for axis in axes
+            ],
+            selected_candidate_ids=[],
+            model="semantic-test",
+            prompt_tokens=1,
+            completion_tokens=1,
+        )
+        coverage = CoverageAssessmentResult(
+            question=question,
+            axes=[
+                AxisCoverageAssessment(
+                    axis_key=axis.key,
+                    status="missing",
+                    supporting_candidate_ids=[],
+                    assessment="Couverture rejetée par simulation.",
+                )
+                for axis in axes
+            ],
+            model="coverage-test",
+            prompt_tokens=1,
+            completion_tokens=1,
+        )
+        return semantic, coverage
+
+    monkeypatch.setattr(
+        "app.services.workflows.search_common_corpus_abstracts",
+        lambda *_args, **_kwargs: [candidate],
+    )
+    monkeypatch.setattr(
+        "app.services.workflows.search_common_corpus_full_text_evidence",
+        lambda *_args, **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        "app.services.workflows.merge_chat_evidence",
+        lambda *_args, **_kwargs: [evidence],
+    )
+    monkeypatch.setattr(
+        "app.services.workflows._semantic_filter_and_coverage",
+        reject_all,
+    )
+    monkeypatch.setattr(
+        "app.services.workflows._coverage_follow_up_queries",
+        lambda *_args, **_kwargs: {},
+    )
+    monkeypatch.setattr("app.services.workflows.ArgoClient", FakeArgoClient)
+
+    result = answer_chatbot(
+        settings,
+        Database(settings.paths.database_path),
+        message="Question technique avec rejet sémantique simulé",
+        history=[],
+        use_external_sources=False,
+    )
+
+    assert result.generation_status == "extractive_fallback"
+    assert result.diagnostic_code == "semantic_filter_empty"
+    assert [source.record_id for source in result.sources] == [candidate.record_id]
 
 
 def test_answer_chatbot_uses_faceted_drafts_for_multi_axis_research(

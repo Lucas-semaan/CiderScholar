@@ -141,6 +141,20 @@ class PdfExtractor(Protocol):
     def extract(self, pdf_path: Path) -> ExtractedDocument: ...
 
 
+def sorted_page_text(page: Any) -> str:
+    """Preserve block reading order without PyMuPDF's pathological line sort cases."""
+
+    return (
+        "\n".join(
+            str(block[4])
+            for block in page.get_text("blocks", sort=True)
+            if len(block) >= 5 and str(block[4]).strip()
+        )
+        .replace("\x00", "")
+        .strip()
+    )
+
+
 class PyMuPdfExtractor:
     def __init__(
         self,
@@ -178,7 +192,7 @@ class PyMuPdfExtractor:
                 for index in range(page_count):
                     # Only the current page object and its extracted text are materialized.
                     page = document.load_page(index)
-                    text = page.get_text("text", sort=True).replace("\x00", "").strip()
+                    text = sorted_page_text(page)
                     pages.append(PageText(page_number=index + 1, text=text))
                     elements.extend(self._extract_elements(page, index + 1))
                     character_count = len(text)

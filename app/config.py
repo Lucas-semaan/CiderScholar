@@ -24,6 +24,7 @@ class AppConfig(BaseModel):
     allow_publisher_automation: bool = False
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
     chat_worker_concurrency: int = Field(default=20, ge=1, le=20)
+    experimental_chat_profile: Literal["p0", "p1", "p2"] = "p0"
 
     @model_validator(mode="after")
     def enforce_offline_mode(self) -> AppConfig:
@@ -63,28 +64,14 @@ class PathConfig(BaseModel):
         return self.common_dir / "qdrant"
 
     @property
+    def common_full_text_assets_dir(self) -> Path:
+        """Persistent native source files retained beside the common corpus."""
+
+        return self.common_dir / "full-text"
+
+    @property
     def common_database_path(self) -> Path:
         return self.common_dir / "database" / "science_rag.sqlite3"
-
-    @property
-    def private_dir(self) -> Path:
-        return self.data_dir / "private"
-
-    @property
-    def private_pdf_dir(self) -> Path:
-        return self.private_dir / "pdf"
-
-    @property
-    def private_extracted_dir(self) -> Path:
-        return self.private_dir / "extracted"
-
-    @property
-    def private_qdrant_dir(self) -> Path:
-        return self.private_dir / "qdrant"
-
-    @property
-    def private_database_path(self) -> Path:
-        return self.private_dir / "database" / "science_rag.sqlite3"
 
     def resolved(self, project_dir: Path) -> PathConfig:
         values: dict[str, Path] = {}
@@ -107,11 +94,8 @@ class PathConfig(BaseModel):
             self.common_pdf_dir,
             self.common_extracted_dir,
             self.common_qdrant_dir,
+            self.common_full_text_assets_dir,
             self.common_database_path.parent,
-            self.private_pdf_dir,
-            self.private_extracted_dir,
-            self.private_qdrant_dir,
-            self.private_database_path.parent,
         ):
             path.mkdir(parents=True, exist_ok=True)
 
@@ -226,7 +210,7 @@ class RetrievalConfig(BaseModel):
     lexical_text_weight: float = Field(default=1.0, ge=0.0, le=10.0)
     hybrid_candidate_limit: int = Field(default=200, ge=10, le=1000)
     hybrid_default_limit: int = Field(default=100, ge=1, le=1000)
-    hybrid_max_query_variants: int = Field(default=6, ge=1, le=20)
+    hybrid_max_query_variants: int = Field(default=8, ge=1, le=20)
 
     @model_validator(mode="after")
     def validate_weights(self) -> RetrievalConfig:
@@ -503,6 +487,7 @@ class FullTextConfig(BaseModel):
     batch_size: int = Field(default=25, ge=1, le=100)
     max_download_bytes: int = Field(default=104_857_600, ge=1_048_576, le=524_288_000)
     max_downloads_per_run: int = Field(default=500, ge=1, le=5000)
+    max_native_downloads_per_run: int = Field(default=500, ge=1, le=5000)
     availability_cache_hours: int = Field(default=168, ge=1, le=24 * 365)
     timeout_cooldown_hours: int = Field(default=6, ge=1, le=24 * 30)
     default_rate_limit_cooldown_hours: int = Field(default=1, ge=1, le=24 * 30)

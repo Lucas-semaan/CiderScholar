@@ -28,13 +28,12 @@ def serialize_row(row: Mapping[str, Any], *, json_fields: Sequence[str] = ()) ->
     return payload
 
 
-def corpus_listing(database: Database, *, scope: str) -> dict[str, Any]:
-    """Serialize the shared corpus listing contract for either local corpus scope."""
+def corpus_listing(database: Database) -> dict[str, Any]:
+    """Serialize the complete authoritative corpus without truncating articles."""
 
-    articles = [serialize_row(row) for row in database.list_articles(limit=5000)]
+    articles = [serialize_row(row) for row in database.list_articles()]
     jobs = [serialize_row(row) for row in database.list_ingestion_jobs(limit=200)]
     return {
-        "scope": scope,
         "articles": articles,
         "jobs": jobs,
         "summary": {

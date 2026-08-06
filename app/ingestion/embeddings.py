@@ -15,7 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from app.config import Settings
 from app.database.sqlite import Database
-from app.memory import MemoryGuard
+from app.memory import MemoryGuard, MemoryLimitError
 
 LOGGER = logging.getLogger(__name__)
 
@@ -275,7 +275,22 @@ class EmbeddingBatchProcessor:
                     self.database.update_embedding_status(chunk_ids, "indexed")
                     report.batches_completed += 1
                     report.chunks_indexed += len(chunk_ids)
-                    snapshot = self.memory.check("embedding persistence")
+                    try:
+                        snapshot = self.memory.check("embedding persistence")
+                    except MemoryLimitError as exc:
+                        # Qdrant has acknowledged the upsert and SQLite now records the same
+                        # chunks as indexed. Do not reclassify this durable batch as failed:
+                        # doing so would make the two stores inconsistent on a memory-limited host.
+                        report.error_type = type(exc).__name__
+                        report.error_message = str(exc)[:1000]
+                        LOGGER.warning(
+                            "Embedding stopped after persisting batch first_chunk_id=%s count=%s "
+                            "error_type=%s",
+                            chunk_ids[0],
+                            len(chunk_ids),
+                            type(exc).__name__,
+                        )
+                        break
                     if snapshot is not None:
                         report.peak_process_rss_gb = max(
                             report.peak_process_rss_gb, snapshot.process_rss_gb

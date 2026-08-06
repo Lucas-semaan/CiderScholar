@@ -79,4 +79,5 @@ Get-ChildItem -LiteralPath $InputDirectory -Filter "*.png" -File |
         }
     }
 
-$results | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath $OutputPath -Encoding UTF8
+ConvertTo-Json -InputObject @($results) -Depth 3 |
+    Set-Content -LiteralPath $OutputPath -Encoding UTF8

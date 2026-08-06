@@ -76,7 +76,7 @@ def test_admin_imports_one_complete_suggestion_and_archives_cross_user_duplicate
         len(list((active.distribution.synchronized_root / "archive" / "suggestions").glob("*/*")))
         == 2
     )
-    with Database(active.paths.database_path).connect() as connection:
+    with Database(active.paths.common_database_path).connect() as connection:
         assert (
             connection.execute(
                 "SELECT COUNT(*) FROM bibliographic_records WHERE doi = '10.1000/shared'"
@@ -100,7 +100,7 @@ def test_admin_revalidates_received_decision_and_ignores_partial_directory(
     assert report.scanned == 1
     assert report.rejected == 1
     assert partial.is_dir()
-    with Database(active.paths.database_path).connect() as connection:
+    with Database(active.paths.common_database_path).connect() as connection:
         assert connection.execute("SELECT COUNT(*) FROM bibliographic_records").fetchone()[0] == 0
 
 

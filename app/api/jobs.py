@@ -11,7 +11,13 @@ from app.api.dependencies import get_database
 from app.api.schemas import JobRetryRequest
 from app.database.sqlite import Database
 from app.jobs.contracts import JobPublic, JobState
-from app.jobs.repository import ActiveJobLimitError, JobRepository
+from app.jobs.repository import (
+    ActiveJobLimitError,
+    EvaluationConversationIsolationError,
+    EvaluationQuestionAlreadySubmittedError,
+    EvaluationRunBusyError,
+    JobRepository,
+)
 
 router = APIRouter(prefix="/api/jobs", tags=["jobs"])
 
@@ -75,6 +81,25 @@ def retry_job(
                 "code": "active_job_limit",
                 "message": "Attendez la fin d'un travail actif avant de relancer.",
                 "limit": error.limit,
+            },
+        ) from error
+    except EvaluationRunBusyError as error:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "evaluation_run_busy",
+                "message": "Attendez le résultat terminal du job durable actif.",
+            },
+        ) from error
+    except (
+        EvaluationConversationIsolationError,
+        EvaluationQuestionAlreadySubmittedError,
+    ) as error:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "evaluation_retry_integrity",
+                "message": "La cellule d'évaluation ne peut pas être relancée en l'état.",
             },
         ) from error
     if retried is None:

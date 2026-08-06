@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 
-CURRENT_SCHEMA_VERSION = 26
+CURRENT_SCHEMA_VERSION = 29
 
 MIGRATIONS: dict[int, str] = {
     2: """
@@ -863,6 +863,45 @@ MIGRATIONS: dict[int, str] = {
         CREATE INDEX IF NOT EXISTS idx_figure_analysis_admitted
             ON figure_analysis_runs(status, relevance_score DESC, readability_score DESC);
     """,
+    27: """-- Rebuilt by rename_private_ingestion_job_contract.""",
+    28: """
+        CREATE TABLE IF NOT EXISTS native_full_text_assets (
+            id TEXT PRIMARY KEY,
+            record_id TEXT NOT NULL REFERENCES bibliographic_records(id) ON DELETE CASCADE,
+            doi TEXT NOT NULL,
+            source TEXT NOT NULL,
+            format TEXT NOT NULL CHECK(
+                format IN (
+                    'jats_xml', 'tei_xml', 'structured_xml', 'cleaned_text', 'plain_text'
+                )
+            ),
+            provider_id TEXT,
+            source_url TEXT NOT NULL,
+            final_url TEXT,
+            media_type TEXT NOT NULL,
+            license TEXT,
+            state TEXT NOT NULL CHECK(
+                state IN (
+                    'available', 'authentication_required', 'downloading',
+                    'downloaded', 'failed'
+                )
+            ),
+            file_path TEXT,
+            sha256 TEXT CHECK(sha256 IS NULL OR length(sha256) = 64),
+            byte_count INTEGER CHECK(byte_count IS NULL OR byte_count > 0),
+            error_type TEXT,
+            error_message TEXT,
+            checked_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(record_id, source, format)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_native_full_text_assets_doi
+            ON native_full_text_assets(doi COLLATE NOCASE);
+        CREATE INDEX IF NOT EXISTS idx_native_full_text_assets_state
+            ON native_full_text_assets(state, source, format);
+    """,
+    29: "",
 }
 
 
@@ -898,6 +937,16 @@ def ensure_current(connection: sqlite3.Connection) -> None:
             from app.database.background_job_migration import add_background_job_contracts
 
             add_background_job_contracts(connection)
+        elif target_version == 27:
+            from app.database.corpus_ingestion_job_migration import (
+                rename_private_ingestion_job_contract,
+            )
+
+            rename_private_ingestion_job_contract(connection)
+        elif target_version == 29:
+            from app.database.chat_progress_migration import add_chat_progress_steps
+
+            add_chat_progress_steps(connection)
         else:
             connection.executescript(migration)
         connection.execute("INSERT INTO schema_version(version) VALUES (?)", (target_version,))

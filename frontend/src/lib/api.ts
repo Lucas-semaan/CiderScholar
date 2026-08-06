@@ -19,6 +19,7 @@ import type {
   PublisherAccessStatus,
   ReadinessReport,
   RuntimeSettings,
+  SystemDiagnostics,
   SynthesisDetail,
   SynthesisQuery,
   SuggestionReferenceSource,
@@ -70,6 +71,7 @@ export interface LibraryRecordFilters {
   theme: string;
   source: string;
   abstract: "all" | "with" | "without";
+  availability: "all" | "full_text" | "abstract_only";
   limit: number;
   offset: number;
 }
@@ -160,6 +162,13 @@ export const api = {
       }),
   },
   jobs: {
+    enqueueEvaluation: (payload: {
+      message: string;
+      client_request_id: string;
+      run_id: string;
+      question_id: string;
+      profile: "p0" | "p1" | "p2";
+    }) => post<ChatJobSubmitResponse>("/api/chatbot/evaluation/jobs", payload),
     enqueue: (
       conversationId: string,
       payload: {
@@ -169,6 +178,9 @@ export const api = {
         analyze_figures: boolean;
         mode: "quick" | "deep_research";
         interaction_mode: "auto" | "research" | "conversation";
+        evaluation_run_id?: string;
+        evaluation_question_id?: string;
+        evaluation_profile?: "p0" | "p1" | "p2";
       },
     ) =>
       post<ChatJobSubmitResponse>(
@@ -190,6 +202,7 @@ export const api = {
   system: {
     overview: () => request<Overview>("/api/system/overview"),
     settings: () => request<RuntimeSettings>("/api/system/settings"),
+    diagnostics: () => request<SystemDiagnostics>("/api/system/diagnostics"),
     updateSettings: (payload: {
       default_article_count: number;
       lexical_weight: number;
@@ -293,7 +306,6 @@ export const api = {
     run: (runId: string) => request<PublisherAccessRun>(`/api/publisher-access/runs/${runId}`),
   },
   corpus: createCorpusApi("/api/corpus"),
-  privateCorpus: createCorpusApi("/api/private-corpus"),
   pilotFeedback: {
     list: () => request<PilotDefect[]>("/api/pilot-feedback"),
     submit: (payload: PilotDefectInput) => post<PilotDefect>("/api/pilot-feedback", payload),
@@ -305,6 +317,7 @@ export const api = {
         query: filters.query,
         statuses: filters.statuses.join(","),
         abstract: filters.abstract,
+        availability: filters.availability,
         limit: String(filters.limit),
         offset: String(filters.offset),
       });

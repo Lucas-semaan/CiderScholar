@@ -192,10 +192,10 @@ def test_evaluation_summariser_propagates_argo_error_in_strict_mode() -> None:
         summariser.summarize_batch("question", [_make_fragment()])
 
 
-def test_no_private_text_in_returned_results() -> None:
-    """Private fragment text must not appear in ContextualSummaryResult."""
-    private_text = "private full-text sentinel must not leak"
-    fragment = _make_fragment(scope=CorpusScope.PRIVATE, text=private_text)
+def test_no_fragment_text_in_returned_results() -> None:
+    """Fragment text must not appear in ContextualSummaryResult."""
+    fragment_text = "full-text sentinel must not leak"
+    fragment = _make_fragment(scope=CorpusScope.COMMON, text=fragment_text)
     client = _fake_client(_make_argo_response(summary="Safe summary."))
     summariser = ContextualSummarizer(client)
 
@@ -203,14 +203,14 @@ def test_no_private_text_in_returned_results() -> None:
 
     assert len(results) == 1
     result_json = results[0].model_dump_json()
-    assert private_text not in result_json
+    assert fragment_text not in result_json
 
 
 def test_summariser_fragment_from_hit_and_text() -> None:
     """SummarisableFragment.from_hit_and_text preserves all hit fields."""
     hit = DeepResearchFragmentHit(
         method="vector",
-        scope=CorpusScope.PRIVATE,
+        scope=CorpusScope.COMMON,
         article_id="art-42",
         chunk_id=7,
         page_start=3,

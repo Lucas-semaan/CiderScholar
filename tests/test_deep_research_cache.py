@@ -16,7 +16,6 @@ def _signature(**updates) -> DeepResearchCacheSignature:
     values = {
         "question": "Question cidricole",
         "common_corpus_sha256": "a" * 64,
-        "private_corpus_sha256": "b" * 64,
         "models": {"argo": "model-a"},
         "prompts": {"claims": "prompt-a"},
         "parameters": {"top_k": 12},
@@ -30,13 +29,12 @@ def test_every_required_dimension_invalidates_cache_key() -> None:
     variants = [
         _signature(question="Autre question"),
         _signature(common_corpus_sha256="c" * 64),
-        _signature(private_corpus_sha256="d" * 64),
         _signature(models={"argo": "model-b"}),
         _signature(prompts={"claims": "prompt-b"}),
         _signature(parameters={"top_k": 8}),
     ]
 
-    assert len({baseline.cache_key_sha256, *(item.cache_key_sha256 for item in variants)}) == 7
+    assert len({baseline.cache_key_sha256, *(item.cache_key_sha256 for item in variants)}) == 6
 
 
 def test_cache_round_trip_verifies_signature_and_response_hash(settings) -> None:

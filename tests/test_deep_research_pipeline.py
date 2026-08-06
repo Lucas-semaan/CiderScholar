@@ -55,29 +55,29 @@ def _seed_scoped_chunk(
     )
 
 
-def test_sqlite_fragment_loader_rehydrates_each_scope_without_identity_mix(settings) -> None:
+def test_sqlite_fragment_loader_rehydrates_common_scope_without_identity_mix(settings) -> None:
     common = _seed_scoped_chunk(
         settings,
         CorpusScope.COMMON,
         article_id="common-article",
         text="common authoritative text",
     )
-    private = _seed_scoped_chunk(
+    other = _seed_scoped_chunk(
         settings,
-        CorpusScope.PRIVATE,
-        article_id="private-article",
-        text="private authoritative text",
+        CorpusScope.COMMON,
+        article_id="other-article",
+        text="other authoritative text",
     )
 
-    loaded = SQLiteFragmentTextLoader(settings).load([common, private])
+    loaded = SQLiteFragmentTextLoader(settings).load([common, other])
 
     assert loaded[(CorpusScope.COMMON, "common-article", common.chunk_id)] == (
         "common authoritative text"
     )
-    assert loaded[(CorpusScope.PRIVATE, "private-article", private.chunk_id)] == (
-        "private authoritative text"
+    assert loaded[(CorpusScope.COMMON, "other-article", other.chunk_id)] == (
+        "other authoritative text"
     )
 
-    mixed_identity = private.model_copy(update={"article_id": "common-article"})
+    mixed_identity = other.model_copy(update={"article_id": "common-article"})
     with pytest.raises(RuntimeError, match="provenance changed"):
         SQLiteFragmentTextLoader(settings).load([mixed_identity])

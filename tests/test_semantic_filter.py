@@ -10,6 +10,7 @@ from app.models.chatbot import ChatEvidencePassage, ChatEvidenceRecord
 from app.retrieval.query_planning import ResearchAxis
 from app.retrieval.semantic_filter import (
     ArgoSemanticEvidenceFilter,
+    CandidateSemanticDecision,
     SemanticFilterResult,
 )
 
@@ -50,7 +51,10 @@ def _axis(key: str = "haze") -> ResearchAxis:
         question="Quels mécanismes gouvernent le trouble protéique ?",
         terms_fr=["trouble protéique", "stabilité colloïdale"],
         terms_en=["protein haze", "colloidal stability"],
-        search_queries=["apple juice protein haze colloidal stability"],
+        search_queries=[
+            "apple juice protein haze colloidal stability",
+            "apple beverage protein haze mechanism",
+        ],
     )
 
 
@@ -111,15 +115,46 @@ def test_semantic_filter_uses_meaning_and_selects_direct_and_supportive_candidat
     )
 
     assert result.selected_candidate_ids == ["fr", "en"]
-    assert [record.record_id for record in result.selected_records(records)] == ["fr", "en"]
+    selected = result.selected_records(records)
+    assert [record.record_id for record in selected] == ["fr", "en"]
+    assert [record.evidence_grade for record in selected] == ["A", "B"]
     assert result.used_fallback is False
     system_prompt = client.calls[0][0][0]["content"]
     assert "jamais par simple présence de mots-clés" in system_prompt
     assert "traductions entre langues" in system_prompt
+    assert "A/direct" in system_prompt
+    assert "B/supportive" in system_prompt
+    assert "C/peripheral" in system_prompt
+    assert "D/irrelevant" in system_prompt
+    assert "Les niveaux C et D ne sont jamais des preuves directes" in system_prompt
     schema = client.calls[0][1]["json_schema"]
     decision = schema["$defs"]["CandidateSemanticDecision"]
     assert decision["properties"]["candidate_id"]["enum"] == ["fr", "en", "noise"]
     assert "unassessed" not in decision["properties"]["relevance"]["enum"]
+
+
+@pytest.mark.parametrize(
+    ("relevance", "grade"),
+    [
+        ("direct", "A"),
+        ("supportive", "B"),
+        ("peripheral", "C"),
+        ("irrelevant", "D"),
+        ("unassessed", None),
+    ],
+)
+def test_candidate_semantic_decision_exposes_generic_grade_without_serializing_it(
+    relevance: str,
+    grade: str | None,
+) -> None:
+    decision = CandidateSemanticDecision(
+        candidate_id="candidate",
+        relevance=relevance,
+        rationale="Assessment rationale.",
+    )
+
+    assert decision.grade == grade
+    assert "grade" not in decision.model_dump()
 
 
 def test_semantic_filter_retries_invalid_ids_then_falls_back_without_dropping_evidence() -> None:

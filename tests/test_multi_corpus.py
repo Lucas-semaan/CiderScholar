@@ -3,13 +3,8 @@ from __future__ import annotations
 import inspect
 
 from app.corpora import CorpusScope
-from app.memory_profiles import EIGHT_GB_PROFILE, apply_memory_profile
 from app.retrieval import multi_corpus
-from app.retrieval.article_ranking import (
-    ArticleRankingResponse,
-    ArticleScoreComponents,
-    RankedArticle,
-)
+from app.retrieval.article_ranking import ArticleScoreComponents, RankedArticle
 from app.retrieval.hybrid_search import HybridChunkResult
 from app.retrieval.lexical_search import (
     LexicalSearchResponse,
@@ -24,7 +19,6 @@ from app.retrieval.multi_corpus import (
     merge_scoped_hybrid_results,
 )
 from app.retrieval.vector_search import VectorSearchResult
-from app.services.corpus_search import rank_question_across_corpora
 
 
 def test_multi_corpus_reader_opens_and_closes_scopes_sequentially() -> None:
@@ -44,7 +38,6 @@ def test_multi_corpus_reader_opens_and_closes_scopes_sequentially() -> None:
 
     reader = MultiCorpusReader(
         {
-            CorpusScope.PRIVATE: lambda: FakeReader(CorpusScope.PRIVATE),
             CorpusScope.COMMON: lambda: FakeReader(CorpusScope.COMMON),
         }
     )
@@ -53,8 +46,8 @@ def test_multi_corpus_reader_opens_and_closes_scopes_sequentially() -> None:
         lambda scope, _reader: [scope.value],
     )
 
-    assert results == ["common", "private"]
-    assert events == ["open:common", "close:common", "open:private", "close:private"]
+    assert results == ["common"]
+    assert events == ["open:common", "close:common"]
     assert not open_scopes
 
 
@@ -62,7 +55,7 @@ def test_multi_corpus_reader_has_no_fastapi_dependency() -> None:
     assert "fastapi" not in inspect.getsource(multi_corpus)
 
 
-def test_lexical_search_reads_common_then_private_and_marks_every_hit() -> None:
+def test_lexical_search_reads_common_and_marks_every_hit() -> None:
     events: list[str] = []
 
     class FakeLexicalReader:
@@ -82,7 +75,7 @@ def test_lexical_search_reads_common_then_private_and_marks_every_hit() -> None:
                 results=[
                     LexicalSearchResult(
                         rank=1,
-                        chunk_id=1 if self.scope is CorpusScope.COMMON else 2,
+                        chunk_id=1,
                         article_id=f"{self.scope}-article",
                         article_title=f"Titre {self.scope}",
                         publication_year=2026,
@@ -108,15 +101,10 @@ def test_lexical_search_reads_common_then_private_and_marks_every_hit() -> None:
 
     response = service.search("Cidre")
 
-    assert [result.scope for result in response.results] == [
-        CorpusScope.COMMON,
-        CorpusScope.PRIVATE,
-    ]
+    assert [result.scope for result in response.results] == [CorpusScope.COMMON]
     assert events == [
         "search:common",
         "close:common",
-        "search:private",
-        "close:private",
     ]
 
 
@@ -135,7 +123,7 @@ def test_vector_search_opens_and_closes_indexes_sequentially() -> None:
         def search(self, _query: str, **_kwargs) -> list[VectorSearchResult]:
             return [
                 VectorSearchResult(
-                    chunk_id=1 if self.scope is CorpusScope.COMMON else 2,
+                    chunk_id=1,
                     article_id=f"{self.scope}-article",
                     score=0.9,
                     section=None,
@@ -158,11 +146,8 @@ def test_vector_search_opens_and_closes_indexes_sequentially() -> None:
 
     response = service.search("fermentation")
 
-    assert [result.scope for result in response.results] == [
-        CorpusScope.COMMON,
-        CorpusScope.PRIVATE,
-    ]
-    assert events == ["open:common", "close:common", "open:private", "close:private"]
+    assert [result.scope for result in response.results] == [CorpusScope.COMMON]
+    assert events == ["open:common", "close:common"]
     assert open_scope is None
 
 
@@ -190,7 +175,6 @@ def test_multi_corpus_fusion_is_deterministic_and_explainable() -> None:
 
     merged = merge_scoped_hybrid_results(
         {
-            CorpusScope.PRIVATE: [hybrid(2, 0.8, 1)],
             CorpusScope.COMMON: [hybrid(1, 0.8, 1), hybrid(3, 0.7, 2)],
         },
         limit=3,
@@ -198,8 +182,7 @@ def test_multi_corpus_fusion_is_deterministic_and_explainable() -> None:
 
     assert [(item.rank, item.scope, item.corpus_rank) for item in merged] == [
         (1, CorpusScope.COMMON, 1),
-        (2, CorpusScope.PRIVATE, 1),
-        (3, CorpusScope.COMMON, 2),
+        (2, CorpusScope.COMMON, 2),
     ]
     assert merged[0].hybrid_score == 0.8
     assert merged[0].source_contributions == {"lexical:0": 0.8}
@@ -245,109 +228,34 @@ def _ranked_article(
     )
 
 
-def test_duplicate_doi_prefers_common_even_when_private_score_is_higher() -> None:
-    private = _ranked_article(
-        "private-article",
-        CorpusScope.PRIVATE,
-        doi="https://doi.org/10.1000/DUPLICATE",
-        score=0.9,
-    )
-    common = _ranked_article(
-        "common-article",
-        CorpusScope.COMMON,
-        doi="10.1000/duplicate",
-        score=0.7,
+def test_duplicate_doi_keeps_first_common_article() -> None:
+    first = _ranked_article("first", CorpusScope.COMMON, doi="10.1000/duplicate", score=0.9)
+    duplicate = _ranked_article(
+        "duplicate", CorpusScope.COMMON, doi="https://doi.org/10.1000/DUPLICATE", score=0.7
     )
 
-    deduplicated = deduplicate_scoped_articles([private, common])
+    deduplicated = deduplicate_scoped_articles([first, duplicate])
 
-    assert [article.article_id for article in deduplicated] == ["common-article"]
-    assert deduplicated[0].scope is CorpusScope.COMMON
+    assert [article.article_id for article in deduplicated] == ["first"]
 
 
 def test_doi_less_articles_are_never_merged_on_title_alone() -> None:
     common = _ranked_article(
+        "other-same-title",
+        CorpusScope.COMMON,
+        doi=None,
+        score=0.8,
+    )
+    other = _ranked_article(
         "same-title",
         CorpusScope.COMMON,
         doi=None,
         score=0.8,
     )
-    private = _ranked_article(
-        "same-title",
-        CorpusScope.PRIVATE,
-        doi=None,
-        score=0.8,
-    )
 
-    deduplicated = deduplicate_scoped_articles([private, common])
+    deduplicated = deduplicate_scoped_articles([other, common])
 
     assert {(article.scope, article.article_id) for article in deduplicated} == {
         (CorpusScope.COMMON, "same-title"),
-        (CorpusScope.PRIVATE, "same-title"),
+        (CorpusScope.COMMON, "other-same-title"),
     }
-
-
-def test_eight_gb_rank_searches_selected_scopes_sequentially(settings, monkeypatch) -> None:
-    calls: list[tuple[object, object, int]] = []
-    open_scopes: set[CorpusScope] = set()
-
-    def fake_rank(active_settings, database, **_options):
-        scope = (
-            CorpusScope.COMMON
-            if database.path == settings.paths.common_database_path
-            else CorpusScope.PRIVATE
-        )
-        assert not open_scopes
-        open_scopes.add(scope)
-        calls.append(
-            (
-                active_settings.paths.qdrant_dir,
-                database.path,
-                active_settings.embeddings.batch_size,
-            )
-        )
-        article = _ranked_article(
-            f"{scope.value}-article",
-            scope,
-            doi=None,
-            score=0.8 if scope is CorpusScope.COMMON else 0.7,
-        )
-        response = ArticleRankingResponse(
-            query="cidre",
-            query_terms=["cidre"],
-            central_concepts=[],
-            diversity_mode="balanced",
-            requested_article_count=5,
-            available_article_count=1,
-            selected_article_count=1,
-            excluded_article_ids=[],
-            hybrid_candidate_count=1,
-            articles=[article],
-            duration_seconds=0.1,
-        )
-        open_scopes.remove(scope)
-        return response
-
-    monkeypatch.setattr("app.services.corpus_search.rank_question", fake_rank)
-    profiled = apply_memory_profile(settings, EIGHT_GB_PROFILE)
-    response = rank_question_across_corpora(
-        profiled,
-        question="cidre",
-        article_count=5,
-        diversity_mode="balanced",
-        scopes=[CorpusScope.COMMON, CorpusScope.PRIVATE],
-    )
-
-    assert calls == [
-        (settings.paths.common_qdrant_dir, settings.paths.common_database_path, 2),
-        (settings.paths.private_qdrant_dir, settings.paths.private_database_path, 2),
-    ]
-    assert not open_scopes
-    assert [article.scope for article in response.articles] == [
-        CorpusScope.COMMON,
-        CorpusScope.PRIVATE,
-    ]
-    assert [article.citation_label for article in response.articles] == [
-        "[Corpus commun · common-article]",
-        "[Document privé · private-article]",
-    ]

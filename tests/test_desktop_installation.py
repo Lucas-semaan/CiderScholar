@@ -44,7 +44,7 @@ def test_desktop_layout_keeps_persistent_scopes_outside_program_files(tmp_path: 
     create_desktop_layout(paths)
 
     assert paths.config.parent == paths.root
-    for scope in ("common", "private", "queue", "exports", "backups", "secrets"):
+    for scope in ("common", "queue", "exports", "backups", "secrets"):
         assert (paths.data / scope).is_dir()
 
 

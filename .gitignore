@@ -31,7 +31,11 @@ data/validation-step09/
 
 # Local configuration may contain machine-specific paths
 config.yaml
+config.user.yaml
 *.log
+
+# Local Codex verification fixtures
+.codex-verify-local/
 
 # Frontend dependencies and generated artifacts
 frontend/node_modules/

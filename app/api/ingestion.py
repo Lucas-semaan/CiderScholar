@@ -2,20 +2,16 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, UploadFile
+from fastapi.responses import FileResponse
 
-from app.api.dependencies import get_common_corpus_database, get_settings
+from app.api.dependencies import get_common_corpus_database, get_common_corpus_settings
 from app.api.schemas import FolderIngestionRequest, IndexRequest
 from app.api.serialization import corpus_listing, serialize_row
 from app.config import Settings
-from app.corpora import (
-    CorpusMutationForbiddenError,
-    CorpusScope,
-    authorize_corpus_mutation,
-    load_local_profile,
-)
 from app.database.sqlite import Database
 from app.services.workflows import (
     delete_article,
@@ -29,18 +25,11 @@ from app.services.workflows import (
 router = APIRouter(prefix="/api/corpus", tags=["corpus"])
 
 
-def _authorize_common_mutation() -> None:
-    try:
-        authorize_corpus_mutation(CorpusScope.COMMON, load_local_profile())
-    except CorpusMutationForbiddenError as exc:
-        raise HTTPException(status_code=403, detail=str(exc)) from exc
-
-
 @router.get("")
 def corpus(
     database: Annotated[Database, Depends(get_common_corpus_database)],
 ) -> dict[str, Any]:
-    return corpus_listing(database, scope=CorpusScope.COMMON)
+    return corpus_listing(database)
 
 
 @router.get("/{article_id}/chunks")
@@ -52,13 +41,33 @@ def article_chunks(
     return {"article_id": article_id, "chunks": chunks}
 
 
+@router.get("/{article_id}/pdf", response_class=FileResponse)
+def article_pdf(
+    article_id: str,
+    database: Annotated[Database, Depends(get_common_corpus_database)],
+) -> FileResponse:
+    """Open the persisted source PDF selected by an explicit corpus article id."""
+
+    article = database.article_details_by_ids([article_id]).get(article_id)
+    if article is None:
+        raise FileNotFoundError("Document PDF introuvable dans la base documentaire.")
+    path = Path(str(article["pdf_path"])).resolve()
+    if path.suffix.casefold() != ".pdf" or not path.is_file():
+        raise FileNotFoundError("Le fichier PDF de ce document n’est plus disponible.")
+    return FileResponse(
+        path,
+        media_type="application/pdf",
+        filename=path.name,
+        content_disposition_type="inline",
+    )
+
+
 @router.post("/upload")
 def upload_pdfs(
     files: Annotated[list[UploadFile], File(description="PDF scientifiques")],
-    settings: Annotated[Settings, Depends(get_settings)],
+    settings: Annotated[Settings, Depends(get_common_corpus_settings)],
     database: Annotated[Database, Depends(get_common_corpus_database)],
 ) -> dict[str, Any]:
-    _authorize_common_mutation()
     if not files:
         raise ValueError("at least one PDF is required")
     paths = []
@@ -79,10 +88,9 @@ def upload_pdfs(
 @router.post("/folder")
 def ingest_folder(
     payload: FolderIngestionRequest,
-    settings: Annotated[Settings, Depends(get_settings)],
+    settings: Annotated[Settings, Depends(get_common_corpus_settings)],
     database: Annotated[Database, Depends(get_common_corpus_database)],
 ) -> dict[str, Any]:
-    _authorize_common_mutation()
     paths = list(pdf_paths(payload.folder, recursive=payload.recursive))
     reports = ingest_paths(settings, database, paths) if paths else []
     return {
@@ -94,10 +102,9 @@ def ingest_folder(
 @router.post("/index")
 def index_corpus(
     payload: IndexRequest,
-    settings: Annotated[Settings, Depends(get_settings)],
+    settings: Annotated[Settings, Depends(get_common_corpus_settings)],
     database: Annotated[Database, Depends(get_common_corpus_database)],
 ) -> dict[str, Any]:
-    _authorize_common_mutation()
     report = index_pending_chunks(
         settings,
         database,
@@ -109,18 +116,16 @@ def index_corpus(
 @router.post("/{article_id}/reindex")
 def reindex_corpus_article(
     article_id: str,
-    settings: Annotated[Settings, Depends(get_settings)],
+    settings: Annotated[Settings, Depends(get_common_corpus_settings)],
     database: Annotated[Database, Depends(get_common_corpus_database)],
 ) -> dict[str, Any]:
-    _authorize_common_mutation()
     return reindex_article(settings, database, article_id=article_id).model_dump(mode="json")
 
 
 @router.delete("/{article_id}")
 def delete_corpus_article(
     article_id: str,
-    settings: Annotated[Settings, Depends(get_settings)],
+    settings: Annotated[Settings, Depends(get_common_corpus_settings)],
     database: Annotated[Database, Depends(get_common_corpus_database)],
 ) -> dict[str, int]:
-    _authorize_common_mutation()
     return delete_article(settings, database, article_id=article_id)

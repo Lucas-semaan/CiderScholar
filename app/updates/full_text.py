@@ -36,6 +36,20 @@ AssetState = Literal[
     "ingested",
     "failed",
 ]
+NativeFullTextFormat = Literal[
+    "jats_xml",
+    "tei_xml",
+    "structured_xml",
+    "cleaned_text",
+    "plain_text",
+]
+NativeAssetState = Literal[
+    "available",
+    "authentication_required",
+    "downloading",
+    "downloaded",
+    "failed",
+]
 ProgressCallback = Callable[[str], None]
 
 
@@ -74,12 +88,28 @@ class FullTextCandidate(BaseModel):
     requires_authentication: bool = False
 
 
+class NativeFullTextCandidate(BaseModel):
+    """A provider-native article body retained without pretending it has PDF pages."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    doi: str
+    source: str
+    format: NativeFullTextFormat
+    provider_id: str | None = None
+    url: str
+    media_type: str
+    license: str | None = None
+    requires_authentication: bool = False
+
+
 class FullTextObservation(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     source: str
     state: Literal["available", "authentication_required", "unavailable"]
     candidate: FullTextCandidate | None = None
+    native_candidates: list[NativeFullTextCandidate] = Field(default_factory=list)
     reason: str | None = None
 
 
@@ -124,6 +154,10 @@ class FullTextHarvestReport(BaseModel):
     failed: int = Field(ge=0)
     article_ids: list[str]
     errors: list[dict[str, str]]
+    native_downloaded: int = Field(default=0, ge=0)
+    native_already_downloaded: int = Field(default=0, ge=0)
+    native_deferred: int = Field(default=0, ge=0)
+    native_failed: int = Field(default=0, ge=0)
 
 
 class DownloadedFullText(BaseModel):
@@ -177,6 +211,40 @@ class FullTextStore:
                 """,
                 (*sources, f"-{max_age_hours} hours"),
             ).fetchall()
+            native_rows = connection.execute(
+                f"""
+                SELECT doi, source, format, provider_id, source_url, media_type, license, state
+                FROM native_full_text_assets
+                WHERE source IN ({placeholders})
+                  AND checked_at >= datetime('now', ?)
+                """,
+                (*sources, f"-{max_age_hours} hours"),
+            ).fetchall()
+        native_candidates: dict[tuple[str, str], list[NativeFullTextCandidate]] = {}
+        for row in native_rows:
+            state = str(row["state"])
+            source_url = str(row["source_url"] or "").strip()
+            if not source_url or state not in {
+                "available",
+                "authentication_required",
+                "downloading",
+                "downloaded",
+            }:
+                continue
+            doi = str(row["doi"])
+            source = str(row["source"])
+            native_candidates.setdefault((doi, source), []).append(
+                NativeFullTextCandidate(
+                    doi=doi,
+                    source=source,
+                    format=str(row["format"]),
+                    provider_id=(str(row["provider_id"]) if row["provider_id"] else None),
+                    url=source_url,
+                    media_type=str(row["media_type"]),
+                    license=(str(row["license"]) if row["license"] else None),
+                    requires_authentication=state == "authentication_required",
+                )
+            )
         cached: dict[str, dict[str, FullTextObservation]] = {}
         for row in rows:
             doi = str(row["doi"])
@@ -200,9 +268,13 @@ class FullTextStore:
                     license=(str(row["license"]) if row["license"] else None),
                     requires_authentication=state == "authentication_required",
                 )
-            if state == "authentication_required":
+            source_native_candidates = native_candidates.pop((doi, source), [])
+            if state == "authentication_required" or (
+                source_native_candidates
+                and all(candidate.requires_authentication for candidate in source_native_candidates)
+            ):
                 observation_state = "authentication_required"
-            elif candidate is not None:
+            elif candidate is not None or source_native_candidates:
                 observation_state = "available"
             else:
                 observation_state = "unavailable"
@@ -210,7 +282,19 @@ class FullTextStore:
                 source=source,
                 state=observation_state,
                 candidate=candidate,
+                native_candidates=source_native_candidates,
                 reason=(str(row["error_message"]) if row["error_message"] else None),
+            )
+        for (doi, source), source_native_candidates in native_candidates.items():
+            state = (
+                "authentication_required"
+                if all(candidate.requires_authentication for candidate in source_native_candidates)
+                else "available"
+            )
+            cached.setdefault(doi, {})[source] = FullTextObservation(
+                source=source,
+                state=state,
+                native_candidates=source_native_candidates,
             )
         return cached
 
@@ -285,6 +369,7 @@ class FullTextStore:
         if not values:
             return
         rows: list[tuple[Any, ...]] = []
+        native_rows: list[tuple[Any, ...]] = []
         for record, observation in values:
             candidate = observation.candidate
             asset_id = str(
@@ -307,6 +392,31 @@ class FullTextStore:
                     observation.reason,
                 )
             )
+            for native in observation.native_candidates:
+                native_rows.append(
+                    (
+                        str(
+                            uuid.uuid5(
+                                uuid.NAMESPACE_URL,
+                                "ciderscholar:native-full-text:"
+                                f"{record['id']}:{native.source}:{native.format}",
+                            )
+                        ),
+                        record["id"],
+                        record["doi"],
+                        native.source,
+                        native.format,
+                        native.provider_id,
+                        native.url,
+                        native.media_type,
+                        native.license,
+                        (
+                            "authentication_required"
+                            if native.requires_authentication
+                            else "available"
+                        ),
+                    )
+                )
         with self.database.transaction() as connection:
             connection.executemany(
                 """
@@ -366,6 +476,30 @@ class FullTextStore:
                 """,
                 rows,
             )
+            if native_rows:
+                connection.executemany(
+                    """
+                    INSERT INTO native_full_text_assets (
+                        id, record_id, doi, source, format, provider_id, source_url,
+                        media_type, license, state
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(record_id, source, format) DO UPDATE SET
+                        provider_id = excluded.provider_id,
+                        source_url = excluded.source_url,
+                        media_type = excluded.media_type,
+                        license = excluded.license,
+                        state = CASE
+                            WHEN native_full_text_assets.state = 'downloaded' THEN 'downloaded'
+                            WHEN native_full_text_assets.state = 'failed'
+                                 AND native_full_text_assets.source_url = excluded.source_url
+                            THEN 'failed'
+                            ELSE excluded.state
+                        END,
+                        checked_at = CURRENT_TIMESTAMP,
+                        updated_at = CURRENT_TIMESTAMP
+                    """,
+                    native_rows,
+                )
 
     def failed_candidate_keys(self) -> set[tuple[str, str]]:
         with closing(self.database.connect()) as connection:
@@ -381,6 +515,31 @@ class FullTextStore:
                 """
             ).fetchall()
         return {(str(row["record_id"]), str(row["source"])) for row in rows}
+
+    def downloaded_native_candidate_keys(self) -> set[tuple[str, str, str]]:
+        with closing(self.database.connect()) as connection:
+            rows = connection.execute(
+                """
+                SELECT record_id, source, format FROM native_full_text_assets
+                WHERE state = 'downloaded' AND file_path IS NOT NULL AND sha256 IS NOT NULL
+                """
+            ).fetchall()
+        return {(str(row["record_id"]), str(row["source"]), str(row["format"])) for row in rows}
+
+    def failed_native_candidate_keys(self) -> set[tuple[str, str, str]]:
+        with closing(self.database.connect()) as connection:
+            rows = connection.execute(
+                """
+                SELECT record_id, source, format FROM native_full_text_assets
+                WHERE state = 'failed'
+                  AND COALESCE(error_type, '') NOT IN (
+                      'ReadTimeout', 'ConnectTimeout', 'ConnectError'
+                  )
+                  AND COALESCE(error_message, '') NOT LIKE '%HTTP 429%'
+                  AND COALESCE(error_message, '') NOT LIKE '%HTTP 50_%'
+                """
+            ).fetchall()
+        return {(str(row["record_id"]), str(row["source"]), str(row["format"])) for row in rows}
 
     def update_asset(
         self,
@@ -417,6 +576,40 @@ class FullTextStore:
                     str(error)[:500] if error else None,
                     record_id,
                     source,
+                ),
+            )
+
+    def update_native_asset(
+        self,
+        *,
+        record_id: str,
+        candidate: NativeFullTextCandidate,
+        state: NativeAssetState,
+        downloaded: DownloadedFullText | None = None,
+        error: Exception | None = None,
+    ) -> None:
+        with self.database.transaction() as connection:
+            connection.execute(
+                """
+                UPDATE native_full_text_assets
+                SET state = ?, final_url = COALESCE(?, final_url),
+                    file_path = COALESCE(?, file_path), sha256 = COALESCE(?, sha256),
+                    byte_count = COALESCE(?, byte_count), media_type = COALESCE(?, media_type),
+                    error_type = ?, error_message = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE record_id = ? AND source = ? AND format = ?
+                """,
+                (
+                    state,
+                    downloaded.final_url if downloaded else None,
+                    str(downloaded.path) if downloaded else None,
+                    downloaded.sha256 if downloaded else None,
+                    downloaded.byte_count if downloaded else None,
+                    downloaded.media_type if downloaded else None,
+                    type(error).__name__ if error else None,
+                    str(error)[:500] if error else None,
+                    record_id,
+                    candidate.source,
+                    candidate.format,
                 ),
             )
 
@@ -946,17 +1139,32 @@ class FullTextAuditService(OfficialFullTextClient):
                     if isinstance(links, list)
                     else None
                 )
-                if doi not in batch or pdf is None:
+                provider_id = str(hit.get("id")) if hit.get("id") else None
+                native_candidates = _native_candidates_from_explicit_links(
+                    doi,
+                    source="doaj",
+                    provider_id=provider_id,
+                    links=links if isinstance(links, list) else [],
+                    url_key="url",
+                    media_type_key="content_type",
+                    require_fulltext_type=True,
+                )
+                if doi not in batch or (pdf is None and not native_candidates):
                     continue
                 results[doi] = FullTextObservation(
                     source="doaj",
                     state="available",
-                    candidate=FullTextCandidate(
-                        doi=doi,
-                        source="doaj",
-                        provider_id=(str(hit.get("id")) if hit.get("id") else None),
-                        url=str(pdf["url"]),
+                    candidate=(
+                        FullTextCandidate(
+                            doi=doi,
+                            source="doaj",
+                            provider_id=provider_id,
+                            url=str(pdf["url"]),
+                        )
+                        if pdf is not None
+                        else None
                     ),
+                    native_candidates=native_candidates,
                 )
         return results
 
@@ -982,9 +1190,13 @@ class FullTextAuditService(OfficialFullTextClient):
                 if doi not in batch:
                     continue
                 candidate = _europe_pmc_candidate(doi, hit)
-                if candidate:
+                native_candidates = _europe_pmc_native_candidates(doi, hit)
+                if candidate or native_candidates:
                     results[doi] = FullTextObservation(
-                        source="europe_pmc", state="available", candidate=candidate
+                        source="europe_pmc",
+                        state="available",
+                        candidate=candidate,
+                        native_candidates=native_candidates,
                     )
         return results
 
@@ -1023,20 +1235,34 @@ class FullTextAuditService(OfficialFullTextClient):
                     if isinstance(assets, list)
                     else None
                 )
-                if not pdf or not hit.get("id"):
+                if not hit.get("id"):
                     continue
-                candidate = FullTextCandidate(
-                    doi=doi,
-                    source="istex",
-                    provider_id=str(hit["id"]),
-                    url=f"{self.config.istex_base_url}/document/{hit['id']}/fulltext/pdf",
-                    media_type="application/pdf",
+                candidate = (
+                    FullTextCandidate(
+                        doi=doi,
+                        source="istex",
+                        provider_id=str(hit["id"]),
+                        url=f"{self.config.istex_base_url}/document/{hit['id']}/fulltext/pdf",
+                        media_type="application/pdf",
+                        requires_authentication=not has_token,
+                    )
+                    if pdf
+                    else None
+                )
+                native_candidates = _istex_native_candidates(
+                    doi,
+                    str(hit["id"]),
+                    assets if isinstance(assets, list) else [],
+                    base_url=self.config.istex_base_url,
                     requires_authentication=not has_token,
                 )
+                if candidate is None and not native_candidates:
+                    continue
                 results[doi] = FullTextObservation(
                     source="istex",
                     state="available" if has_token else "authentication_required",
                     candidate=candidate,
+                    native_candidates=native_candidates,
                     reason=None if has_token else f"jeton {self.config.istex_token_env} absent",
                 )
         return results
@@ -1114,6 +1340,7 @@ class FullTextAuditService(OfficialFullTextClient):
         )
         message = payload.get("message")
         links = message.get("link") if isinstance(message, dict) else None
+        pdf_candidate = None
         for link in links if isinstance(links, list) else []:
             if not isinstance(link, dict):
                 continue
@@ -1124,22 +1351,34 @@ class FullTextAuditService(OfficialFullTextClient):
                 and isinstance(url, str)
                 and url.startswith("https://")
             ):
-                return FullTextObservation(
+                pdf_candidate = FullTextCandidate(
+                    doi=doi,
                     source="crossref",
-                    state="available",
-                    candidate=FullTextCandidate(
-                        doi=doi,
-                        source="crossref",
-                        provider_id=doi,
-                        url=url,
-                        media_type="application/pdf",
-                    ),
+                    provider_id=doi,
+                    url=url,
+                    media_type="application/pdf",
                 )
+                break
+        native_candidates = _native_candidates_from_explicit_links(
+            doi,
+            source="crossref",
+            provider_id=doi,
+            links=links if isinstance(links, list) else [],
+            url_key="URL",
+            media_type_key="content-type",
+        )
+        if pdf_candidate or native_candidates:
+            return FullTextObservation(
+                source="crossref",
+                state="available",
+                candidate=pdf_candidate,
+                native_candidates=native_candidates,
+            )
         return FullTextObservation(source="crossref", state="unavailable")
 
 
 class FullTextDownloader:
-    """Download one provider-selected PDF atomically with strict size and URL checks."""
+    """Download provider-selected PDF or native assets atomically with strict URL checks."""
 
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
@@ -1178,8 +1417,58 @@ class FullTextDownloader:
                 temporary,
                 headers,
             )
-            if temporary.read_bytes()[:5] != b"%PDF-":
+            with temporary.open("rb") as handle:
+                signature = handle.read(5)
+            if signature != b"%PDF-":
                 raise ValueError("provider response is not a PDF")
+            temporary.replace(destination)
+            return DownloadedFullText(
+                path=destination.resolve(),
+                final_url=final_url,
+                sha256=sha256_file(destination),
+                byte_count=byte_count,
+                media_type=media_type,
+            )
+        except Exception:
+            temporary.unlink(missing_ok=True)
+            raise
+
+    def download_native(self, candidate: NativeFullTextCandidate) -> DownloadedFullText:
+        """Persist an authenticated JATS/TEI/text body without feeding it to the PDF RAG yet."""
+
+        destination_dir = self.settings.paths.common_full_text_assets_dir / candidate.source
+        destination_dir.mkdir(parents=True, exist_ok=True)
+        stem = hashlib.sha256(candidate.doi.encode("utf-8")).hexdigest()[:24]
+        destination = destination_dir / f"{stem}{_native_asset_suffix(candidate.format)}"
+        if destination.is_file() and destination.stat().st_size > 0:
+            return DownloadedFullText(
+                path=destination.resolve(),
+                final_url=candidate.url,
+                sha256=sha256_file(destination),
+                byte_count=destination.stat().st_size,
+                media_type=candidate.media_type,
+            )
+
+        headers = {"Accept": candidate.media_type, "User-Agent": "CiderScholar/2.0"}
+        if candidate.source == "istex":
+            token = os.environ.get(self.config.istex_token_env, "").strip()
+            if not token:
+                raise PermissionError(f"ISTEX requires {self.config.istex_token_env}")
+            headers["Authorization"] = f"Bearer {token}"
+
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=f".{stem}.", suffix=".tmp", dir=destination_dir
+        )
+        os.close(descriptor)
+        temporary = Path(temporary_name)
+        try:
+            final_url, media_type, byte_count = self._stream(
+                candidate.source,
+                candidate.url,
+                temporary,
+                headers,
+            )
+            _validate_native_asset(temporary, candidate.format)
             temporary.replace(destination)
             return DownloadedFullText(
                 path=destination.resolve(),
@@ -1246,6 +1535,31 @@ class FullTextDownloader:
         raise ValueError("full-text download exceeded the redirect limit")
 
 
+def _native_asset_suffix(format_name: NativeFullTextFormat) -> str:
+    return {
+        "jats_xml": ".jats.xml",
+        "tei_xml": ".tei.xml",
+        "structured_xml": ".xml",
+        "cleaned_text": ".txt",
+        "plain_text": ".txt",
+    }[format_name]
+
+
+def _validate_native_asset(path: Path, format_name: NativeFullTextFormat) -> None:
+    """Reject HTML/login pages and obviously invalid payloads before committing an asset."""
+
+    with path.open("rb") as handle:
+        prefix = handle.read(4096).lstrip().lower()
+    if not prefix:
+        raise ValueError("provider returned an empty native full-text asset")
+    if prefix.startswith((b"<!doctype html", b"<html", b"<head")):
+        raise ValueError("provider response is an HTML page, not native full text")
+    if format_name in {"jats_xml", "tei_xml", "structured_xml"} and not prefix.startswith(b"<"):
+        raise ValueError("provider response is not an XML full-text asset")
+    if format_name in {"cleaned_text", "plain_text"} and b"\x00" in prefix:
+        raise ValueError("provider response is not a text full-text asset")
+
+
 class FullTextHarvestService:
     """Audit every DOI and ingest only theme-accepted, accessible PDF full texts."""
 
@@ -1269,6 +1583,7 @@ class FullTextHarvestService:
         audit_only: bool = False,
         include_slow_fallbacks: bool = True,
         max_downloads: int | None = None,
+        max_native_downloads: int | None = None,
         record_ids: Sequence[str] | None = None,
         progress: ProgressCallback | None = None,
     ) -> tuple[FullTextAuditReport, FullTextHarvestReport]:
@@ -1297,7 +1612,10 @@ class FullTextHarvestService:
                 persisted_observations.append((record, observation))
         self.store.upsert_observations(persisted_observations)
 
+        native_candidates = _selected_native_candidates(audit.records)
         failed_candidate_keys = self.store.failed_candidate_keys()
+        failed_native_candidate_keys = self.store.failed_native_candidate_keys()
+        downloaded_native_candidate_keys = self.store.downloaded_native_candidate_keys()
         all_candidates = [
             record
             for record in audit.records
@@ -1324,12 +1642,150 @@ class FullTextHarvestService:
             "ocr_required": 0,
             "deferred": 0,
             "failed": 0,
+            "native_downloaded": 0,
+            "native_already_downloaded": 0,
+            "native_deferred": 0,
+            "native_failed": 0,
         }
         article_ids: list[str] = []
         errors: list[dict[str, str]] = []
         blocked_hosts: dict[str, int] = {}
         if not audit_only:
             downloader = FullTextDownloader(self.rag_settings)
+            native_limit = max_native_downloads or self.configured_native_download_limit
+            native_download_attempts = 0
+            for audited, candidate in native_candidates:
+                native_key = (audited.record_id, candidate.source, candidate.format)
+                if native_key in downloaded_native_candidate_keys:
+                    counters["native_already_downloaded"] += 1
+                    continue
+                if native_key in failed_native_candidate_keys:
+                    continue
+                hostname = (urlsplit(candidate.url).hostname or "").casefold()
+                cooldown = self.store.active_cooldown(candidate.source, host=hostname)
+                if cooldown is not None:
+                    counters["native_deferred"] += 1
+                    errors.append(
+                        {
+                            "doi": audited.doi,
+                            "source": candidate.source,
+                            "format": candidate.format,
+                            "error_type": "ProviderDeferred",
+                            "message": (
+                                f"nouvelle tentative interdite avant {cooldown['retry_at']}"
+                            ),
+                        }
+                    )
+                    continue
+                if blocked_hosts.get(hostname, 0) >= 3:
+                    error = PermissionError(
+                        "hÃ´te arrÃªtÃ© aprÃ¨s trois refus HTTP 403 consÃ©cutifs"
+                    )
+                    counters["native_failed"] += 1
+                    errors.append(
+                        {
+                            "doi": audited.doi,
+                            "source": candidate.source,
+                            "format": candidate.format,
+                            "error_type": type(error).__name__,
+                            "message": str(error),
+                        }
+                    )
+                    self.store.update_native_asset(
+                        record_id=audited.record_id,
+                        candidate=candidate,
+                        state="failed",
+                        error=error,
+                    )
+                    continue
+                if native_download_attempts >= native_limit:
+                    break
+                native_download_attempts += 1
+                if progress:
+                    progress(
+                        "full text natif "
+                        f"{native_download_attempts}/{native_limit}: "
+                        f"{candidate.source}/{candidate.format} {audited.doi}"
+                    )
+                try:
+                    self.store.update_native_asset(
+                        record_id=audited.record_id,
+                        candidate=candidate,
+                        state="downloading",
+                    )
+                    downloaded = downloader.download_native(candidate)
+                    counters["native_downloaded"] += 1
+                    self.store.update_native_asset(
+                        record_id=audited.record_id,
+                        candidate=candidate,
+                        state="downloaded",
+                        downloaded=downloaded,
+                    )
+                except Exception as exc:
+                    if isinstance(exc, ProviderDeferred):
+                        self.store.set_cooldown(
+                            candidate.source,
+                            host=hostname,
+                            retry_at=exc.retry_at,
+                            reason=str(exc),
+                            status_code=exc.status_code,
+                        )
+                        counters["native_deferred"] += 1
+                        errors.append(
+                            {
+                                "doi": audited.doi,
+                                "source": candidate.source,
+                                "format": candidate.format,
+                                "error_type": type(exc).__name__,
+                                "message": str(exc)[:300],
+                            }
+                        )
+                        self.store.update_native_asset(
+                            record_id=audited.record_id,
+                            candidate=candidate,
+                            state="available",
+                            error=exc,
+                        )
+                        continue
+                    if isinstance(exc, httpx.TimeoutException):
+                        self.store.set_cooldown(
+                            candidate.source,
+                            host=hostname,
+                            retry_at=datetime.now(UTC)
+                            + timedelta(hours=self.settings.full_text.timeout_cooldown_hours),
+                            reason=f"{type(exc).__name__}: {exc}",
+                        )
+                    if isinstance(exc, FullTextApiError) and "HTTP 403" in str(exc):
+                        blocked_hosts[hostname] = blocked_hosts.get(hostname, 0) + 1
+                        if blocked_hosts[hostname] >= 3:
+                            self.store.set_cooldown(
+                                candidate.source,
+                                host=hostname,
+                                retry_at=datetime.now(UTC)
+                                + timedelta(
+                                    hours=self.settings.full_text.protected_host_cooldown_hours
+                                ),
+                                reason="trois refus HTTP 403 consÃ©cutifs; protection respectÃ©e",
+                                status_code=403,
+                            )
+                    else:
+                        blocked_hosts[hostname] = 0
+                    counters["native_failed"] += 1
+                    errors.append(
+                        {
+                            "doi": audited.doi,
+                            "source": candidate.source,
+                            "format": candidate.format,
+                            "error_type": type(exc).__name__,
+                            "message": str(exc)[:300],
+                        }
+                    )
+                    self.store.update_native_asset(
+                        record_id=audited.record_id,
+                        candidate=candidate,
+                        state="failed",
+                        error=exc,
+                    )
             pipeline = IngestionPipeline(self.rag_settings, self.rag_database)
             download_attempts = 0
             for audited in candidates:
@@ -1505,11 +1961,19 @@ class FullTextHarvestService:
             failed=counters["failed"],
             article_ids=list(dict.fromkeys(article_ids)),
             errors=errors,
+            native_downloaded=counters["native_downloaded"],
+            native_already_downloaded=counters["native_already_downloaded"],
+            native_deferred=counters["native_deferred"],
+            native_failed=counters["native_failed"],
         )
 
     @property
     def configured_download_limit(self) -> int:
         return self.settings.full_text.max_downloads_per_run
+
+    @property
+    def configured_native_download_limit(self) -> int:
+        return self.settings.full_text.max_native_downloads_per_run
 
     def _asset_article_id(self, article_id: str) -> str | None:
         if self.database.path.resolve() == self.rag_database.path.resolve():
@@ -1540,6 +2004,122 @@ def _europe_pmc_candidate(doi: str, hit: Mapping[str, Any]) -> FullTextCandidate
                 license=_first_license(hit),
             )
     return None
+
+
+def _europe_pmc_native_candidates(
+    doi: str,
+    hit: Mapping[str, Any],
+) -> list[NativeFullTextCandidate]:
+    """Return JATS XML only for Europe PMC records explicitly marked open access."""
+
+    pmcid = str(hit.get("pmcid") or "").strip()
+    if str(hit.get("isOpenAccess") or "").upper() != "Y" or not pmcid:
+        return []
+    return [
+        NativeFullTextCandidate(
+            doi=doi,
+            source="europe_pmc",
+            format="jats_xml",
+            provider_id=pmcid,
+            url=f"https://www.ebi.ac.uk/europepmc/webservices/rest/{pmcid}/fullTextXML",
+            media_type="application/xml",
+            license=_first_license(hit),
+        )
+    ]
+
+
+def _istex_native_candidates(
+    doi: str,
+    provider_id: str,
+    assets: Sequence[Any],
+    *,
+    base_url: str,
+    requires_authentication: bool,
+) -> list[NativeFullTextCandidate]:
+    """Select the most structured ISTEX body format without treating it as a PDF."""
+
+    formats = {
+        "tei": ("tei_xml", "application/tei+xml"),
+        "cleaned": ("cleaned_text", "text/plain"),
+    }
+    candidates: list[NativeFullTextCandidate] = []
+    seen_formats: set[str] = set()
+    for asset in assets:
+        if not isinstance(asset, Mapping):
+            continue
+        extension = str(asset.get("extension") or "").strip().casefold()
+        selected = formats.get(extension)
+        if selected is None:
+            continue
+        format_name, media_type = selected
+        if format_name in seen_formats:
+            continue
+        seen_formats.add(format_name)
+        candidates.append(
+            NativeFullTextCandidate(
+                doi=doi,
+                source="istex",
+                format=format_name,
+                provider_id=provider_id,
+                url=f"{base_url.rstrip('/')}/document/{provider_id}/fulltext/{extension}",
+                media_type=media_type,
+                requires_authentication=requires_authentication,
+            )
+        )
+    return candidates
+
+
+def _native_candidates_from_explicit_links(
+    doi: str | None,
+    *,
+    source: str,
+    provider_id: str | None,
+    links: Sequence[Any],
+    url_key: str,
+    media_type_key: str,
+    require_fulltext_type: bool = False,
+) -> list[NativeFullTextCandidate]:
+    """Map only provider-declared XML/text full-text links to a native artifact.
+
+    The resolver never guesses a format from an extension or a landing page. This makes the
+    adapter safe for any source exposing a typed full-text link (currently DOAJ and Crossref).
+    """
+
+    if doi is None:
+        return []
+    formats = {
+        "application/jats+xml": "jats_xml",
+        "application/tei+xml": "tei_xml",
+        "application/xml": "structured_xml",
+        "text/xml": "structured_xml",
+        "text/plain": "plain_text",
+    }
+    candidates: list[NativeFullTextCandidate] = []
+    seen_formats: set[str] = set()
+    for link in links:
+        if not isinstance(link, Mapping):
+            continue
+        if require_fulltext_type and str(link.get("type") or "").casefold() != "fulltext":
+            continue
+        media_type = str(link.get(media_type_key) or "").split(";", 1)[0].strip().casefold()
+        format_name = formats.get(media_type)
+        url = link.get(url_key)
+        if format_name is None or format_name in seen_formats:
+            continue
+        if not isinstance(url, str) or not url.startswith("https://"):
+            continue
+        seen_formats.add(format_name)
+        candidates.append(
+            NativeFullTextCandidate(
+                doi=doi,
+                source=source,
+                format=format_name,
+                provider_id=provider_id,
+                url=url,
+                media_type=media_type,
+            )
+        )
+    return candidates
 
 
 def _first_license(hit: Mapping[str, Any]) -> str | None:
@@ -1599,6 +2179,43 @@ def _candidate_priority(source: str) -> int:
         "crossref": 8,
         "elsevier": 9,
     }.get(source, 99)
+
+
+def _native_candidate_priority(candidate: NativeFullTextCandidate) -> tuple[int, int, str]:
+    format_priority = {
+        "jats_xml": 0,
+        "tei_xml": 1,
+        "structured_xml": 2,
+        "cleaned_text": 3,
+        "plain_text": 4,
+    }
+    return (
+        _candidate_priority(candidate.source),
+        format_priority[candidate.format],
+        candidate.url,
+    )
+
+
+def _selected_native_candidates(
+    records: Sequence[FullTextAuditRecord],
+) -> list[tuple[FullTextAuditRecord, NativeFullTextCandidate]]:
+    """Keep one best native body per accepted article to avoid redundant provider downloads."""
+
+    selected: list[tuple[FullTextAuditRecord, NativeFullTextCandidate]] = []
+    for record in records:
+        if record.relevance_status != "accepted":
+            continue
+        candidates = [
+            candidate
+            for observation in record.observations
+            if observation.state == "available"
+            for candidate in observation.native_candidates
+            if not candidate.requires_authentication
+        ]
+        candidate = min(candidates, key=_native_candidate_priority, default=None)
+        if candidate is not None:
+            selected.append((record, candidate))
+    return sorted(selected, key=lambda value: (_native_candidate_priority(value[1]), value[0].doi))
 
 
 def _batches(values: Sequence[str], size: int) -> Iterable[list[str]]:

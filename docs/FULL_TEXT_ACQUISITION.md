@@ -68,6 +68,18 @@ administrateur hydratent le token uniquement dans leur processus. Lorsqu'un toke
 les résultats ISTEX précédemment mis en cache comme `authentication_required` sont immédiatement
 revérifiés, sans attendre l'expiration normale du cache.
 
+## Corps d'article structurés natifs
+
+En plus du PDF destiné au RAG page par page, CiderScholar conserve le meilleur corps d'article
+natif disponible pour chaque DOI accepté : JATS XML depuis Europe PMC, puis TEI XML ou texte
+`cleaned` depuis ISTEX. Les liens XML ou texte explicitement typés de DOAJ et Crossref sont traités
+par la même chaîne générique ; une URL ambiguë ou une page de destination n'est jamais devinée comme
+un article. Ces fichiers sont enregistrés avec URL finale, licence, taille et SHA-256
+dans `native_full_text_assets`. Ils ne sont pas encore découpés pour le RAG : cela évite de présenter
+une ancre XML comme un numéro de page PDF. La commande `harvest_full_text` borne séparément ces
+téléchargements avec `--max-native-downloads N`; la limite persistante est
+`full_text.max_native_downloads_per_run`.
+
 ## Maintenance
 
 La maintenance hebdomadaire exécute automatiquement la résolution rapide après la collecte

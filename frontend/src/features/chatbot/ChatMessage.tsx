@@ -27,6 +27,7 @@ export function ChatMessage({
   onFeedback?: (messageId: string, helpful: boolean) => void;
 }) {
   const assistant = message.role === "assistant";
+  const terminalNotice = message.terminalNotice;
   const response = message.response;
   const facetDrafts = response?.facet_drafts ?? [];
 
@@ -56,9 +57,27 @@ export function ChatMessage({
           <p className="whitespace-pre-wrap text-sm leading-6">{message.content}</p>
         )}
 
+        {terminalNotice && (
+          <div className="mt-4 flex flex-wrap gap-2 border-t border-slate-100 pt-3">
+            <Badge tone={terminalNotice.state === "cancelled" ? "neutral" : "warning"}>
+              {terminalNotice.state === "cancelled" ? "Traitement annulé" : "Réponse bloquée"}
+            </Badge>
+            {terminalNotice.diagnostic_code && <Badge>{terminalNotice.diagnostic_code}</Badge>}
+          </div>
+        )}
+
         {response && (
           <>
             <div className="mt-4 flex flex-wrap gap-2 border-t border-slate-100 pt-3">
+              {response.generation_status === "extractive_fallback" && (
+                <Badge tone="warning">Réponse extractive dégradée</Badge>
+              )}
+              {response.generation_status === "diagnostic_only" && (
+                <Badge tone="warning">Diagnostic sans synthèse</Badge>
+              )}
+              {response.generation_status !== "generated" && response.diagnostic_code && (
+                <Badge>{response.diagnostic_code}</Badge>
+              )}
               {response.reused_previous_sources ? (
                 <Badge tone="accent">
                   <MessageCircleMore aria-hidden="true" className="size-3" />

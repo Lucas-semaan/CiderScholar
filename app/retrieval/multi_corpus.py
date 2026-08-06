@@ -1,4 +1,4 @@
-"""Sequential multi-corpus reading without a web-framework dependency."""
+"""Common-corpus reading without a web-framework dependency."""
 
 from __future__ import annotations
 
@@ -41,7 +41,7 @@ ReadOperation = Callable[[CorpusScope, ClosableCorpusReader], Sequence[ResultT]]
 
 
 class MultiCorpusReader:
-    """Open, read and close each requested corpus in deterministic scope order."""
+    """Open, read and close the common corpus."""
 
     def __init__(self, factories: Mapping[CorpusScope, ReaderFactory]) -> None:
         self._factories = dict(factories)
@@ -50,7 +50,7 @@ class MultiCorpusReader:
         self,
         operation: ReadOperation[ResultT],
         *,
-        scopes: Sequence[CorpusScope] = (CorpusScope.COMMON, CorpusScope.PRIVATE),
+        scopes: Sequence[CorpusScope] = (CorpusScope.COMMON,),
     ) -> list[ResultT]:
         requested = tuple(dict.fromkeys(scopes))
         results: list[ResultT] = []
@@ -122,7 +122,7 @@ def lexical_corpus_factories(settings: Settings) -> dict[CorpusScope, ReaderFact
                 )
             )
         )
-        for scope in CorpusScope
+        for scope in (CorpusScope.COMMON,)
     }
 
 
@@ -142,7 +142,7 @@ class MultiCorpusLexicalSearchService:
         mode: QueryMode = "any",
         article_ids: Sequence[str] | None = None,
         sections: Sequence[str] | None = None,
-        scopes: Sequence[CorpusScope] = (CorpusScope.COMMON, CorpusScope.PRIVATE),
+        scopes: Sequence[CorpusScope] = (CorpusScope.COMMON,),
     ) -> MultiCorpusLexicalResponse:
         durations: dict[CorpusScope, float] = {}
 
@@ -227,7 +227,7 @@ def vector_corpus_factories(settings: Settings) -> dict[CorpusScope, ReaderFacto
                 )
             )
         )
-        for scope in CorpusScope
+        for scope in (CorpusScope.COMMON,)
     }
 
 
@@ -246,7 +246,7 @@ class MultiCorpusVectorSearchService:
         limit_per_scope: int | None = None,
         article_ids: Sequence[str] | None = None,
         sections: Sequence[str] | None = None,
-        scopes: Sequence[CorpusScope] = (CorpusScope.COMMON, CorpusScope.PRIVATE),
+        scopes: Sequence[CorpusScope] = (CorpusScope.COMMON,),
     ) -> MultiCorpusVectorResponse:
         durations: dict[CorpusScope, float] = {}
 
@@ -279,20 +279,18 @@ def merge_scoped_hybrid_results(
     *,
     limit: int,
 ) -> list[HybridChunkResult]:
-    """Merge comparable per-corpus RRF scores with stable, explainable tie breaks."""
+    """Merge common-corpus RRF scores with stable, explainable tie breaks."""
 
     if limit <= 0:
-        raise ValueError("multi-corpus result limit must be positive")
-    scope_priority = {CorpusScope.COMMON: 0, CorpusScope.PRIVATE: 1}
+        raise ValueError("common-corpus result limit must be positive")
     candidates = [
         result.model_copy(update={"scope": scope, "corpus_rank": result.rank})
-        for scope in (CorpusScope.COMMON, CorpusScope.PRIVATE)
+        for scope in (CorpusScope.COMMON,)
         for result in results_by_scope.get(scope, ())
     ]
     candidates.sort(
         key=lambda result: (
             -result.hybrid_score,
-            scope_priority[result.scope],
             result.corpus_rank,
             result.article_id,
             result.chunk_id,
@@ -307,7 +305,7 @@ def merge_scoped_hybrid_results(
 def deduplicate_scoped_articles(
     articles: Sequence[RankedArticle],
 ) -> list[RankedArticle]:
-    """Prefer common at equal DOI and keep DOI-less records distinct."""
+    """Deduplicate DOI matches while keeping DOI-less records distinct."""
 
     by_doi: dict[str, RankedArticle] = {}
     without_doi: list[RankedArticle] = []
@@ -317,16 +315,12 @@ def deduplicate_scoped_articles(
             without_doi.append(article)
             continue
         current = by_doi.get(doi)
-        if current is None or (
-            article.scope is CorpusScope.COMMON and current.scope is CorpusScope.PRIVATE
-        ):
+        if current is None:
             by_doi[doi] = article
-    scope_priority = {CorpusScope.COMMON: 0, CorpusScope.PRIVATE: 1}
     retained = [*by_doi.values(), *without_doi]
     retained.sort(
         key=lambda article: (
             -article.adjusted_score,
-            scope_priority[article.scope],
             article.base_rank,
             article.article_id,
         )

@@ -114,12 +114,10 @@ def test_release_staging_copies_retrieval_stores_without_pdf_payload(tmp_path: P
     assert (bundled / ".ciderscholar-bundled-corpus").read_text(encoding="ascii") == "default-rag\n"
 
 
-def test_uninstall_backup_contains_private_and_durable_data_but_no_secret_or_common(
+def test_uninstall_backup_contains_corpus_and_durable_data_but_no_secret(
     settings, tmp_path: Path
 ) -> None:
     Database(settings.paths.database_path).initialize()
-    settings.paths.private_dir.mkdir(parents=True, exist_ok=True)
-    (settings.paths.private_dir / "private.txt").write_text("private", encoding="utf-8")
     settings.paths.common_dir.mkdir(parents=True, exist_ok=True)
     (settings.paths.common_dir / "common.txt").write_text("common", encoding="utf-8")
     secret = settings.paths.data_dir / "secrets" / "argo-key.dpapi"
@@ -133,9 +131,9 @@ def test_uninstall_backup_contains_private_and_durable_data_but_no_secret_or_com
         assert names == {
             "manifest.json",
             "conversations-and-jobs.sqlite3",
-            "private-corpus.zip",
+            "corpus.zip",
         }
-        assert all("secret" not in name and "common" not in name for name in names)
+        assert all("secret" not in name for name in names)
 
 
 def test_hashed_application_release_publishes_latest_last(tmp_path: Path) -> None:

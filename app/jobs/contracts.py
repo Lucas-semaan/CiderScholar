@@ -1,12 +1,15 @@
 """Closed contracts shared by durable-job producers, workers, and APIs."""
 
+from __future__ import annotations
+
 from datetime import datetime, timedelta
 from enum import StrEnum
+from hashlib import sha256
 from pathlib import PurePosixPath
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class JobType(StrEnum):
@@ -16,7 +19,7 @@ class JobType(StrEnum):
     WEEKLY_MAINTENANCE = "weekly_maintenance"
     DEEP_RESEARCH = "deep_research"
     LONG_SYNTHESIS = "long_synthesis"
-    PRIVATE_INGESTION = "private_ingestion"
+    CORPUS_INGESTION = "corpus_ingestion"
 
 
 # These names are documented and unavailable until their own roadmap task adds
@@ -64,13 +67,18 @@ class JobStep(StrEnum):
     """Safe progress steps exposed to users."""
 
     WAITING = "waiting"
+    PLANNING = "planning"
     BACKUP = "backup"
     SUGGESTIONS = "suggestions"
     HARVEST = "harvest"
     INDEX = "index"
     SEARCH = "search"
-    RERANKING = "reranking"
     ENRICHMENT = "enrichment"
+    RERANKING = "reranking"
+    EVIDENCE_SELECTION = "evidence_selection"
+    COVERAGE = "coverage"
+    FIGURE_ANALYSIS = "figure_analysis"
+    GENERATION = "generation"
     ARGO = "argo"
     VALIDATION = "validation"
     PUBLISH = "publish"
@@ -83,10 +91,15 @@ class JobStep(StrEnum):
 
 JOB_STEP_LABELS: dict[JobStep, str] = {
     JobStep.WAITING: "En attente",
-    JobStep.SEARCH: "Recherche des sources",
-    JobStep.RERANKING: "Reranking des passages",
+    JobStep.PLANNING: "Analyse et planification de la question",
+    JobStep.SEARCH: "Recherche locale dans le corpus",
     JobStep.ENRICHMENT: "Enrichissement des références",
-    JobStep.ARGO: "Génération de la réponse",
+    JobStep.RERANKING: "Classement et fusion des passages",
+    JobStep.EVIDENCE_SELECTION: "Sélection sémantique des preuves",
+    JobStep.COVERAGE: "Contrôle et complément de la couverture",
+    JobStep.FIGURE_ANALYSIS: "Analyse locale des figures",
+    JobStep.GENERATION: "Génération de la réponse finale",
+    JobStep.ARGO: "Traitement ARGO (ancien suivi)",
     JobStep.VALIDATION: "Validation scientifique",
     JobStep.PERSISTENCE: "Enregistrement du résultat",
     JobStep.BACKUP: "Sauvegarde du corpus",
@@ -99,7 +112,7 @@ JOB_STEP_LABELS: dict[JobStep, str] = {
     JobStep.SYNTHESIS: "Synthèse approfondie",
 }
 
-JOB_STEP_LABELS[JobStep.INGESTION] = "Ingestion des documents privés"
+JOB_STEP_LABELS[JobStep.INGESTION] = "Ingestion des documents"
 
 JOB_STEP_ORDER: dict[JobStep, int] = {step: index for index, step in enumerate(JobStep)}
 
@@ -154,6 +167,19 @@ class ChatAnswerPayload(BaseModel):
     use_external_sources: bool = False
     analyze_figures: bool = False
     interaction_mode: Literal["auto", "research", "conversation"] = "auto"
+    evaluation_run_id: str | None = Field(
+        default=None,
+        pattern=r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,79}$",
+    )
+    evaluation_question_id: str | None = Field(
+        default=None,
+        pattern=r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,79}$",
+    )
+    evaluation_profile: Literal["p0", "p1", "p2"] | None = None
+    evaluation_question_sha256: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+    )
 
     @property
     def idempotency_key(self) -> tuple[UUID, UUID]:
@@ -168,6 +194,32 @@ class ChatAnswerPayload(BaseModel):
         if len(cleaned) < 2:
             raise ValueError("message must contain at least two characters")
         return cleaned
+
+    @model_validator(mode="after")
+    def validate_evaluation_cell(self) -> ChatAnswerPayload:
+        metadata = (
+            self.evaluation_run_id,
+            self.evaluation_question_id,
+            self.evaluation_profile,
+        )
+        if not any(metadata):
+            if self.evaluation_question_sha256 is not None:
+                raise ValueError("an evaluation fingerprint requires complete evaluation metadata")
+            return self
+        if not all(metadata):
+            raise ValueError("evaluation run, question and profile must be supplied together")
+        if self.interaction_mode != "research":
+            raise ValueError("evaluation questions require the isolated research interaction mode")
+        if self.use_external_sources:
+            raise ValueError("evaluation questions cannot use external sources")
+        expected = sha256(self.message.encode("utf-8")).hexdigest()
+        if self.evaluation_question_sha256 is None:
+            self.evaluation_question_sha256 = expected
+        elif self.evaluation_question_sha256 != expected:
+            raise ValueError(
+                "evaluation question fingerprint does not match the normalized message"
+            )
+        return self
 
 
 class WeeklyMaintenancePayload(BaseModel):
@@ -229,8 +281,8 @@ class LongSynthesisPayload(BaseModel):
         return cleaned
 
 
-class PrivateIngestionPayload(BaseModel):
-    """Versioned references to PDFs already staged in the private local directory."""
+class CorpusIngestionPayload(BaseModel):
+    """Versioned references to PDFs already staged in the corpus directory."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -266,7 +318,7 @@ JobPayload = (
     | WeeklyMaintenancePayload
     | DeepResearchPayload
     | LongSynthesisPayload
-    | PrivateIngestionPayload
+    | CorpusIngestionPayload
 )
 
 

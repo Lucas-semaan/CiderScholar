@@ -81,12 +81,12 @@ export function appendPersistedUserMessage(
   ];
 }
 
-export function reloadSucceededConversation(
+export function reloadTerminalConversation(
   job: DurableJob,
   load: (conversationId: string) => Promise<ChatConversation> = api.chatbot.conversation,
 ): Promise<ChatConversation> {
-  if (job.state !== "succeeded") {
-    return Promise.reject(new Error("Cannot reload a conversation before job success."));
+  if (job.state !== "succeeded" && job.state !== "failed" && job.state !== "cancelled") {
+    return Promise.reject(new Error("Cannot reload a conversation before the job is terminal."));
   }
   return load(job.conversation_id);
 }

@@ -6,7 +6,11 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 
-from app.api.dependencies import get_database, get_settings
+from app.api.dependencies import (
+    get_common_corpus_database,
+    get_common_corpus_settings,
+    get_settings,
+)
 from app.api.schemas import PublisherCollectionRequest, PublisherCredentialRequest
 from app.config import Settings
 from app.database.sqlite import Database
@@ -74,8 +78,8 @@ def delete_publisher_credentials(
 def start_publisher_collection(
     payload: PublisherCollectionRequest,
     background_tasks: BackgroundTasks,
-    settings: Annotated[Settings, Depends(get_settings)],
-    database: Annotated[Database, Depends(get_database)],
+    settings: Annotated[Settings, Depends(get_common_corpus_settings)],
+    database: Annotated[Database, Depends(get_common_corpus_database)],
 ) -> dict[str, Any]:
     _require_enabled(settings)
     profile = profile_by_id(settings, payload.profile_id)
@@ -115,8 +119,8 @@ def start_publisher_collection(
 @router.get("/runs/{run_id}")
 def publisher_collection_run(
     run_id: str,
-    settings: Annotated[Settings, Depends(get_settings)],
-    database: Annotated[Database, Depends(get_database)],
+    settings: Annotated[Settings, Depends(get_common_corpus_settings)],
+    database: Annotated[Database, Depends(get_common_corpus_database)],
 ) -> dict[str, Any]:
     _require_enabled(settings)
     run = database.publisher_access_run(run_id)

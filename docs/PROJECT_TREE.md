@@ -10,7 +10,6 @@ CiderScholar/
 │   │   ├── ingestion.py
 │   │   ├── jobs.py
 │   │   ├── library.py
-│   │   ├── private_corpus.py
 │   │   ├── search.py
 │   │   ├── synthesis.py
 │   │   └── system.py

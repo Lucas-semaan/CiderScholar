@@ -22,12 +22,6 @@ from app.retrieval.vector_search import QdrantLocalIndex
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, help="Path to config.yaml")
-    parser.add_argument(
-        "--scope",
-        choices=("configured", CorpusScope.COMMON.value, CorpusScope.PRIVATE.value),
-        default="configured",
-        help="Corpus whose chunk collection must be indexed",
-    )
     parser.add_argument("--retry-failed", action="store_true", help="Retry chunks marked failed")
     parser.add_argument(
         "--recreate",
@@ -39,9 +33,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    settings = load_settings(args.config)
-    if args.scope != "configured":
-        settings = settings_for_corpus(settings, CorpusScope(args.scope))
+    settings = settings_for_corpus(load_settings(args.config), CorpusScope.COMMON)
     settings.paths.create()
     logging.basicConfig(
         level=getattr(logging, settings.app.log_level),
@@ -87,7 +79,7 @@ def main(argv: list[str] | None = None) -> int:
             "recreated": recreated,
             "reset_chunks": reset_chunks,
             "offline_mode": settings.app.offline_mode,
-            "scope": args.scope,
+            "corpus": CorpusScope.COMMON.value,
         }
         timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
         report_path = settings.paths.exports_dir / f"vector-index-{timestamp}.json"

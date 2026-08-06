@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from app.models.chatbot import ChatEvidencePassage, ChatEvidenceRecord
 from app.retrieval.scientific_intent import (
+    ScientificFacet,
+    ScientificIntent,
     analyze_scientific_intent,
     score_scientific_text,
 )
@@ -216,3 +218,112 @@ def test_calvados_evidence_merge_covers_facets_before_distant_wine() -> None:
     assert {"aroma", "structure", "evolution"} <= {
         facet for record in selected for facet in record.matched_facets
     }
+
+
+def test_structured_evidence_prioritizes_a_b_before_c_d_semantic_candidates() -> None:
+    intent = ScientificIntent(
+        question="How does target process affect target outcome in target matrix?",
+        matrix_primary=["target matrix"],
+        matrix_close=["close matrix"],
+        matrix_distant=["distant matrix"],
+        process_terms_en=["target process"],
+        excluded_terms=["excluded matrix"],
+        facets=[
+            ScientificFacet(
+                key="outcome",
+                label="Target outcome",
+                terms_fr=["resultat cible"],
+                terms_en=["target outcome"],
+            )
+        ],
+    )
+    candidates = [
+        _candidate(
+            1,
+            title="Target matrix target process target outcome",
+            abstract="The target process changed the target outcome.",
+            doi="10.1000/grade-a",
+        ),
+        _candidate(
+            2,
+            title="Close matrix target process target outcome",
+            abstract="The target process changed the target outcome.",
+            doi="10.1000/grade-b",
+        ),
+        _candidate(
+            3,
+            title="Distant matrix target process target outcome",
+            abstract="The target process changed the target outcome.",
+            doi="10.1000/grade-c",
+        ),
+        _candidate(
+            4,
+            title="Excluded matrix target process target outcome",
+            abstract="The target process changed the target outcome.",
+            doi="10.1000/grade-d",
+        ),
+    ]
+
+    ranked = rerank_bibliographic_candidates(
+        intent.question,
+        candidates,
+        limit=4,
+        intent_override=intent,
+    )
+    selected = merge_chat_evidence(
+        [],
+        [_evidence(record) for record in candidates],
+        query=intent.question,
+        limit=4,
+        intent_override=intent,
+    )
+
+    assert [record.doi for record in ranked] == [
+        "10.1000/grade-a",
+        "10.1000/grade-b",
+        "10.1000/grade-c",
+        "10.1000/grade-d",
+    ]
+    assert [record.doi for record in selected] == [
+        "10.1000/grade-a",
+        "10.1000/grade-b",
+        "10.1000/grade-c",
+        "10.1000/grade-d",
+    ]
+    assert [record.evidence_grade for record in selected] == ["A", "B", "C", "D"]
+
+
+def test_unstructured_evidence_keeps_retrieval_fallback() -> None:
+    intent = ScientificIntent(question="What does the corpus report?")
+    candidates = [
+        _candidate(
+            1,
+            title="First retrieved record",
+            abstract="First retained abstract.",
+            doi="10.1000/fallback-a",
+        ),
+        _candidate(
+            2,
+            title="Second retrieved record",
+            abstract="Second retained abstract.",
+            doi="10.1000/fallback-b",
+        ),
+    ]
+
+    ranked = rerank_bibliographic_candidates(
+        intent.question,
+        candidates,
+        limit=2,
+        intent_override=intent,
+    )
+    selected = merge_chat_evidence(
+        [],
+        [_evidence(record) for record in candidates],
+        query=intent.question,
+        limit=2,
+        intent_override=intent,
+    )
+
+    assert [record.doi for record in ranked] == ["10.1000/fallback-a", "10.1000/fallback-b"]
+    assert {record.doi for record in selected} == {"10.1000/fallback-a", "10.1000/fallback-b"}
+    assert {record.evidence_grade for record in selected} == {"unassessed"}

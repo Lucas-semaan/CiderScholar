@@ -11,8 +11,8 @@ import threading
 import uuid
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from pathlib import Path
-from time import perf_counter
-from typing import Any, BinaryIO
+from time import perf_counter, sleep
+from typing import Any, BinaryIO, Literal
 
 from app.config import Settings
 from app.corpora import CorpusScope, corpus_paths, corpus_scope_label, settings_for_corpus
@@ -29,8 +29,18 @@ from app.ingestion.embeddings import (
     SentenceTransformerBackend,
     local_model_path,
 )
+from app.ingestion.pdf_extractor import PdfExtractor
 from app.ingestion.pipeline import IngestionPipeline, IngestionReport
-from app.llm.argo_client import ArgoClient, ArgoError, ArgoQuotaError
+from app.llm.argo_client import (
+    ArgoAuthenticationError,
+    ArgoAuthorizationError,
+    ArgoClient,
+    ArgoError,
+    ArgoGenerationError,
+    ArgoProtocolError,
+    ArgoQuotaError,
+    ArgoScientificValidationError,
+)
 from app.llm.article_evidence import ArticleEvidenceExtractor, EvidencePassageSelector
 from app.llm.figure_analysis import (
     FigureAnalysisUnavailable,
@@ -87,7 +97,6 @@ from app.retrieval.semantic_filter import (
 )
 from app.retrieval.vector_search import QdrantLocalIndex, VectorSearchService
 from app.services.chatbot import (
-    ChatbotNoSourcesError,
     chatbot_sources_from_evidence,
     contextualize_retrieval_query,
     conversation_context,
@@ -95,7 +104,7 @@ from app.services.chatbot import (
 )
 from app.updates.full_text import FullTextHarvestService
 from app.updates.harvest import BibliographicHarvestStore
-from app.updates.models import BibliographicSearchReport
+from app.updates.models import BibliographicSearchReport, normalize_doi
 from app.updates.pilot_rag import (
     CiderAbstractRagResult,
     CiderAbstractRagService,
@@ -111,6 +120,17 @@ from app.updates.vector_index import (
 )
 
 ProgressCallback = Callable[[int, int, str, str], None]
+ChatbotProgressStage = Literal[
+    "planning",
+    "search",
+    "enrichment",
+    "reranking",
+    "evidence_selection",
+    "coverage",
+    "figure_analysis",
+    "generation",
+]
+ChatbotProgressCallback = Callable[[ChatbotProgressStage], None]
 SAFE_FILE_NAME = re.compile(r"[^A-Za-z0-9._ -]+")
 BIBTEX_KEY = re.compile(r"[^A-Za-z0-9_:-]+")
 _LOCAL_CHAT_RETRIEVAL_LOCK = threading.Lock()
@@ -173,8 +193,30 @@ def pdf_paths(folder: str | Path, *, recursive: bool) -> Iterable[Path]:
     root = Path(folder).expanduser().resolve()
     if not root.is_dir():
         raise FileNotFoundError(f"dossier PDF introuvable : {root}")
-    iterator = root.rglob("*.pdf") if recursive else root.glob("*.pdf")
-    yield from sorted(path for path in iterator if path.is_file())
+    iterator = (
+        (
+            Path(current_root) / name
+            for current_root, _directories, names in os.walk(root)
+            for name in names
+        )
+        if recursive
+        else root.iterdir()
+    )
+    candidates = (
+        _windows_extended_path(path) for path in iterator if path.suffix.casefold() == ".pdf"
+    )
+    yield from sorted(path for path in candidates if path.is_file())
+
+
+def _windows_extended_path(path: Path) -> Path:
+    """Keep existing Windows files addressable past the legacy MAX_PATH limit."""
+
+    raw_path = str(path)
+    if os.name != "nt" or raw_path.startswith("\\\\?\\") or len(raw_path) < 260:
+        return path
+    if raw_path.startswith("\\\\"):
+        return Path(f"\\\\?\\UNC\\{raw_path[2:]}")
+    return Path(f"\\\\?\\{raw_path}")
 
 
 def ingest_paths(
@@ -183,17 +225,51 @@ def ingest_paths(
     paths: Sequence[Path],
     *,
     progress: ProgressCallback | None = None,
+    ocr_extractor: PdfExtractor | None = None,
+    stop_on_error: bool = False,
+    precomputed_sha256: Mapping[Path, str] | None = None,
+    memory_retry_attempts: int = 0,
+    memory_retry_delay_seconds: float = 10.0,
 ) -> list[IngestionReport]:
     pipeline = IngestionPipeline(settings, database)
+    ocr_pipeline = (
+        IngestionPipeline(
+            settings,
+            database,
+            extractor=ocr_extractor,
+            refresh_ocr_cache=True,
+        )
+        if ocr_extractor is not None
+        else None
+    )
     reports: list[IngestionReport] = []
     total = len(paths)
     for index, path in enumerate(paths, start=1):
         if progress is not None:
             progress(index - 1, total, path.name, "ingestion")
-        report = pipeline.ingest_file(path)
+        sha256 = precomputed_sha256.get(path) if precomputed_sha256 is not None else None
+        ingestion_options = {"precomputed_sha256": sha256} if sha256 is not None else {}
+        report = pipeline.ingest_file(path, **ingestion_options)
+        memory_attempt = 0
+        while (
+            report.status == "failed"
+            and report.error_type == "MemoryLimitError"
+            and memory_attempt < memory_retry_attempts
+        ):
+            memory_attempt += 1
+            if progress is not None:
+                progress(index - 1, total, path.name, "waiting_memory")
+            sleep(memory_retry_delay_seconds)
+            report = pipeline.ingest_file(path, **ingestion_options)
+        if report.status == "ocr_required" and ocr_pipeline is not None:
+            if progress is not None:
+                progress(index - 1, total, path.name, "ocr")
+            report = ocr_pipeline.ingest_file(path, **ingestion_options)
         reports.append(report)
         if progress is not None:
             progress(index, total, path.name, report.status)
+        if report.status == "failed" and stop_on_error:
+            break
     return reports
 
 
@@ -321,6 +397,18 @@ def _bibliographic_key(record: BibliographicHybridResult) -> str:
     return f"title:{' '.join(record.title.casefold().split())}"
 
 
+def _verified_normalized_doi(value: object) -> str | None:
+    """Return a DOI only when the persisted value is complete and already normalized."""
+
+    if not isinstance(value, str):
+        return None
+    cleaned = value.strip().casefold()
+    normalized = normalize_doi(cleaned)
+    if normalized is None or normalized != cleaned:
+        return None
+    return normalized
+
+
 def rerank_bibliographic_candidates(
     query: str,
     records: Sequence[BibliographicHybridResult],
@@ -340,8 +428,8 @@ def rerank_bibliographic_candidates(
         if current is None:
             deduplicated[key] = record
             continue
-        current_full_text = current.record_id.startswith(("common:", "private:"))
-        candidate_full_text = record.record_id.startswith(("common:", "private:"))
+        current_full_text = current.record_id.startswith("common:")
+        candidate_full_text = record.record_id.startswith("common:")
         if candidate_full_text and not current_full_text:
             deduplicated[key] = record
 
@@ -357,10 +445,12 @@ def rerank_bibliographic_candidates(
             float,
             int,
             int,
+            int,
             BibliographicHybridResult,
         ]
     ] = []
     tier_priority = {"exact": 0, "near": 1, "distant": 2, "none": 3}
+    grade_priority = {"A": 0, "B": 1, "C": 2, "D": 3, "unassessed": 4}
     for record in candidates:
         relevance = score_scientific_text(
             intent,
@@ -372,6 +462,7 @@ def rerank_bibliographic_candidates(
         assessed.append(
             (
                 combined,
+                grade_priority[relevance.evidence_grade],
                 int(not relevance.causal_match),
                 tier_priority[relevance.matrix_tier],
                 record,
@@ -381,13 +472,14 @@ def rerank_bibliographic_candidates(
         key=lambda item: (
             item[1],
             item[2],
+            item[3],
             -item[0],
-            item[3].rank,
-            item[3].record_id,
+            item[4].rank,
+            item[4].record_id,
         )
     )
     return [
-        item[3].model_copy(update={"rank": rank, "score": item[0]})
+        item[4].model_copy(update={"rank": rank, "score": item[0]})
         for rank, item in enumerate(assessed[:limit], start=1)
     ]
 
@@ -400,7 +492,7 @@ def search_common_corpus_abstracts(
     search_queries: Sequence[str] = (),
     intent_override: ScientificIntent | None = None,
 ) -> list[BibliographicHybridResult]:
-    """Search full-article metadata and abstract-only notices in the common corpus."""
+    """Search full articles and verified abstract-only records in the common corpus."""
 
     if not query.strip():
         raise ValueError("common corpus abstract query cannot be empty")
@@ -466,7 +558,7 @@ def search_common_corpus_abstracts(
         except json.JSONDecodeError:
             authors = []
         lexical_hit = lexical_by_article.get(article_id)
-        doi = str(row["doi"]) if row["doi"] else None
+        doi = _verified_normalized_doi(row["doi"])
         article_results.append(
             BibliographicHybridResult(
                 rank=len(article_results) + 1,
@@ -504,8 +596,6 @@ def search_common_corpus_abstracts(
             BibliographicVectorIndex(scoped_settings),
         )
         try:
-            # The final scientific reranker needs a wider recall set than the
-            # UI result count; the service keeps its internal recall bounded.
             collected_abstracts: dict[str, BibliographicHybridResult] = {}
             for search_query in queries:
                 response = service.search(
@@ -513,8 +603,15 @@ def search_common_corpus_abstracts(
                     limit=min(max(limit * 2, 30), 60),
                 )
                 for result in response.results:
+                    doi = _verified_normalized_doi(result.doi)
+                    if doi is None:
+                        continue
                     converted = result.model_copy(
-                        update={"record_id": f"common-abstract:{result.record_id}"}
+                        update={
+                            "record_id": f"common-abstract:{result.record_id}",
+                            "doi": doi,
+                            "url": f"https://doi.org/{doi}",
+                        }
                     )
                     key = _bibliographic_key(converted)
                     current = collected_abstracts.get(key)
@@ -524,14 +621,12 @@ def search_common_corpus_abstracts(
         finally:
             service.close()
 
-    # A full article wins over an abstract-only notice for the same DOI. Distinct
-    # DOI-less notices remain separate because a title match is not proof of identity.
-    full_text_dois = {result.doi.casefold() for result in article_results if result.doi is not None}
-    filtered_abstracts = [
-        result
-        for result in abstract_results
-        if result.doi is None or result.doi.casefold() not in full_text_dois
-    ]
+    full_text_dois = {
+        doi
+        for row in database.list_articles()
+        if (doi := _verified_normalized_doi(row["doi"])) is not None
+    }
+    filtered_abstracts = [result for result in abstract_results if result.doi not in full_text_dois]
     return rerank_bibliographic_candidates(
         query,
         [*article_results, *filtered_abstracts],
@@ -839,8 +934,10 @@ def search_common_corpus_full_text_evidence(
             )
         )
     tier_priority = {"exact": 0, "near": 1, "distant": 2, "none": 3}
+    grade_priority = {"A": 0, "B": 1, "C": 2, "D": 3, "unassessed": 4}
     assessed_articles.sort(
         key=lambda item: (
+            grade_priority[relevance_by_article[item[1].article_id].evidence_grade],
             int(not relevance_by_article[item[1].article_id].causal_match),
             -item[0],
             tier_priority[relevance_by_article[item[1].article_id].matrix_tier],
@@ -901,6 +998,7 @@ def search_common_corpus_full_text_evidence(
                 score=article.adjusted_score,
                 matched_facets=relevance_by_article[article.article_id].matched_facets,
                 matrix_tier=relevance_by_article[article.article_id].matrix_tier,
+                evidence_grade=relevance_by_article[article.article_id].evidence_grade,
                 passages=[
                     ChatEvidencePassage(
                         evidence_id=f"{record_id}:chunk:{passage.chunk_id}",
@@ -928,15 +1026,7 @@ def abstract_candidates_to_chat_evidence(
         if not text:
             continue
         origin = "external_api" if record.record_id.startswith("external:") else "local_rag"
-        scope = (
-            None
-            if origin == "external_api"
-            else (
-                CorpusScope.PRIVATE
-                if record.record_id.startswith("private:")
-                else CorpusScope.COMMON
-            )
-        )
+        scope = None if origin == "external_api" else CorpusScope.COMMON
         converted.append(
             ChatEvidenceRecord(
                 record_id=record.record_id,
@@ -1012,6 +1102,7 @@ def merge_chat_evidence(
                         "score": combined,
                         "matched_facets": relevance.matched_facets,
                         "matrix_tier": relevance.matrix_tier,
+                        "evidence_grade": relevance.evidence_grade,
                     }
                 ),
             )
@@ -1040,9 +1131,11 @@ def merge_chat_evidence(
             deduplicated[key] = (score, record)
 
     tier_priority = {"exact": 0, "near": 1, "distant": 2, "none": 3}
+    grade_priority = {"A": 0, "B": 1, "C": 2, "D": 3, "unassessed": 4}
     ordered = sorted(
         deduplicated.values(),
         key=lambda item: (
+            grade_priority[item[1].evidence_grade],
             -item[0],
             tier_priority[item[1].matrix_tier],
             -len(item[1].matched_facets),
@@ -1219,6 +1312,7 @@ def _semantic_filter_and_coverage(
     axes: Sequence[ResearchAxis],
     evidence: Sequence[ChatEvidenceRecord],
     on_argo_reserved: Callable[[], None] | None,
+    on_coverage_started: Callable[[], None] | None = None,
 ) -> tuple[SemanticFilterResult, CoverageAssessmentResult]:
     """Filter evidence by scientific meaning, then assess each planned axis."""
 
@@ -1229,6 +1323,8 @@ def _semantic_filter_and_coverage(
             evidence,
             on_argo_reserved=on_argo_reserved,
         )
+        if on_coverage_started is not None:
+            on_coverage_started()
         coverage = ArgoEvidenceCoverageAssessor(llm).assess(
             question,
             axes,
@@ -1290,6 +1386,107 @@ def _coverage_notes(
     return notes
 
 
+def _argo_diagnostic_code(error: ArgoError) -> str:
+    if isinstance(error, ArgoScientificValidationError):
+        return error.reason.value
+    if isinstance(error, ArgoAuthenticationError):
+        return "argo_authentication"
+    if isinstance(error, ArgoAuthorizationError):
+        return "argo_authorization"
+    if isinstance(error, ArgoProtocolError):
+        return "argo_protocol"
+    if isinstance(error, ArgoGenerationError):
+        return "argo_generation"
+    return "argo_unavailable"
+
+
+def _fallback_chatbot_result(
+    *,
+    message: str,
+    retrieval_query: str,
+    evidence: Sequence[ChatEvidenceRecord],
+    warnings: Sequence[str],
+    diagnostic_code: str,
+    started: float,
+    external_result_count: int = 0,
+    prompt_tokens: int = 0,
+    completion_tokens: int = 0,
+    interaction_mode: Literal["research", "conversation"] = "research",
+    reused_previous_sources: bool = False,
+    figure_analysis_requested: bool = False,
+    figure_analysis_count: int = 0,
+    figure_analysis_duration_seconds: float = 0.0,
+    figure_analysis_model: str | None = None,
+) -> ChatbotResult:
+    """Always return a bounded, source-traceable outcome without inventing a synthesis."""
+
+    selected = list(evidence[:5])
+    cited_evidence_ids = [record.passages[0].evidence_id for record in selected]
+    sources = chatbot_sources_from_evidence(selected, cited_evidence_ids)
+    if selected:
+        lines = [
+            "## Réponse dégradée fondée sur le corpus",
+            "",
+            "La synthèse générative n'a pas produit de réponse scientifiquement validable. "
+            "Les passages les mieux classés sont donc restitués directement, sans extrapolation.",
+        ]
+        for index, record in enumerate(selected, start=1):
+            excerpt = " ".join(record.passages[0].text.split())[:700]
+            lines.extend(
+                [
+                    "",
+                    f"### Source {index} — {record.title}",
+                    "",
+                    f"> {excerpt}",
+                ]
+            )
+        lines.extend(
+            [
+                "",
+                "Cette sortie est exploitable pour diagnostiquer la sélection documentaire, "
+                "mais ne doit pas être notée comme une synthèse ARGO réussie.",
+            ]
+        )
+        status: Literal["extractive_fallback", "diagnostic_only"] = "extractive_fallback"
+        model = "deterministic-evidence-fallback"
+    else:
+        lines = [
+            "## Diagnostic de réponse",
+            "",
+            (
+                "Aucune preuve qualifiée n'a été restituée par le pipeline pour cette question. "
+                "La question est conservée et ce résultat signale une anomalie de retrieval "
+                "à analyser."
+            ),
+            "",
+            f"Code diagnostique : `{diagnostic_code}`.",
+        ]
+        status = "diagnostic_only"
+        model = "deterministic-diagnostic-fallback"
+    return ChatbotResult(
+        message=" ".join(message.split()),
+        retrieval_query=retrieval_query,
+        answer_markdown="\n".join(lines),
+        sources=sources,
+        warnings=[*warnings, f"Sortie de secours activée ({diagnostic_code})."],
+        model=model,
+        local_result_count=sum(record.origin == "local_rag" for record in selected),
+        external_result_count=external_result_count,
+        external_enrichment_used=any(source.origin == "external_api" for source in sources),
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        duration_seconds=perf_counter() - started,
+        generation_status=status,
+        diagnostic_code=diagnostic_code,
+        interaction_mode=interaction_mode,
+        reused_previous_sources=reused_previous_sources,
+        figure_analysis_requested=figure_analysis_requested,
+        figure_analysis_count=figure_analysis_count,
+        figure_analysis_duration_seconds=figure_analysis_duration_seconds,
+        figure_analysis_model=figure_analysis_model,
+    )
+
+
 def answer_chatbot(
     settings: Settings,
     database: Database,
@@ -1303,29 +1500,67 @@ def answer_chatbot(
     on_figure_analysis: Callable[[], None] | None = None,
     on_argo_reserved: Callable[[], None] | None = None,
     on_argo_response: Callable[[], None] | None = None,
+    on_progress: ChatbotProgressCallback | None = None,
+    experimental_profile: Literal["p0", "p1", "p2"] | None = None,
 ) -> ChatbotResult:
     """Answer with local full-text passages, abstract fallback and bounded enrichment."""
 
     started = perf_counter()
+
+    def publish_progress(stage: ChatbotProgressStage) -> None:
+        if on_progress is not None:
+            on_progress(stage)
+
+    publish_progress("planning")
+    active_experimental_profile = experimental_profile or settings.app.experimental_chat_profile
     context = conversation_context(history)
     retrieval_query = contextualize_retrieval_query(message, context)
-    reused_evidence = (
-        chat_evidence_from_previous_sources(
-            settings,
-            query=retrieval_query,
-            sources=previous_sources,
+    warnings: list[str] = []
+    try:
+        reused_evidence = (
+            chat_evidence_from_previous_sources(
+                settings,
+                query=retrieval_query,
+                sources=previous_sources,
+            )
+            if interaction_mode == "conversation"
+            else []
         )
-        if interaction_mode == "conversation"
-        else []
-    )
+    except Exception as exc:
+        reused_evidence = []
+        warnings.append(
+            "Les preuves de la conversation n'ont pas pu être rechargées "
+            f"({type(exc).__name__}); une nouvelle recherche locale est exécutée."
+        )
     if reused_evidence:
-        with ArgoClient(settings) as llm:
-            answer = CiderEvidenceRagService(llm).answer(
-                message,
-                reused_evidence,
-                conversation_history=context,
-                on_argo_reserved=on_argo_reserved,
-                on_argo_response=on_argo_response,
+        publish_progress("generation")
+        try:
+            with ArgoClient(settings) as llm:
+                rag = CiderEvidenceRagService(llm)
+                rag.experimental_profile = active_experimental_profile
+                answer = rag.answer(
+                    message,
+                    reused_evidence,
+                    conversation_history=context,
+                    on_argo_reserved=on_argo_reserved,
+                    on_argo_response=on_argo_response,
+                )
+        except ArgoQuotaError:
+            raise
+        except ArgoError as exc:
+            return _fallback_chatbot_result(
+                message=message,
+                retrieval_query=retrieval_query,
+                evidence=reused_evidence,
+                warnings=warnings,
+                diagnostic_code=_argo_diagnostic_code(exc),
+                started=started,
+                external_result_count=sum(
+                    record.origin == "external_api" for record in reused_evidence
+                ),
+                interaction_mode="conversation",
+                reused_previous_sources=True,
+                figure_analysis_requested=analyze_figures,
             )
         sources = chatbot_sources_from_evidence(
             reused_evidence,
@@ -1350,7 +1585,6 @@ def answer_chatbot(
             reused_previous_sources=True,
             figure_analysis_requested=analyze_figures,
         )
-    warnings: list[str] = []
     planning: QueryPlanningResult
     try:
         with ArgoClient(settings) as planning_client:
@@ -1359,8 +1593,14 @@ def answer_chatbot(
                 conversation_history=context,
                 on_argo_reserved=on_argo_reserved,
             )
-    except ArgoError:
+    except ArgoQuotaError:
         raise
+    except ArgoError as exc:
+        planning = deterministic_query_plan(retrieval_query)
+        warnings.append(
+            "La planification ARGO est indisponible "
+            f"({_argo_diagnostic_code(exc)}); utilisation du planificateur local de secours."
+        )
     except Exception as exc:
         planning = deterministic_query_plan(retrieval_query)
         warnings.append(
@@ -1370,22 +1610,26 @@ def answer_chatbot(
     intent = planning.plan.scientific_intent(retrieval_query)
     search_queries = planning.plan.retrieval_queries
 
-    local_results = _serialized_chat_retrieval(
-        search_common_corpus_abstracts,
-        settings,
-        query=retrieval_query,
-        limit=15,
-        search_queries=search_queries,
-        intent_override=intent,
-    )
-    if not local_results:
+    publish_progress("search")
+    retrieval_failed = False
+    try:
         local_results = _serialized_chat_retrieval(
-            search_harvested_abstracts,
+            search_common_corpus_abstracts,
             settings,
-            database,
             query=retrieval_query,
             limit=15,
-        ).results
+            search_queries=search_queries,
+            intent_override=intent,
+        )
+    except Exception as exc:
+        retrieval_failed = True
+        local_results = []
+        warnings.append(
+            "La recherche dans les abstracts du corpus commun est indisponible "
+            f"({type(exc).__name__})."
+        )
+    if use_external_sources:
+        publish_progress("enrichment")
     if use_external_sources and settings.full_text.enabled:
         _acquired_article_ids, acquisition_warnings = _serialized_chat_retrieval(
             acquire_common_full_text_for_chat,
@@ -1406,6 +1650,7 @@ def answer_chatbot(
             intent_override=intent,
         )
     except Exception as exc:
+        retrieval_failed = True
         full_text_records = []
         warnings.append(
             "La recherche dans les textes intégraux est indisponible pour cette réponse "
@@ -1426,6 +1671,7 @@ def answer_chatbot(
                 f"({type(exc).__name__})."
             )
 
+    publish_progress("reranking")
     external_records = external_report.records if external_report else []
     candidates, external_count = merge_chatbot_candidates(
         local_results,
@@ -1440,8 +1686,19 @@ def answer_chatbot(
         intent_override=intent,
     )
     if not evidence:
-        raise ChatbotNoSourcesError(
-            "aucune preuve qualifiée n'est disponible pour répondre à cette question"
+        return _fallback_chatbot_result(
+            message=message,
+            retrieval_query=retrieval_query,
+            evidence=[],
+            warnings=warnings,
+            diagnostic_code=(
+                "retrieval_unavailable" if retrieval_failed else "retrieval_no_qualified_evidence"
+            ),
+            started=started,
+            external_result_count=external_count,
+            prompt_tokens=planning.prompt_tokens,
+            completion_tokens=planning.completion_tokens,
+            figure_analysis_requested=analyze_figures,
         )
     if external_report:
         warnings.extend(
@@ -1455,6 +1712,7 @@ def answer_chatbot(
     coverage_completion_tokens = 0
     semantic_filter: SemanticFilterResult | None = None
     coverage: CoverageAssessmentResult | None = None
+    publish_progress("evidence_selection")
     try:
         semantic_filter, coverage = _semantic_filter_and_coverage(
             settings,
@@ -1462,6 +1720,7 @@ def answer_chatbot(
             axes=planning.plan.axes,
             evidence=evidence,
             on_argo_reserved=on_argo_reserved,
+            on_coverage_started=lambda: publish_progress("coverage"),
         )
     except ArgoQuotaError:
         raise
@@ -1486,9 +1745,30 @@ def answer_chatbot(
                 "la synthèse conserve le classement scientifique local."
             )
 
+    retrieved_evidence = evidence
     filtered_evidence = (
         evidence if semantic_filter is None else semantic_filter.selected_records(evidence)
     )
+    if intent.is_structured and not filtered_evidence:
+        recall_preserving_evidence = [
+            record for record in evidence if record.evidence_grade in {"A", "B", "unassessed"}
+        ]
+        if recall_preserving_evidence:
+            filtered_evidence = recall_preserving_evidence
+            warnings.append(
+                "Le filtrage sémantique n'a retenu aucun candidat ; conservation prudente "
+                "des preuves locales A/B qualifiées."
+            )
+    if intent.is_structured and (semantic_filter is None or semantic_filter.used_fallback):
+        locally_eligible = [
+            record
+            for record in filtered_evidence
+            if record.evidence_grade in {"A", "B", "unassessed"}
+        ]
+        # Keep C/D only when no better candidate exists so the synthesis layer can
+        # return a precise, topic-aware abstention instead of fabricating an answer.
+        if locally_eligible:
+            filtered_evidence = locally_eligible
     needs_follow_up = (
         semantic_filter is not None
         and coverage is not None
@@ -1567,6 +1847,7 @@ def answer_chatbot(
                         axes=planning.plan.axes,
                         evidence=expanded_evidence,
                         on_argo_reserved=on_argo_reserved,
+                        on_coverage_started=lambda: publish_progress("coverage"),
                     )
                 except ArgoQuotaError:
                     raise
@@ -1586,18 +1867,40 @@ def answer_chatbot(
                             "candidats ; conservation de la première sélection validée."
                         )
                     else:
-                        semantic_filter = second_semantic_filter
-                        filtered_evidence = second_semantic_filter.selected_records(
+                        second_filtered_evidence = second_semantic_filter.selected_records(
                             expanded_evidence
                         )
-                        coverage = (
-                            previous_coverage if second_coverage.used_fallback else second_coverage
-                        )
+                        if second_filtered_evidence:
+                            semantic_filter = second_semantic_filter
+                            filtered_evidence = second_filtered_evidence
+                            coverage = (
+                                previous_coverage
+                                if second_coverage.used_fallback
+                                else second_coverage
+                            )
+                        else:
+                            warnings.append(
+                                "Le second filtrage sémantique n'a retenu aucun nouveau candidat ; "
+                                "conservation de la première sélection validée."
+                            )
 
     evidence = filtered_evidence
     if not evidence:
-        raise ChatbotNoSourcesError(
-            "aucune preuve sémantiquement pertinente n'est disponible pour cette question"
+        return _fallback_chatbot_result(
+            message=message,
+            retrieval_query=retrieval_query,
+            evidence=retrieved_evidence,
+            warnings=warnings,
+            diagnostic_code="semantic_filter_empty",
+            started=started,
+            external_result_count=external_count,
+            prompt_tokens=(
+                planning.prompt_tokens + semantic_prompt_tokens + coverage_prompt_tokens
+            ),
+            completion_tokens=(
+                planning.completion_tokens + semantic_completion_tokens + coverage_completion_tokens
+            ),
+            figure_analysis_requested=analyze_figures,
         )
     coverage_notes = _coverage_notes(planning.plan.axes, coverage)
     if coverage_notes:
@@ -1615,12 +1918,18 @@ def answer_chatbot(
     figure_analysis_duration = 0.0
     figure_analysis_model: str | None = None
     if analyze_figures:
+
+        def publish_figure_analysis() -> None:
+            publish_progress("figure_analysis")
+            if on_figure_analysis is not None:
+                on_figure_analysis()
+
         try:
             with OllamaFigureAnalysisService(settings) as figure_service:
                 figure_batch = figure_service.analyze(
                     retrieval_query,
                     figure_references_from_chat_records(evidence),
-                    on_analysis_started=on_figure_analysis,
+                    on_analysis_started=publish_figure_analysis,
                 )
         except FigureAnalysisUnavailable as exc:
             warnings.append(str(exc))
@@ -1636,27 +1945,62 @@ def answer_chatbot(
             figure_analysis_duration = figure_batch.duration_seconds
             figure_analysis_model = figure_batch.model_name
 
-    with ArgoClient(settings) as llm:
-        rag = CiderEvidenceRagService(llm)
-        if planning.plan.requires_faceted_answer:
-            answer = rag.answer_faceted(
-                message,
-                evidence,
-                facets=intent.facets,
-                conversation_history=context,
-                coverage_notes=coverage_notes,
-                on_argo_reserved=on_argo_reserved,
-                on_argo_response=on_argo_response,
-            )
-        else:
-            answer = rag.answer(
-                message,
-                evidence,
-                conversation_history=context,
-                coverage_notes=coverage_notes,
-                on_argo_reserved=on_argo_reserved,
-                on_argo_response=on_argo_response,
-            )
+    publish_progress("generation")
+    try:
+        with ArgoClient(settings) as llm:
+            rag = CiderEvidenceRagService(llm)
+            rag.experimental_profile = active_experimental_profile
+            if planning.plan.requires_faceted_answer:
+                answer = rag.answer_faceted(
+                    message,
+                    evidence,
+                    facets=intent.facets,
+                    conversation_history=context,
+                    coverage_notes=coverage_notes,
+                    concept_definition=(
+                        planning.plan.concept_definition or planning.plan.interpreted_question
+                    ),
+                    ambiguities=planning.plan.ambiguities,
+                    excluded_concepts=planning.plan.excluded_concepts,
+                    on_argo_reserved=on_argo_reserved,
+                    on_argo_response=on_argo_response,
+                )
+            else:
+                answer = rag.answer(
+                    message,
+                    evidence,
+                    conversation_history=context,
+                    coverage_notes=coverage_notes,
+                    concept_definition=(
+                        planning.plan.concept_definition or planning.plan.interpreted_question
+                    ),
+                    ambiguities=planning.plan.ambiguities,
+                    excluded_concepts=planning.plan.excluded_concepts,
+                    on_argo_reserved=on_argo_reserved,
+                    on_argo_response=on_argo_response,
+                )
+    except ArgoQuotaError:
+        raise
+    except ArgoError as exc:
+        return _fallback_chatbot_result(
+            message=message,
+            retrieval_query=retrieval_query,
+            evidence=evidence,
+            warnings=warnings,
+            diagnostic_code=_argo_diagnostic_code(exc),
+            started=started,
+            external_result_count=external_count,
+            prompt_tokens=(
+                planning.prompt_tokens + semantic_prompt_tokens + coverage_prompt_tokens
+            ),
+            completion_tokens=(
+                planning.completion_tokens + semantic_completion_tokens + coverage_completion_tokens
+            ),
+            figure_analysis_requested=analyze_figures,
+            figure_analysis_count=figure_analysis_count,
+            figure_analysis_duration_seconds=figure_analysis_duration,
+            figure_analysis_model=figure_analysis_model,
+        )
     sources = chatbot_sources_from_evidence(evidence, answer.cited_evidence_ids)
     return ChatbotResult(
         message=" ".join(message.split()),

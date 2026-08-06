@@ -19,10 +19,15 @@ const stateLabels: Record<JobState, string> = {
 
 const stepLabels: Record<JobStep, string> = {
   waiting: "Préparation",
-  search: "Recherche locale",
-  reranking: "Reranking des passages",
+  planning: "Analyse et planification de la question",
+  search: "Recherche locale dans le corpus",
   enrichment: "Enrichissement bibliographique",
-  argo: "Génération de la réponse",
+  reranking: "Classement et fusion des passages",
+  evidence_selection: "Sélection sémantique des preuves",
+  coverage: "Contrôle et complément de la couverture",
+  figure_analysis: "Analyse locale des figures",
+  generation: "Génération de la réponse finale",
+  argo: "Traitement ARGO (ancien suivi)",
   validation: "Validation scientifique",
   persistence: "Enregistrement",
   backup: "Sauvegarde du corpus",
@@ -33,7 +38,7 @@ const stepLabels: Record<JobStep, string> = {
   evidence: "Extraction des preuves",
   verification: "Vérification des affirmations",
   synthesis: "Synthèse approfondie",
-  ingestion: "Ingestion des documents privés",
+  ingestion: "Ingestion des documents",
 };
 
 interface JobStatusCardProps {

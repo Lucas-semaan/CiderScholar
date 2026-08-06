@@ -11,10 +11,9 @@ from fastapi import APIRouter, Depends, Request
 from app.api.dependencies import (
     get_common_corpus_database,
     get_database,
-    get_private_corpus_database,
     get_settings,
 )
-from app.api.schemas import ConfirmedDesktopAction, RuntimeSettingsRequest
+from app.api.schemas import ConfirmedDesktopAction, RuntimeSettingsRequest, SystemDiagnostics
 from app.config import Settings
 from app.corpora import LocalProfile, load_local_profile
 from app.corpus_packages.checks import refresh_corpus_update_if_due
@@ -22,12 +21,23 @@ from app.database.sqlite import Database
 from app.deep_research.promotion import deep_research_availability
 from app.desktop.app_updates import check_application_update
 from app.desktop.supervisor import request_shutdown
+from app.diagnostics import build_runtime_diagnostics
 from app.llm.argo_key import ArgoKeyStore
 from app.memory_profiles import recommend_memory_profile
 from app.publisher_access.credentials import PublisherCredentialStore
-from app.services.workflows import apply_runtime_overrides, harvested_bibliographic_statistics
+from app.services.document_library import document_library_summary
+from app.services.workflows import apply_runtime_overrides
 
 router = APIRouter(prefix="/api/system", tags=["system"])
+
+
+@router.get("/diagnostics", response_model=SystemDiagnostics)
+def diagnostics(
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> SystemDiagnostics:
+    """Expose local runtime health without conversation or job payload content."""
+
+    return SystemDiagnostics.model_validate(build_runtime_diagnostics(settings))
 
 
 @router.get("/overview")
@@ -35,15 +45,11 @@ def overview(
     settings: Annotated[Settings, Depends(get_settings)],
     database: Annotated[Database, Depends(get_database)],
     common_database: Annotated[Database, Depends(get_common_corpus_database)],
-    private_database: Annotated[Database, Depends(get_private_corpus_database)],
 ) -> dict[str, Any]:
     queries = database.list_query_summaries(limit=1000)
-    bibliography = harvested_bibliographic_statistics(database)
+    bibliography = document_library_summary(common_database)["statistics"]
     return {
-        "corpus": {
-            "common": _corpus_statistics(common_database),
-            "private": _corpus_statistics(private_database),
-        },
+        "corpus": _corpus_statistics(common_database),
         "bibliography": bibliography,
         "activity": {"queries": len(queries)},
         "runtime": runtime_payload(settings),
@@ -51,7 +57,7 @@ def overview(
 
 
 def _corpus_statistics(database: Database) -> dict[str, int | float]:
-    articles = database.list_articles(limit=5000)
+    articles = database.list_articles()
     jobs = database.list_ingestion_jobs(limit=200)
     chunks = sum(int(row["chunk_count"] or 0) for row in articles)
     indexed_chunks = sum(int(row["indexed_chunk_count"] or 0) for row in articles)

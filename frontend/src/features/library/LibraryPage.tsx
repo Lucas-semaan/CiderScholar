@@ -1,6 +1,6 @@
 import { useCallback, useMemo, useState } from "react";
 
-import { BookOpenText, CheckCircle2, Database, FileText, ShieldAlert } from "lucide-react";
+import { BookOpenText, Database, FileText, Search } from "lucide-react";
 import { useSearchParams } from "react-router-dom";
 
 import { Dialog } from "@/components/ui/Dialog";
@@ -24,8 +24,8 @@ import { formatNumber } from "@/lib/cn";
 import { appDestinations, librarySectionFromQuery } from "@/lib/navigation";
 
 const librarySections = [
-  { id: "records" as const, label: "Notices documentaires", icon: BookOpenText },
-  { id: "pdf" as const, label: "Corpus commun", icon: Database },
+  { id: "records" as const, label: "Tous les documents", icon: BookOpenText },
+  { id: "pdf" as const, label: "Imports et indexation", icon: Database },
 ];
 
 export function LibraryPage() {
@@ -47,7 +47,7 @@ export function LibraryPage() {
   return (
     <div className="space-y-6">
       <nav
-        aria-label="Catégories de la base documentaire"
+        aria-label="Vues de la base documentaire"
         className="flex gap-1 overflow-x-auto rounded-2xl border border-slate-200 bg-white p-1.5 shadow-sm"
       >
         {librarySections.map(({ id, label, icon: Icon }) => (
@@ -80,7 +80,7 @@ function BibliographicLibrary() {
   const summary = useRemoteData(useCallback(() => api.library.summary(), []));
   const records = useRemoteData(useCallback(() => api.library.records(applied), [applied]));
   const explicitlySelected = useMemo(
-    () => records.data?.records.find((record) => record.id === selectedId) ?? null,
+    () => records.data?.records.find((record) => record.library_id === selectedId) ?? null,
     [records.data, selectedId],
   );
   const selected =
@@ -118,8 +118,8 @@ function BibliographicLibrary() {
   return (
     <div className="space-y-8">
       <PageHeader
-        description="Parcourez toutes les références collectées, leur pertinence, leur provenance et leur DOI normalisé."
-        eyebrow="Référentiel local"
+        description="Recherchez au même endroit les articles complets et les abstracts associés à un DOI vérifié. Un PDF portant le même DOI remplace automatiquement la fiche abstract seule."
+        eyebrow="Corpus scientifique unifié"
         title="Base documentaire"
       />
       <SuggestionForm />
@@ -133,33 +133,32 @@ function BibliographicLibrary() {
       )}
       <section className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
         <MetricCard
-          icon={BookOpenText}
-          label="Notices stockées"
-          note={`${statistics.stored_abstracts} avec abstract`}
-          value={formatNumber(statistics.stored_records)}
+          icon={Database}
+          label="Documents"
+          note="Une seule entrée par DOI vérifié"
+          value={formatNumber(statistics.documents)}
         />
         <MetricCard
-          icon={CheckCircle2}
-          label="Acceptées"
-          note="Éligibles au RAG documentaire"
-          tone="sky"
-          value={formatNumber(statistics.records)}
-        />
-        <MetricCard
-          actionLabel="Interroger l’assistant scientifique sur les abstracts indexés"
           icon={FileText}
-          label="Abstracts indexés"
-          note={`${statistics.abstracts} abstracts acceptés`}
+          label="Full article"
+          note="PDF complet disponible et consultable"
+          tone="sky"
+          value={formatNumber(statistics.full_texts)}
+        />
+        <MetricCard
+          icon={BookOpenText}
+          label="Abstract only"
+          note="Abstract accepté sans PDF disponible"
+          value={formatNumber(statistics.abstract_only)}
+        />
+        <MetricCard
+          actionLabel="Interroger l’assistant scientifique sur cette base"
+          icon={Search}
+          label="Recherchables"
+          note="Contenus présents dans l’index local"
           tone="cider"
           to={appDestinations.scientificAssistant}
-          value={formatNumber(statistics.indexed)}
-        />
-        <MetricCard
-          icon={ShieldAlert}
-          label="À auditer"
-          note={`${statistics.review} à réviser · ${statistics.quarantined} en quarantaine`}
-          tone="slate"
-          value={formatNumber(statistics.review + statistics.quarantined)}
+          value={formatNumber(statistics.searchable)}
         />
       </section>
       <LibraryFilters
@@ -171,12 +170,12 @@ function BibliographicLibrary() {
       />
       {records.error && <ErrorState message={records.error} retry={records.refresh} />}
       {records.loading && !records.data ? (
-        <LoadingState label="Filtrage des notices…" />
+        <LoadingState label="Recherche dans la base documentaire…" />
       ) : records.data?.records.length === 0 ? (
         <EmptyState
-          description="Élargissez les filtres ou vérifiez le DOI recherché."
+          description="Élargissez les filtres ou essayez un autre mot-clé, titre ou DOI."
           icon={BookOpenText}
-          title="Aucune notice trouvée"
+          title="Aucun document trouvé"
         />
       ) : records.data ? (
         <div className="grid gap-6 xl:grid-cols-[minmax(0,1.45fr)_minmax(340px,.55fr)]">
@@ -188,7 +187,7 @@ function BibliographicLibrary() {
             pageCount={pageCount}
             pageSize={applied.limit}
             records={records.data.records}
-            selectedId={selected?.id ?? null}
+            selectedId={selected?.library_id ?? null}
             total={total}
           />
           {selected && (
@@ -200,7 +199,7 @@ function BibliographicLibrary() {
             <Dialog
               onClose={() => setSelectedId(null)}
               open={explicitlySelected !== null}
-              title="Notice documentaire"
+              title="Document scientifique"
             >
               {explicitlySelected && (
                 <div className="space-y-6">

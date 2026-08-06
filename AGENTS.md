@@ -6,6 +6,13 @@ Ce fichier adapte au projet CiderScholar les principes de développement de Cide
 
 CiderScholar est une application scientifique locale. Elle ingère des PDF, collecte des métadonnées et abstracts, recherche dans un RAG traçable et produit des synthèses reliées à leurs preuves. La qualité scientifique, la confidentialité et la reprise après erreur priment sur la vitesse d’ajout de fonctionnalités.
 
+## Méthode scientifique et consignes utilisateur
+
+- Avant toute curation de corpus, collecte bibliographique, acquisition de texte intégral, modification du retrieval/RAG ou évaluation d’une réponse scientifique, lire et appliquer `docs/HOW_TO_WORK_ON_CIDERSCHOLAR.md`.
+- Une précision de méthode donnée par l’utilisateur dans la tâche courante est un critère d’acceptation, pas une simple préférence. La reformuler en contrôle vérifiable avant d’agir et la conserver pendant toute la tâche, y compris après une reprise ou une délégation.
+- Lorsqu’une précision a vocation à s’appliquer aux travaux futurs, mettre à jour le guide méthodologique dans la même tâche. Distinguer une instruction utilisateur explicite, une décision validée et une proposition d’agent encore à confirmer.
+- Généraliser la cause d’un défaut et ajouter un test représentatif ; ne pas coder uniquement l’exemple qui l’a révélé.
+
 ## Architecture de référence
 
 - `frontend/` : React, TypeScript, Vite et Tailwind CSS. Aucune logique d’accès direct à SQLite, Qdrant ou aux fournisseurs externes.

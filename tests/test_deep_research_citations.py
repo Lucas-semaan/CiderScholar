@@ -54,14 +54,12 @@ def test_extract_dois_is_normalized_and_unique() -> None:
 
 def test_traversal_persists_relation_reason_and_truthful_local_access(settings) -> None:
     common = Database(corpus_paths(settings, CorpusScope.COMMON).database_path)
-    private = Database(corpus_paths(settings, CorpusScope.PRIVATE).database_path)
     common.initialize()
-    private.initialize()
     common.save_article_and_chunks(
         _article("source", "10.1000/source"),
         [_chunk("Références 10.1000/local et 10.1000/missing.")],
     )
-    private.save_article_and_chunks(
+    common.save_article_and_chunks(
         _article("target", "10.1000/local"),
         [_chunk("Résultat cible réellement consultable.")],
     )
@@ -91,7 +89,7 @@ def test_traversal_persists_relation_reason_and_truthful_local_access(settings) 
     assert local.relation == "references"
     assert local.addition_reason == "doi_explicitly_observed_in_consulted_fragment"
     assert local.target_doi == "10.1000/local"
-    assert local.target_scope is CorpusScope.PRIVATE
+    assert local.target_scope is CorpusScope.COMMON
     assert local.target_article_id == "target"
     assert local.access_status == "consulted_local_text"
     assert (
@@ -106,7 +104,7 @@ def test_traversal_persists_relation_reason_and_truthful_local_access(settings) 
 
 
 def test_traversal_is_bounded_and_restart_idempotent(settings) -> None:
-    for scope in (CorpusScope.COMMON, CorpusScope.PRIVATE):
+    for scope in (CorpusScope.COMMON,):
         Database(corpus_paths(settings, scope).database_path).initialize()
     stage = CitationTraversalStage(
         SQLiteCitationTargetResolver(settings),

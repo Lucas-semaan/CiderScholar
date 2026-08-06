@@ -244,7 +244,7 @@ def test_raw_dataset_import_and_analysis_lineage_are_content_addressed(settings,
     )
     importer = ExperimentalDatasetImporter(
         settings.paths.database_path,
-        settings.paths.private_dir / "experimental",
+        settings.paths.data_dir / "experimental",
     )
     manifest = importer.import_file(
         raw,

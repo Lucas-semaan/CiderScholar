@@ -33,11 +33,10 @@ def desktop_paths(environ: Mapping[str, str] | None = None) -> DesktopPaths:
 
 
 def create_desktop_layout(paths: DesktopPaths) -> None:
-    """Create every persistent scope without mixing it with program files."""
+    """Create persistent application directories outside program files."""
 
     for relative in (
         "common",
-        "private",
         "queue",
         "exports",
         "backups",

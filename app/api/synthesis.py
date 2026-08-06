@@ -12,7 +12,11 @@ from app.api.serialization import serialize_row
 from app.config import Settings
 from app.database.sqlite import Database
 from app.jobs.contracts import JobPublic, LongSynthesisPayload
-from app.jobs.repository import LONG_SYNTHESIS_CONVERSATION_ID, JobRepository
+from app.jobs.repository import (
+    LONG_SYNTHESIS_CONVERSATION_ID,
+    EvaluationRunBusyError,
+    JobRepository,
+)
 from app.services.workflows import load_completed_synthesis
 
 router = APIRouter(prefix="/api/synthesis", tags=["synthesis"])
@@ -107,12 +111,21 @@ def run_synthesis(
                 "validée n’est disponible ou la traçabilité des sources est incomplète."
             ),
         )
-    job = JobRepository(database.path).enqueue_long_synthesis(
-        LongSynthesisPayload(
-            query_id=query_id,
-            resume=payload.resume,
-            conversation_id=LONG_SYNTHESIS_CONVERSATION_ID,
-            client_request_id=payload.client_request_id,
+    try:
+        job = JobRepository(database.path).enqueue_long_synthesis(
+            LongSynthesisPayload(
+                query_id=query_id,
+                resume=payload.resume,
+                conversation_id=LONG_SYNTHESIS_CONVERSATION_ID,
+                client_request_id=payload.client_request_id,
+            )
         )
-    )
+    except EvaluationRunBusyError as error:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "evaluation_run_busy",
+                "message": "Attendez la fin de la cellule d'évaluation active.",
+            },
+        ) from error
     return job.to_public()

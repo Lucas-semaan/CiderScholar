@@ -10,6 +10,7 @@ from pathlib import Path
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.config import Settings
+from app.corpora import CorpusScope, settings_for_corpus
 from app.corpus_packages.distribution import create_distribution_layout, validate_distribution_root
 from app.database.sqlite import Database
 from app.services.workflows import ingest_paths
@@ -42,15 +43,14 @@ def _package_keys(package: SuggestionPackage) -> set[str]:
     return keys
 
 
-def _existing_keys(common: Database, bibliography: Database) -> set[str]:
+def _existing_keys(database: Database) -> set[str]:
     keys: set[str] = set()
-    with closing(common.connect()) as connection:
+    with closing(database.connect()) as connection:
         for row in connection.execute("SELECT doi, sha256 FROM articles"):
             if row["doi"]:
                 keys.add(f"doi:{str(row['doi']).casefold()}")
             if row["sha256"]:
                 keys.add(f"pdf:{row['sha256']}")
-    with closing(bibliography.connect()) as connection:
         for row in connection.execute("SELECT doi, url FROM bibliographic_records"):
             if row["doi"]:
                 keys.add(f"doi:{str(row['doi']).casefold()}")
@@ -132,11 +132,10 @@ def _import_pdf(
 def import_shared_suggestions(settings: Settings) -> SuggestionImportReport:
     root = validate_distribution_root(settings)
     paths = create_distribution_layout(root)
-    common = Database(settings.paths.common_database_path)
-    bibliography = Database(settings.paths.database_path)
+    corpus_settings = settings_for_corpus(settings, CorpusScope.COMMON)
+    common = Database(corpus_settings.paths.database_path)
     common.initialize()
-    bibliography.initialize()
-    seen = _existing_keys(common, bibliography)
+    seen = _existing_keys(common)
     counters = {"scanned": 0, "imported": 0, "duplicates": 0, "rejected": 0, "corrupt": 0}
     errors: list[str] = []
     for directory in sorted(paths.suggestions_inbox.iterdir()):
@@ -162,9 +161,9 @@ def import_shared_suggestions(settings: Settings) -> SuggestionImportReport:
             continue
         try:
             imported = (
-                _import_pdf(settings, common, directory, package)
+                _import_pdf(corpus_settings, common, directory, package)
                 if isinstance(package.source, PdfSuggestionSource)
-                else _import_reference(settings, bibliography, package)
+                else _import_reference(corpus_settings, common, package)
             )
         except Exception as exc:
             imported = False

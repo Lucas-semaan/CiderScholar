@@ -47,6 +47,7 @@ class ScientificIntent(BaseModel):
     matrix_distant: list[str] = Field(default_factory=list, max_length=20)
     process_terms_fr: list[str] = Field(default_factory=list, max_length=24)
     process_terms_en: list[str] = Field(default_factory=list, max_length=24)
+    excluded_terms: list[str] = Field(default_factory=list, max_length=24)
     facets: list[ScientificFacet] = Field(default_factory=list, max_length=6)
 
     @property
@@ -89,6 +90,38 @@ class ScientificRelevance(BaseModel):
     matrix_tier: Literal["exact", "near", "distant", "none"]
     matched_facets: list[str]
     causal_match: bool
+    evidence_grade: Literal["A", "B", "C", "D", "unassessed"] = "unassessed"
+    excluded_concept_match: bool = False
+
+
+def _evidence_grade(
+    intent: ScientificIntent,
+    *,
+    matrix_tier: Literal["exact", "near", "distant", "none"],
+    process_score: float,
+    outcome_score: float,
+    excluded_concept_match: bool,
+) -> Literal["A", "B", "C", "D", "unassessed"]:
+    """Classify evidence by scientific proximity, independently of retrieval rank."""
+
+    if not intent.is_structured:
+        return "unassessed"
+    if excluded_concept_match:
+        return "D"
+    matrix_required = bool(intent.matrix_primary or intent.matrix_close)
+    process_required = bool(intent.process_terms)
+    outcome_required = bool(intent.facets)
+    matrix_direct = not matrix_required or matrix_tier == "exact"
+    matrix_applicable = not matrix_required or matrix_tier in {"exact", "near"}
+    process_direct = not process_required or process_score > 0
+    outcome_direct = not outcome_required or outcome_score > 0
+    if matrix_direct and process_direct and outcome_direct:
+        return "A"
+    if matrix_applicable and (process_direct or outcome_direct):
+        return "B"
+    if matrix_tier == "distant" or process_score > 0 or outcome_score > 0:
+        return "C"
+    return "D"
 
 
 CALVADOS_PRIMARY = ("calvados",)
@@ -157,6 +190,21 @@ WOOD_PROCESS_EN = (
     "toasted",
     "toast level",
     "wood chips",
+)
+
+STORAGE_PROCESS_FR = (
+    "stockage",
+    "conservation",
+    "temperature de stockage",
+    "duree de stockage",
+    "vieillissement",
+)
+STORAGE_PROCESS_EN = (
+    "storage",
+    "storage temperature",
+    "storage time",
+    "shelf life",
+    "storage duration",
 )
 
 AROMA_FACET = ScientificFacet(
@@ -239,6 +287,28 @@ EVOLUTION_FACET = ScientificFacet(
         "maturation time",
     ],
 )
+PROTEIN_STABILITY_FACET = ScientificFacet(
+    key="protein_stability",
+    label="Stabilité protéique et trouble colloïdal",
+    terms_fr=[
+        "stabilite proteique",
+        "proteines",
+        "denaturation",
+        "agregation",
+        "turbidite",
+        "trouble proteique",
+        "stabilite colloidale",
+    ],
+    terms_en=[
+        "protein stability",
+        "proteins",
+        "protein denaturation",
+        "protein aggregation",
+        "turbidity",
+        "protein haze",
+        "colloidal stability",
+    ],
+)
 
 
 def analyze_scientific_intent(question: str) -> ScientificIntent:
@@ -274,12 +344,20 @@ def analyze_scientific_intent(question: str) -> ScientificIntent:
     if _contains_any(normalized, WOOD_PROCESS_FR) or _contains_any(normalized, WOOD_PROCESS_EN):
         process_fr = list(WOOD_PROCESS_FR)
         process_en = list(WOOD_PROCESS_EN)
+    elif _contains_any(normalized, STORAGE_PROCESS_FR) or _contains_any(
+        normalized,
+        STORAGE_PROCESS_EN,
+    ):
+        process_fr = list(STORAGE_PROCESS_FR)
+        process_en = list(STORAGE_PROCESS_EN)
 
     facets: list[ScientificFacet] = []
     if _contains_any(normalized, AROMA_FACET.terms):
         facets.append(AROMA_FACET)
     if _contains_any(normalized, STRUCTURE_FACET.terms):
         facets.append(STRUCTURE_FACET)
+    if _contains_any(normalized, PROTEIN_STABILITY_FACET.terms):
+        facets.append(PROTEIN_STABILITY_FACET)
     if (
         process_fr
         and STRUCTURE_FACET not in facets
@@ -356,6 +434,7 @@ def score_scientific_text(
     """Score matrix + mechanism + outcomes and penalize one-dimensional matches."""
 
     searchable = f"{title}\n{text}"
+    excluded_concept_match = _contains_any(title, intent.excluded_terms)
     # The matrix named in the title is authoritative. This prevents a paper on
     # wine or grape spirits from becoming an "exact" Calvados match merely
     # because Calvados appears once in its abstract, discussion, or references.
@@ -427,6 +506,14 @@ def score_scientific_text(
         matrix_tier=matrix_tier,
         matched_facets=matched_facets,
         causal_match=causal_match,
+        evidence_grade=_evidence_grade(
+            intent,
+            matrix_tier=matrix_tier,
+            process_score=process_score,
+            outcome_score=outcome_score,
+            excluded_concept_match=excluded_concept_match,
+        ),
+        excluded_concept_match=excluded_concept_match,
     )
 
 

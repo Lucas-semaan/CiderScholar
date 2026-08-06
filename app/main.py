@@ -24,7 +24,6 @@ from app.api.jobs import router as jobs_router
 from app.api.library import router as library_router
 from app.api.onboarding import router as onboarding_router
 from app.api.pilot_feedback import router as pilot_feedback_router
-from app.api.private_corpus import router as private_corpus_router
 from app.api.publisher_access import router as publisher_access_router
 from app.api.suggestions import router as suggestions_router
 from app.api.synthesis import router as synthesis_router
@@ -51,7 +50,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     ).hydrate_process_environment()
     database = Database(resolved_settings.paths.database_path)
     common_corpus_database = Database(resolved_settings.paths.common_database_path)
-    private_corpus_database = Database(resolved_settings.paths.private_database_path)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -61,7 +59,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         resolved_settings.paths.create()
         database.initialize()
         common_corpus_database.initialize()
-        private_corpus_database.initialize()
         application.state.application_update = check_application_update(resolved_settings)
         refresh_corpus_update_if_due(resolved_settings)
         retry_pending_packages(resolved_settings)
@@ -75,7 +72,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     application.state.settings = resolved_settings
     application.state.database = database
     application.state.common_corpus_database = common_corpus_database
-    application.state.private_corpus_database = private_corpus_database
     application.state.admin_maintenance_deferred = False
     application.add_middleware(
         CORSMiddleware,
@@ -93,7 +89,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     application.include_router(diagnostics_router)
     application.include_router(system_router)
     application.include_router(ingestion_router)
-    application.include_router(private_corpus_router)
     application.include_router(jobs_router)
     application.include_router(library_router)
     application.include_router(onboarding_router)

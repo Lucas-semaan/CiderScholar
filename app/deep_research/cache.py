@@ -18,7 +18,7 @@ from app.deep_research.contextual_summary import _SYSTEM_PROMPT as CONTEXTUAL_PR
 from app.deep_research.iteration import _ASSESSMENT_SYSTEM_PROMPT as GAP_PROMPT
 from app.deep_research.verification import _SYSTEM_PROMPT as VERIFICATION_PROMPT
 
-_CACHE_SCHEMA_VERSION = 1
+_CACHE_SCHEMA_VERSION = 2
 _RENDERING_CONTRACT_VERSION = "sqlite-renderer-v1"
 
 
@@ -61,19 +61,10 @@ def _corpus_fingerprint(path: Path) -> str:
     )
 
 
-def scoped_corpus_fingerprints(settings: Settings) -> dict[str, str]:
-    """Return stable identities for the two deliberately separate SQLite scopes."""
-
-    return {
-        scope.value: _corpus_fingerprint(corpus_paths(settings, scope).database_path)
-        for scope in (CorpusScope.COMMON, CorpusScope.PRIVATE)
-    }
-
-
 def combined_corpus_fingerprint(settings: Settings) -> str:
     """Return the canonical single hash used by signed CiderQA run contexts."""
 
-    return _canonical_hash(scoped_corpus_fingerprints(settings))
+    return _corpus_fingerprint(corpus_paths(settings, CorpusScope.COMMON).database_path)
 
 
 def _local_model_manifest(settings: Settings, model_name: str) -> str | None:
@@ -85,10 +76,9 @@ def _local_model_manifest(settings: Settings, model_name: str) -> str | None:
 class DeepResearchCacheSignature(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: Literal[1] = _CACHE_SCHEMA_VERSION
+    schema_version: Literal[2] = _CACHE_SCHEMA_VERSION
     question_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     common_corpus_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
-    private_corpus_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     models_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     prompts_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     parameters_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
@@ -107,7 +97,6 @@ class DeepResearchCacheSignature(BaseModel):
         *,
         question: str,
         common_corpus_sha256: str,
-        private_corpus_sha256: str,
         models: dict[str, object],
         prompts: dict[str, str],
         parameters: dict[str, object],
@@ -116,7 +105,6 @@ class DeepResearchCacheSignature(BaseModel):
             "schema_version": _CACHE_SCHEMA_VERSION,
             "question_sha256": hashlib.sha256(question.encode()).hexdigest(),
             "common_corpus_sha256": common_corpus_sha256,
-            "private_corpus_sha256": private_corpus_sha256,
             "models_sha256": _canonical_hash(models),
             "prompts_sha256": _canonical_hash(prompts),
             "parameters_sha256": _canonical_hash(parameters),
@@ -130,7 +118,7 @@ class DeepResearchCacheSignature(BaseModel):
 class DeepResearchCacheEntry(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: Literal[1] = _CACHE_SCHEMA_VERSION
+    schema_version: Literal[2] = _CACHE_SCHEMA_VERSION
     signature: DeepResearchCacheSignature
     answer_markdown: str = Field(min_length=1)
     details: dict[str, object]
@@ -181,11 +169,9 @@ class DeepResearchResponseCache:
             "reranker": self.settings.reranker.model_dump(mode="json"),
             "retrieval": self.settings.retrieval.model_dump(mode="json"),
         }
-        corpus_fingerprints = scoped_corpus_fingerprints(self.settings)
         return DeepResearchCacheSignature.build(
             question=" ".join(question.split()),
-            common_corpus_sha256=corpus_fingerprints[CorpusScope.COMMON.value],
-            private_corpus_sha256=corpus_fingerprints[CorpusScope.PRIVATE.value],
+            common_corpus_sha256=combined_corpus_fingerprint(self.settings),
             models=models,
             prompts=prompts,
             parameters=parameters,

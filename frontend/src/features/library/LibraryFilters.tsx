@@ -5,8 +5,6 @@ import { Card, CardBody, CardHeader } from "@/components/ui/Card";
 import { Field, Input, Select } from "@/components/ui/Form";
 import type { LibraryRecordFilters } from "@/lib/api";
 
-import { libraryStatusLabels } from "./libraryPresentation";
-
 interface LibraryFiltersProps {
   filters: LibraryRecordFilters;
   themes: string[];
@@ -22,15 +20,6 @@ export function LibraryFilters({
   onChange,
   onSubmit,
 }: LibraryFiltersProps) {
-  const toggleStatus = (status: string) => {
-    onChange((previous) => ({
-      ...previous,
-      statuses: previous.statuses.includes(status)
-        ? previous.statuses.filter((value) => value !== status)
-        : [...previous.statuses, status],
-    }));
-  };
-
   return (
     <Card>
       <CardHeader>
@@ -47,7 +36,7 @@ export function LibraryFilters({
             onSubmit();
           }}
         >
-          <Field className="lg:col-span-2" label="Titre, auteur, DOI ou métadonnée">
+          <Field className="lg:col-span-2" label="Mot-clé, titre, auteur ou DOI">
             <div className="relative">
               <Search
                 aria-hidden="true"
@@ -58,7 +47,7 @@ export function LibraryFilters({
                 onChange={(event) =>
                   onChange((previous) => ({ ...previous, query: event.target.value }))
                 }
-                placeholder="Ex. Pascal Poupard, polyphénols, 2011"
+                placeholder="Ex. polyphénols, Pascal Poupard, 2011"
                 value={filters.query}
               />
             </div>
@@ -89,44 +78,19 @@ export function LibraryFilters({
               ))}
             </Select>
           </Field>
-          <fieldset className="lg:col-span-2">
-            <legend className="mb-2 text-sm font-medium text-slate-700">
-              Statut de pertinence
-            </legend>
-            <div className="flex flex-wrap gap-2">
-              {Object.entries(libraryStatusLabels).map(([status, label]) => {
-                const active = filters.statuses.includes(status);
-                return (
-                  <button
-                    aria-pressed={active}
-                    className={
-                      active
-                        ? "min-h-11 rounded-full bg-forest-600 px-3 py-2 text-xs font-bold text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-forest-500"
-                        : "min-h-11 rounded-full border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-500 hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-forest-500"
-                    }
-                    key={status}
-                    onClick={() => toggleStatus(status)}
-                    type="button"
-                  >
-                    {label}
-                  </button>
-                );
-              })}
-            </div>
-          </fieldset>
-          <Field label="Disponibilité">
+          <Field label="Type de contenu">
             <Select
               onChange={(event) =>
                 onChange((previous) => ({
                   ...previous,
-                  abstract: event.target.value as LibraryRecordFilters["abstract"],
+                  availability: event.target.value as LibraryRecordFilters["availability"],
                 }))
               }
-              value={filters.abstract}
+              value={filters.availability}
             >
               <option value="all">Tous les documents</option>
-              <option value="with">Avec abstract</option>
-              <option value="without">Sans abstract</option>
+              <option value="full_text">Full article</option>
+              <option value="abstract_only">Abstract only</option>
             </Select>
           </Field>
           <div className="flex items-end">

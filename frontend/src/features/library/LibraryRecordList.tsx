@@ -1,4 +1,4 @@
-import { ChevronLeft, ChevronRight } from "lucide-react";
+import { ChevronLeft, ChevronRight, FileText } from "lucide-react";
 
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
@@ -58,10 +58,10 @@ export function LibraryRecordList({
       <div className="divide-y divide-slate-100">
         {records.map((record) => (
           <LibraryRecordRow
-            key={record.id}
+            key={record.library_id}
             onSelect={onSelect}
             record={record}
-            selected={selectedId === record.id}
+            selected={selectedId === record.library_id}
           />
         ))}
       </div>
@@ -96,14 +96,14 @@ function LibraryRecordRow({
   const authors = authorPreview(record.authors);
   return (
     <button
-      aria-label={`Consulter la notice : ${record.title}`}
+      aria-label={`Consulter le document : ${record.title}`}
       aria-pressed={selected}
       className={
         selected
           ? "block w-full border-l-4 border-forest-600 bg-forest-50 px-5 py-4 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-forest-500"
           : "block w-full border-l-4 border-transparent px-5 py-4 text-left transition hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-forest-500"
       }
-      onClick={() => onSelect(record.id)}
+      onClick={() => onSelect(record.library_id)}
       type="button"
     >
       <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
@@ -118,14 +118,32 @@ function LibraryRecordRow({
             </p>
           )}
         </div>
-        <Badge tone={statusTone(record.relevance_status)}>
-          {libraryStatusLabels[record.relevance_status]}
-        </Badge>
+        <div className="flex shrink-0 flex-wrap justify-end gap-2">
+          <Badge tone={record.document_type === "full_text" ? "info" : "neutral"}>
+            {record.document_type === "full_text" ? (
+              <>
+                <FileText aria-hidden="true" className="size-3" /> Full article
+              </>
+            ) : (
+              "Abstract only"
+            )}
+          </Badge>
+          {record.relevance_status !== "accepted" && (
+            <Badge tone={statusTone(record.relevance_status)}>
+              {libraryStatusLabels[record.relevance_status]}
+            </Badge>
+          )}
+        </div>
       </div>
       <div className="mt-3 flex flex-wrap items-center gap-2 text-xs text-slate-500">
         {record.doi && <span className="font-mono">{record.doi}</span>}
         {record.relevance_theme && <Badge>{record.relevance_theme}</Badge>}
         <span>{record.abstract ? "Abstract disponible" : "Sans abstract"}</span>
+        {record.document_type === "full_text" && (
+          <span>
+            {record.indexed_chunk_count}/{record.chunk_count} fragments indexés
+          </span>
+        )}
       </div>
     </button>
   );

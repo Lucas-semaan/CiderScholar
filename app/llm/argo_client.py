@@ -6,6 +6,7 @@ import os
 import threading
 from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime
+from enum import StrEnum
 from hashlib import sha256
 from time import monotonic, perf_counter
 from typing import Any
@@ -68,8 +69,57 @@ class ArgoGenerationError(ArgoError):
     """ARGO rejected or failed a generation request."""
 
 
+class ScientificValidationReason(StrEnum):
+    """Stable, non-sensitive cause codes for scientific generation failures."""
+
+    EMPTY_ANSWERABLE_STATEMENTS = "empty_answerable_statements"
+    UNSUPPORTED_EVALUATIVE_CLAIM = "unsupported_evaluative_claim"
+    UNSUPPORTED_NUMERIC_CLAIM = "unsupported_numeric_claim"
+    UNSUPPORTED_CAUSAL_CLAIM = "unsupported_causal_claim"
+    UNSUPPORTED_SAFETY_CLAIM = "unsupported_safety_claim"
+    UNSUPPORTED_NORMATIVE_CLAIM = "unsupported_normative_claim"
+    INVALID_DIRECT_ANSWER_COUNT = "invalid_direct_answer_count"
+    INVALID_SCHEMA = "invalid_schema"
+    QUESTION_INTEGRITY = "question_integrity"
+    UNUSABLE_OUTPUT = "unusable_output"
+    UNKNOWN = "unknown"
+
+
+def classify_scientific_validation_failure(message: str) -> ScientificValidationReason:
+    normalized = " ".join(message.casefold().split())
+    rules = (
+        (
+            "answerable response requires cited statements",
+            ScientificValidationReason.EMPTY_ANSWERABLE_STATEMENTS,
+        ),
+        ("unsupported evaluative", ScientificValidationReason.UNSUPPORTED_EVALUATIVE_CLAIM),
+        ("unsupported numeric", ScientificValidationReason.UNSUPPORTED_NUMERIC_CLAIM),
+        ("numeric value", ScientificValidationReason.UNSUPPORTED_NUMERIC_CLAIM),
+        ("causal language", ScientificValidationReason.UNSUPPORTED_CAUSAL_CLAIM),
+        ("unsupported safety", ScientificValidationReason.UNSUPPORTED_SAFETY_CLAIM),
+        ("unsupported norm", ScientificValidationReason.UNSUPPORTED_NORMATIVE_CLAIM),
+        ("direct-answer statements", ScientificValidationReason.INVALID_DIRECT_ANSWER_COUNT),
+        ("validation error", ScientificValidationReason.INVALID_SCHEMA),
+        ("question integrity", ScientificValidationReason.QUESTION_INTEGRITY),
+        ("did not return a usable", ScientificValidationReason.UNUSABLE_OUTPUT),
+    )
+    return next(
+        (reason for marker, reason in rules if marker in normalized),
+        ScientificValidationReason.UNKNOWN,
+    )
+
+
 class ArgoScientificValidationError(ArgoError):
     """ARGO exhausted correction attempts without producing grounded scientific output."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        reason: ScientificValidationReason | None = None,
+    ) -> None:
+        self.reason = reason or classify_scientific_validation_failure(message)
+        super().__init__(message)
 
 
 class ArgoHealth(BaseModel):

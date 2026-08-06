@@ -18,7 +18,6 @@ from app.llm.argo_client import ArgoClient
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=Path)
-    parser.add_argument("--scope", choices=["common", "private"], required=True)
     parser.add_argument("--article-id", required=True)
     parser.add_argument("--allow-argo", action="store_true")
     return parser.parse_args(argv)
@@ -29,9 +28,8 @@ def main(argv: list[str] | None = None) -> int:
     if not arguments.allow_argo:
         raise SystemExit("--allow-argo is required because this command calls ARGO")
     settings = load_settings(arguments.config)
-    scope = CorpusScope(arguments.scope)
-    scoped = settings_for_corpus(settings, scope)
-    database = Database(corpus_paths(settings, scope).database_path)
+    scoped = settings_for_corpus(settings, CorpusScope.COMMON)
+    database = Database(corpus_paths(settings, CorpusScope.COMMON).database_path)
     client = ArgoClient(scoped)
     try:
         gateway = ArgoContextCaptionGateway(client)
@@ -39,7 +37,7 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         client.close()
     print(f"article_id={arguments.article_id}")
-    print(f"scope={scope.value}")
+    print(f"corpus={CorpusScope.COMMON.value}")
     print(f"synthetic_captions={count}")
     print("citable_synthetic_captions=0")
     return 0

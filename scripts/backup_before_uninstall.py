@@ -1,4 +1,4 @@
-"""Create the optional private/chat backup offered before complete uninstall."""
+"""Create the optional corpus/chat backup offered before complete uninstall."""
 
 from __future__ import annotations
 

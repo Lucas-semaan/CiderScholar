@@ -20,10 +20,10 @@ ARGO sans modifier de fichier est défini dans [`docs/ARGO_KEY_SETUP.md`](docs/A
 
 - chatbot scientifique principal en langage naturel, avec historique conversationnel borné, RAG
   local, génération ARGO et citations consultables ;
-- tableau de bord de la couverture du corpus et de la collecte bibliographique ;
+- tableau de bord de la base documentaire unifiée et de son indexation ;
 - import de PDF, import récursif d’un dossier, ingestion, réindexation et suppression confirmée ;
-- bibliothèque filtrable avec provenance, DOI normalisé, abstract et statut de pertinence ;
-- recherche locale hybride, recherche dans les abstracts, extraction de preuves et réponse ARGO ;
+- base filtrable réunissant articles complets et abstracts associés à un DOI vérifié ;
+- recherche locale hybride dans les textes extraits et les abstracts, extraction de preuves et réponse ARGO ;
 - synthèses hiérarchiques reprenables, citations dérivées de SQLite et exports ;
 - paramètres de session validés sans réécriture de `config.yaml` ;
 - test optionnel d’acquisition authentifiée auprès de publishers explicitement autorisés, documenté
@@ -150,12 +150,16 @@ Le ton, la structure, la neutralité scientifique et le rendu APA 7 attendus son
 
 ## Charger et collecter des données
 
-La page « Base documentaire » est le chemin principal. Elle réunit deux sous-catégories : les
-notices bibliographiques issues des API et les PDF locaux avec leurs fragments d’index. Les commandes
-d’exploitation restent disponibles :
+La page « Base documentaire » est le chemin principal. Elle réunit dans une même liste les articles
+complets (`Full article`) et les abstracts acceptés sans PDF (`Abstract only`). Un abstract seul
+n’apparaît que s’il possède un DOI complet, valide et normalisé. Lorsqu’un PDF porte le même DOI, ses
+métadonnées sont fusionnées et une seule fiche `Full article` subsiste. La recherche par mot-clé
+couvre les métadonnées, les abstracts et le texte extrait des PDF. Seul un article complet propose
+l’ouverture via `GET /api/corpus/{article_id}/pdf`. Les commandes d’exploitation restent disponibles :
 
 ```powershell
 .\.venv\Scripts\python.exe -m scripts.ingest_folder "C:\chemin\vers\les\PDF" --recursive
+.\.venv\Scripts\python.exe -m scripts.ingest_folder "C:\chemin\vers\les\PDF" --recursive --ocr --skip-known --wait-for-memory
 .\.venv\Scripts\python.exe -m scripts.rebuild_index
 .\.venv\Scripts\python.exe -m scripts.harvest_cider_pilot
 .\.venv\Scripts\python.exe -m scripts.harvest_cider_bulk --target 1000 --page-size 50
@@ -168,8 +172,9 @@ d’exploitation restent disponibles :
 La collecte est bornée, temporisée et normalement limitée à une exécution tous les sept jours. Elle
 alterne quatre vagues thématiques, puis pagine les résultats à chaque nouveau cycle afin de ne pas
 reprendre indéfiniment les premiers résultats. Un complément OpenAlex groupé tente de récupérer les
-abstracts des DOI déjà retenus ; un échec n’est retenté qu’après trente jours. Toutes les notices sont
-contrôlées avant insertion : un DOI existant enrichit la notice au lieu de créer un doublon.
+abstracts des DOI déjà retenus ; un échec n’est retenté qu’après trente jours. Un abstract accepté
+avec DOI vérifié reste consultable et indexable même si aucun texte intégral n’est disponible. Si le
+PDF est acquis plus tard, la déduplication DOI donne automatiquement priorité à l’article complet.
 
 Cette cadence est actuellement appliquée lors du lancement manuel de la commande. Aucun ordonnanceur
 hebdomadaire n’est activé ; les prérequis de cette évolution sont suivis dans la
@@ -194,13 +199,14 @@ déduplication DOI, le filtre de pertinence ni l’archivage préalable des reje
 
 Une notice classée `rejected` est d’abord copiée dans la table
 `rejected_bibliographic_archive` avec au minimum son DOI et son titre, puis exportée en JSON sous
-`data/exports`. Ses éventuels vecteurs sont supprimés avant sa ligne SQLite. Les notices `review`
-restent consultables dans la base documentaire mais sont exclues du RAG.
+`data/exports`. Les références `review` restent dans la file technique de qualification ; elles ne
+sont visibles ni dans la Base documentaire ni dans le RAG.
 
 Après les tentatives d’enrichissement DOI, toute notice encore dépourvue d’abstract est elle aussi
 classée non exploitable, archivée avec son DOI/titre puis retirée de la base active. L’invariant
-d’exploitation est donc : toutes les notices actives possèdent un abstract ; seules les notices
-`accepted` sont vectorisées et utilisées par le RAG.
+d’exploitation est donc : une preuve locale provient soit des fragments d’un PDF ingéré, soit d’un
+abstract accepté portant un DOI vérifié. Le niveau de preuve reste affiché pour ne pas confondre les
+deux.
 
 ## Publications IFPC et auteurs ciblés
 
@@ -230,6 +236,6 @@ Les règles complètes sont dans [`AGENTS.md`](AGENTS.md). Les données locales,
 
 ## Confidentialité et sauvegarde
 
-Ne jamais remplacer `127.0.0.1` par `0.0.0.0` sur une machine contenant des documents privés. Le tableau [partagé ou privé](docs/CORPUS_ISOLATION.md#guide-utilisateur--partagé-ou-privé-) détaille les deux portées. Le guide [OneDrive / SharePoint](docs/SHAREPOINT_DISTRIBUTION.md) explique la sélection du dossier utilisateur ainsi que la publication et le rollback administrateur ; le guide [proposer un document](docs/DOCUMENT_SUGGESTIONS.md) précise droits, données transmises et absence de suivi distant. Pour une sauvegarde privée vérifiée, arrêter les traitements lourds puis exécuter `python scripts/backup_private_corpus.py` ; la restauration correspondante n'écrit jamais dans `data/common`.
+Ne jamais remplacer `127.0.0.1` par `0.0.0.0` sur une machine contenant des documents scientifiques. Le [guide du corpus commun](docs/CORPUS_ISOLATION.md) décrit son stockage et sa mise à jour. Le guide [OneDrive / SharePoint](docs/SHAREPOINT_DISTRIBUTION.md) explique la sélection du dossier utilisateur ainsi que la publication et le rollback administrateur ; le guide [proposer un document](docs/DOCUMENT_SUGGESTIONS.md) précise droits, données transmises et absence de suivi distant. Pour une sauvegarde vérifiée, arrêter les traitements lourds puis exécuter `python scripts/backup_corpus.py` ; la restauration correspondante remplace atomiquement `data/common` en conservant la version précédente.
 
 Le projet est distribué sous licence AGPL-3.0-only.

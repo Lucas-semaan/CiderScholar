@@ -67,25 +67,21 @@ class ProductionMaintenanceOperations:
         )
 
     def harvest(self) -> MaintenanceOperationResult:
-        database = Database(self.settings.paths.database_path)
+        corpus_settings = settings_for_corpus(self.settings, CorpusScope.COMMON)
+        database = Database(corpus_settings.paths.database_path)
         database.initialize()
         if not self.settings.harvest.enabled:
             return MaintenanceOperationResult(counters={"harvest_skipped": 1})
-        report = CiderPilotHarvester(self.settings, database).run(force=True)
+        report = CiderPilotHarvester(corpus_settings, database).run(force=True)
         store = BibliographicHarvestStore(database)
         merged = store.merge_doi_enrichment_duplicates()
-        cleanup = archive_and_purge_rejected_records(self.settings, database)
+        cleanup = archive_and_purge_rejected_records(corpus_settings, database)
         full_text_audit = None
         full_text_harvest = None
         if self.settings.full_text.enabled:
-            rag_settings = settings_for_corpus(self.settings, CorpusScope.COMMON)
-            rag_database = Database(rag_settings.paths.database_path)
-            rag_database.initialize()
             full_text_audit, full_text_harvest = FullTextHarvestService(
-                self.settings,
+                corpus_settings,
                 database,
-                rag_settings=rag_settings,
-                rag_database=rag_database,
             ).run(
                 include_slow_fallbacks=False,
                 max_downloads=self.settings.full_text.max_downloads_per_run,
@@ -113,45 +109,26 @@ class ProductionMaintenanceOperations:
 
     def index(self) -> MaintenanceOperationResult:
         common = Database(self.settings.paths.common_database_path)
-        bibliography = Database(self.settings.paths.database_path)
         common.initialize()
-        bibliography.initialize()
         common_settings = settings_for_corpus(self.settings, CorpusScope.COMMON)
         common_report = index_pending_chunks(
             common_settings,
             common,
             retry_failed=True,
         )
-        bibliography_pdf_report = index_pending_chunks(
-            self.settings, bibliography, retry_failed=True
-        )
-        common_store = BibliographicHarvestStore(common)
-        common_abstracts_indexed = 0
-        if common_store.pending_abstracts(limit=1):
-            common_abstract_report = index_bibliographic_abstracts(
+        abstract_store = BibliographicHarvestStore(common)
+        abstracts_indexed = 0
+        if abstract_store.pending_abstracts(limit=1):
+            abstract_report = index_bibliographic_abstracts(
                 common_settings,
-                common_store,
+                abstract_store,
                 SentenceTransformerBackend(common_settings),
             )
-            common_abstracts_indexed = common_abstract_report.records_indexed
-        bibliography_store = BibliographicHarvestStore(bibliography)
-        bibliography_abstracts_indexed = 0
-        if bibliography_store.pending_abstracts(limit=1):
-            abstract_report = index_bibliographic_abstracts(
-                self.settings,
-                bibliography_store,
-                SentenceTransformerBackend(self.settings),
-            )
-            bibliography_abstracts_indexed = abstract_report.records_indexed
+            abstracts_indexed = abstract_report.records_indexed
         return MaintenanceOperationResult(
             counters={
-                "pdf_chunks_indexed": (
-                    common_report.chunks_indexed + bibliography_pdf_report.chunks_indexed
-                ),
-                "bibliography_pdf_chunks_indexed": bibliography_pdf_report.chunks_indexed,
-                "abstracts_indexed": (common_abstracts_indexed + bibliography_abstracts_indexed),
-                "common_abstracts_indexed": common_abstracts_indexed,
-                "bibliography_abstracts_indexed": bibliography_abstracts_indexed,
+                "pdf_chunks_indexed": common_report.chunks_indexed,
+                "abstracts_indexed": abstracts_indexed,
             }
         )
 

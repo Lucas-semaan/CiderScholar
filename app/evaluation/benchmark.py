@@ -202,7 +202,7 @@ def corpus_fingerprint(database: Database) -> str:
 def build_demo_cases(database: Database) -> list[EvaluationCase]:
     """Build reproducible labelled questions for the three generated demonstration articles."""
 
-    by_title = {str(row["title"]): str(row["id"]) for row in database.list_articles(limit=5000)}
+    by_title = {str(row["title"]): str(row["id"]) for row in database.list_articles()}
     definitions = (
         (
             "How does fermentation temperature affect cider aroma?",

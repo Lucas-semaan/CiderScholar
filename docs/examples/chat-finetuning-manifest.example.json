@@ -1,0 +1,15 @@
+{
+  "run_id": "run-20260806-01",
+  "cells": [
+    {
+      "question_id": "Q1",
+      "profile": "p0",
+      "message": "Question scientifique immuable issue du corpus local"
+    },
+    {
+      "question_id": "Q1",
+      "profile": "p1",
+      "message": "Question scientifique immuable issue du corpus local"
+    }
+  ]
+}

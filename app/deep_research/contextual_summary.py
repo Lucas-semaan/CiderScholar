@@ -150,7 +150,7 @@ class ContextualSummarizer:
           the best ``top_k`` fragments are dispatched to ARGO.
         * If no ARGO client is configured, an empty list is returned — the
           downstream stages must handle this gracefully.
-        * Private fragment text is used only within this method; it is never
+        * Retrieved fragment text is used only within this method; it is never
           written to disk — only ``text_sha256`` survives in the result.
         """
         if self.client is None:

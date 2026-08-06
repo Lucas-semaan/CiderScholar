@@ -13,6 +13,7 @@ export const initialLibraryFilters: LibraryRecordFilters = {
   theme: "",
   source: "",
   abstract: "all",
+  availability: "all",
   limit: 25,
   offset: 0,
 };

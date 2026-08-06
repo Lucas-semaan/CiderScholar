@@ -172,7 +172,6 @@ def test_package_layout_includes_only_common_database_pdf_and_qdrant(settings) -
         path.write_bytes(path.name.encode("utf-8"))
     (settings.paths.common_extracted_dir / "cache.json").write_text("cache", encoding="utf-8")
     (settings.paths.common_qdrant_dir / "runtime.lock").write_text("lock", encoding="utf-8")
-    (settings.paths.private_pdf_dir / "private.pdf").write_bytes(b"private")
     (settings.paths.data_dir / "config.yaml").write_text("secret", encoding="utf-8")
 
     selected = common_package_files(settings)
@@ -183,7 +182,6 @@ def test_package_layout_includes_only_common_database_pdf_and_qdrant(settings) -
         "pdf/article.pdf",
         "qdrant/collection/index.bin",
     ]
-    assert all(not path.is_relative_to(settings.paths.private_dir) for path in selected)
 
 
 def test_package_guard_requires_qdrant_to_be_closed(settings) -> None:
@@ -389,7 +387,7 @@ def test_distribution_root_requires_expected_name_or_explicit_confirmation(
         validate_distribution_root(settings)
     assert validate_distribution_root(settings, explicit_confirmation=True) == arbitrary.resolve()
 
-    settings.distribution.synchronized_root = settings.paths.private_dir
+    settings.distribution.synchronized_root = settings.paths.data_dir
     with pytest.raises(DistributionPathError, match="local application data"):
         validate_distribution_root(settings, explicit_confirmation=True)
 

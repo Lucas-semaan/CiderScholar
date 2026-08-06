@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from unittest.mock import patch
 
 from app.database.sqlite import Database
 from app.ingestion.pdf_extractor import (
@@ -76,6 +77,23 @@ def test_pipeline_persists_chunks_and_detects_duplicate(settings, tmp_path: Path
     assert second.article_id == first.article_id
     assert extractor.calls == 1
     assert database.lexical_search("PAGE_MARKER")[0]["article_id"] == first.article_id
+
+
+def test_pipeline_accepts_a_precomputed_sha_without_hashing_again(settings, tmp_path: Path) -> None:
+    database = Database(settings.paths.database_path)
+    database.initialize()
+    pipeline = IngestionPipeline(settings, database, extractor=FakeExtractor())
+    pdf = _pdf(tmp_path)
+    expected_sha256 = "b" * 64
+
+    with patch(
+        "app.ingestion.pipeline.sha256_file",
+        side_effect=AssertionError("file should not be hashed twice"),
+    ):
+        report = pipeline.ingest_file(pdf, precomputed_sha256=expected_sha256)
+
+    assert report.status == "chunks_ready"
+    assert report.sha256 == expected_sha256
 
 
 def test_pipeline_reports_ocr_without_starting_ocr(settings, tmp_path: Path) -> None:

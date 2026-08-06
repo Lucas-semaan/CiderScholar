@@ -16,7 +16,7 @@ from app.api.schemas import ConfirmedAdminAction
 from app.config import Settings
 from app.corpora import LocalProfile, load_local_profile
 from app.jobs.contracts import JobPublic
-from app.jobs.repository import JobRepository
+from app.jobs.repository import EvaluationRunBusyError, JobRepository
 
 router = APIRouter(prefix="/api/admin/maintenance", tags=["admin-maintenance"])
 
@@ -64,6 +64,15 @@ def launch(
     _admin_profile()
     repository = JobRepository(settings.paths.database_path)
     repository.initialize()
-    job = repository.enqueue_weekly_maintenance()
+    try:
+        job = repository.enqueue_weekly_maintenance()
+    except EvaluationRunBusyError as error:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "evaluation_run_busy",
+                "message": "Attendez la fin de la cellule d'évaluation active.",
+            },
+        ) from error
     request.app.state.admin_maintenance_deferred = True
     return job.to_public()

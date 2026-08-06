@@ -105,13 +105,9 @@ restent contrôlés par le job CiderScholar.
 
 ## Confidentialité
 
-La politique doit rester différente selon la portée :
-
-- **corpus commun** : l’envoi distant d’un crop peut être activé par configuration administrateur ;
-- **corpus privé** : le mode distant reste désactivé par défaut et exige une décision explicite,
-  documentée et visible pour l’utilisateur ;
-- dans les deux cas : TLS, authentification de service, taille bornée, journaux sans pixels ni texte,
-  chiffrement au repos si une rétention existe, suppression vérifiable et métriques sans contenu.
+Le corpus est commun : l’envoi distant d’un crop peut être activé par configuration administrateur.
+Dans tous les cas, il impose TLS, authentification de service, taille bornée, journaux sans pixels ni
+texte, chiffrement au repos si une rétention existe, suppression vérifiable et métriques sans contenu.
 
 Envoyer seulement le crop réduit l’exposition. L’envoi du PDF complet ou son dépôt durable sur le
 serveur demande une décision d’architecture et de confidentialité séparée.

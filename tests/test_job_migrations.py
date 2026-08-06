@@ -9,6 +9,8 @@ from uuid import uuid4
 
 import pytest
 
+from app.database.chat_progress_migration import add_chat_progress_steps
+from app.database.corpus_ingestion_job_migration import rename_private_ingestion_job_contract
 from app.database.migrations import CURRENT_SCHEMA_VERSION, MIGRATIONS
 from app.database.sqlite import Database
 
@@ -81,9 +83,11 @@ def _insert_job(
 
 
 def test_jobs_use_a_new_append_only_migration(settings) -> None:
-    assert CURRENT_SCHEMA_VERSION == 26
+    assert max(MIGRATIONS) == CURRENT_SCHEMA_VERSION
     assert 13 in MIGRATIONS
     assert 14 in MIGRATIONS
+    assert 27 in MIGRATIONS
+    assert 29 in MIGRATIONS
     assert set(range(2, CURRENT_SCHEMA_VERSION + 1)) == set(MIGRATIONS)
 
     database = Database(settings.paths.database_path)
@@ -116,6 +120,102 @@ def test_jobs_reject_unknown_type_and_state_in_sqlite(settings) -> None:
                 message_id=message_id,
                 state="unknown",
             )
+
+
+def test_chat_progress_migration_preserves_legacy_argo_jobs(settings) -> None:
+    database = Database(settings.paths.database_path)
+    database.initialize()
+
+    with closing(database.connect()) as connection, connection:
+        # Recreate the v28 closed step contract, then prove the v29 rebuild is lossless.
+        rename_private_ingestion_job_contract(connection)
+        conversation_id, message_id = _seed_chat(connection)
+        job_id = _insert_job(
+            connection,
+            conversation_id=conversation_id,
+            message_id=message_id,
+        )
+        connection.execute("UPDATE jobs SET step = 'argo' WHERE id = ?", (job_id,))
+        connection.execute(
+            """
+            INSERT INTO job_events(job_id, state, step, technical_message, created_at)
+            VALUES (?, 'queued', 'argo', 'job.step.argo', ?)
+            """,
+            (job_id, datetime.now(UTC).isoformat()),
+        )
+
+        add_chat_progress_steps(connection)
+
+        assert (
+            connection.execute("SELECT step FROM jobs WHERE id = ?", (job_id,)).fetchone()[0]
+            == "argo"
+        )
+        assert (
+            connection.execute(
+                "SELECT step FROM job_events WHERE job_id = ?", (job_id,)
+            ).fetchone()[0]
+            == "argo"
+        )
+        jobs_sql = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'jobs'"
+        ).fetchone()[0]
+
+    for step in (
+        "planning",
+        "evidence_selection",
+        "coverage",
+        "figure_analysis",
+        "generation",
+    ):
+        assert f"'{step}'" in jobs_sql
+
+
+def test_corpus_ingestion_migration_preserves_existing_private_jobs(settings) -> None:
+    database = Database(settings.paths.database_path)
+    database.initialize()
+
+    with closing(database.connect()) as connection, connection:
+        jobs_sql = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'jobs'"
+        ).fetchone()[0]
+        job_events_sql = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'job_events'"
+        ).fetchone()[0]
+        connection.executescript(
+            """
+            DROP INDEX idx_jobs_claim;
+            DROP INDEX idx_jobs_conversation;
+            DROP INDEX idx_job_events_job;
+            DROP INDEX idx_single_active_weekly_maintenance;
+            ALTER TABLE job_events RENAME TO job_events_current;
+            ALTER TABLE jobs RENAME TO jobs_current;
+            """
+        )
+        connection.execute(jobs_sql.replace("'corpus_ingestion'", "'private_ingestion'"))
+        connection.execute(job_events_sql)
+        connection.execute("INSERT INTO jobs SELECT * FROM jobs_current")
+        connection.execute("INSERT INTO job_events SELECT * FROM job_events_current")
+        connection.executescript("DROP TABLE job_events_current; DROP TABLE jobs_current;")
+        conversation_id, message_id = _seed_chat(connection)
+        job_id = _insert_job(
+            connection,
+            conversation_id=conversation_id,
+            message_id=message_id,
+            job_type="private_ingestion",
+        )
+
+        rename_private_ingestion_job_contract(connection)
+
+        migrated_type = connection.execute(
+            "SELECT type FROM jobs WHERE id = ?", (job_id,)
+        ).fetchone()[0]
+        jobs_constraint = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'jobs'"
+        ).fetchone()[0]
+
+    assert migrated_type == "corpus_ingestion"
+    assert "'private_ingestion'" not in jobs_constraint
+    assert "'corpus_ingestion'" in jobs_constraint
 
 
 def test_job_can_be_prioritized_attempted_and_deferred(settings) -> None:
@@ -398,10 +498,24 @@ def test_fresh_database_contains_all_job_constraints(settings) -> None:
         indexes = {row["name"] for row in connection.execute("PRAGMA index_list(jobs)")}
 
     assert set(tables) == {"jobs", "job_events"}
-    for job_type in ("chat_answer", "weekly_maintenance", "deep_research"):
+    for job_type in (
+        "chat_answer",
+        "weekly_maintenance",
+        "deep_research",
+        "corpus_ingestion",
+    ):
         assert f"'{job_type}'" in tables["jobs"]
     assert "'reranking'" in tables["jobs"]
     assert "'reranking'" in tables["job_events"]
+    for chat_step in (
+        "planning",
+        "evidence_selection",
+        "coverage",
+        "figure_analysis",
+        "generation",
+    ):
+        assert f"'{chat_step}'" in tables["jobs"]
+        assert f"'{chat_step}'" in tables["job_events"]
     assert "CHECK(json_valid(payload_json))" in tables["jobs"]
     assert "UNIQUE(conversation_id, client_request_id)" in tables["jobs"]
     assert {

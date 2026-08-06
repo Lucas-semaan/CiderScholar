@@ -125,7 +125,10 @@ class WindowsOcrPdfExtractor:
                     message = (completed.stderr or completed.stdout).strip()[-1000:]
                     raise RuntimeError(f"Windows OCR failed: {message}")
                 payload = json.loads(output_path.read_text(encoding="utf-8-sig"))
-                for item in payload:
+                items = [payload] if isinstance(payload, dict) else payload
+                if not isinstance(items, list) or any(not isinstance(item, dict) for item in items):
+                    raise RuntimeError("Windows OCR returned an invalid JSON payload")
+                for item in items:
                     page_number = int(str(item["file_name"])[5:9])
                     if str(item.get("language") or self.language) != self.language:
                         raise RuntimeError("Windows OCR returned an unexpected language")

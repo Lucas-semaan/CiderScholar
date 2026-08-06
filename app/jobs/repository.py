@@ -19,6 +19,7 @@ from app.jobs.contracts import (
     JOB_STEP_ORDER,
     MAX_JOB_ATTEMPTS,
     ChatAnswerPayload,
+    CorpusIngestionPayload,
     DeepResearchPayload,
     JobErrorDisposition,
     JobErrorKind,
@@ -29,7 +30,6 @@ from app.jobs.contracts import (
     JobStep,
     JobType,
     LongSynthesisPayload,
-    PrivateIngestionPayload,
     WeeklyMaintenancePayload,
     retry_delay_after,
 )
@@ -49,13 +49,25 @@ MAX_ACTIVE_JOBS_PER_CONVERSATION = 3
 MAINTENANCE_CONVERSATION_ID = UUID("00000000-0000-4000-8000-000000000001")
 MAINTENANCE_MESSAGE_ID = UUID("00000000-0000-4000-8000-000000000002")
 LONG_SYNTHESIS_CONVERSATION_ID = UUID("00000000-0000-4000-8000-000000000003")
-PRIVATE_INGESTION_CONVERSATION_ID = UUID("00000000-0000-4000-8000-000000000004")
+CORPUS_INGESTION_CONVERSATION_ID = UUID("00000000-0000-4000-8000-000000000004")
 
 
 class ActiveJobLimitError(RuntimeError):
     def __init__(self, limit: int = MAX_ACTIVE_JOBS_PER_CONVERSATION) -> None:
         self.limit = limit
         super().__init__(f"conversation already has {limit} active jobs")
+
+
+class EvaluationConversationIsolationError(RuntimeError):
+    """An evaluation cell attempted to reuse a non-empty conversation."""
+
+
+class EvaluationQuestionAlreadySubmittedError(RuntimeError):
+    """The immutable run/profile/question cell already exists."""
+
+
+class EvaluationRunBusyError(RuntimeError):
+    """Another durable job is active while an evaluation cell is submitted."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -131,6 +143,18 @@ class QueueMetrics:
 
 
 @dataclass(frozen=True, slots=True)
+class ActiveJobDiagnostic:
+    """Content-free projection used by local runtime diagnostics."""
+
+    id: UUID
+    type: JobType
+    state: JobState
+    step: JobStep
+    created_at: datetime
+    heartbeat_at: datetime | None
+
+
+@dataclass(frozen=True, slots=True)
 class EnqueuedChat:
     """Atomic chat submission result, including its canonical user message."""
 
@@ -152,6 +176,166 @@ class JobRepository:
         """Create or migrate the database before queue operations."""
 
         self.database.initialize()
+
+    @staticmethod
+    def _assert_evaluation_queue_idle(connection: sqlite3.Connection) -> None:
+        active = connection.execute(
+            """
+            SELECT id FROM jobs
+            WHERE state IN (?, ?, ?)
+            LIMIT 1
+            """,
+            (
+                JobState.QUEUED.value,
+                JobState.RUNNING.value,
+                JobState.CANCEL_REQUESTED.value,
+            ),
+        ).fetchone()
+        if active is not None:
+            raise EvaluationRunBusyError(
+                "an evaluation submission requires an otherwise idle durable queue"
+            )
+
+    @staticmethod
+    def _assert_evaluation_submission(
+        connection: sqlite3.Connection,
+        payload: ChatAnswerPayload,
+    ) -> None:
+        if payload.evaluation_run_id is None:
+            return
+        JobRepository._assert_evaluation_queue_idle(connection)
+        duplicate = connection.execute(
+            """
+            SELECT id FROM jobs
+            WHERE type = ?
+              AND json_extract(payload_json, '$.evaluation_run_id') = ?
+              AND json_extract(payload_json, '$.evaluation_question_id') = ?
+              AND json_extract(payload_json, '$.evaluation_profile') = ?
+            LIMIT 1
+            """,
+            (
+                JobType.CHAT_ANSWER.value,
+                payload.evaluation_run_id,
+                payload.evaluation_question_id,
+                payload.evaluation_profile,
+            ),
+        ).fetchone()
+        if duplicate is not None:
+            raise EvaluationQuestionAlreadySubmittedError(
+                "this evaluation run/profile/question cell has already been submitted"
+            )
+        conversation_use = connection.execute(
+            """
+            SELECT
+              (SELECT COUNT(*) FROM chat_messages WHERE conversation_id = ?) AS messages,
+              (SELECT COUNT(*) FROM jobs WHERE conversation_id = ?) AS jobs
+            """,
+            (str(payload.conversation_id), str(payload.conversation_id)),
+        ).fetchone()
+        if conversation_use is None or conversation_use["messages"] or conversation_use["jobs"]:
+            raise EvaluationConversationIsolationError(
+                "each evaluation question requires a fresh empty conversation"
+            )
+
+    @staticmethod
+    def _assert_evaluation_retry(
+        connection: sqlite3.Connection,
+        payload: ChatAnswerPayload,
+        user_message_id: UUID,
+    ) -> None:
+        if payload.evaluation_run_id is None:
+            return
+        JobRepository._assert_evaluation_queue_idle(connection)
+        failed_cell = connection.execute(
+            """
+            SELECT id FROM jobs
+            WHERE type = ? AND state = ? AND conversation_id = ? AND user_message_id = ?
+              AND json_extract(payload_json, '$.evaluation_run_id') = ?
+              AND json_extract(payload_json, '$.evaluation_question_id') = ?
+              AND json_extract(payload_json, '$.evaluation_profile') = ?
+            LIMIT 1
+            """,
+            (
+                JobType.CHAT_ANSWER.value,
+                JobState.FAILED.value,
+                str(payload.conversation_id),
+                str(user_message_id),
+                payload.evaluation_run_id,
+                payload.evaluation_question_id,
+                payload.evaluation_profile,
+            ),
+        ).fetchone()
+        if failed_cell is None:
+            raise EvaluationQuestionAlreadySubmittedError(
+                "an evaluation retry requires the failed immutable cell"
+            )
+        user_messages = connection.execute(
+            """
+            SELECT id, content FROM chat_messages
+            WHERE conversation_id = ? AND role = 'user'
+            ORDER BY position
+            """,
+            (str(payload.conversation_id),),
+        ).fetchall()
+        if (
+            len(user_messages) != 1
+            or user_messages[0]["id"] != str(user_message_id)
+            or user_messages[0]["content"] != payload.message
+        ):
+            raise EvaluationConversationIsolationError(
+                "an evaluation retry cannot change or add a conversation question"
+            )
+
+    @staticmethod
+    def _persist_terminal_notice(
+        connection: sqlite3.Connection,
+        *,
+        job_id: UUID,
+        conversation_id: str,
+        state: JobState,
+        content: str,
+        created_at: str,
+        error_code: str | None = None,
+        diagnostic_code: str | None = None,
+    ) -> UUID:
+        """Persist a visible, machine-identifiable terminal outcome for a chat question."""
+
+        result_message_id = uuid4()
+        position = connection.execute(
+            """
+            SELECT COALESCE(MAX(position), -1) + 1
+            FROM chat_messages WHERE conversation_id = ?
+            """,
+            (conversation_id,),
+        ).fetchone()[0]
+        response = {
+            "kind": "job_terminal_notice",
+            "job_id": str(job_id),
+            "state": state.value,
+            "error_code": error_code,
+            "diagnostic_code": diagnostic_code,
+        }
+        connection.execute(
+            """
+            INSERT INTO chat_messages(
+                id, conversation_id, position, role, content,
+                response_json, response_time_milliseconds, created_at
+            ) VALUES (?, ?, ?, 'assistant', ?, ?, NULL, ?)
+            """,
+            (
+                str(result_message_id),
+                conversation_id,
+                position,
+                content,
+                json.dumps(response, ensure_ascii=False),
+                created_at,
+            ),
+        )
+        connection.execute(
+            "UPDATE chat_conversations SET updated_at = ? WHERE id = ?",
+            (created_at, conversation_id),
+        )
+        return result_message_id
 
     def active_job_count(self) -> int:
         """Count all durable work that must block an application replacement."""
@@ -230,6 +414,8 @@ class JobRepository:
             ).fetchone()
             if existing is not None:
                 return self._row_to_record(existing)
+            if isinstance(payload, ChatAnswerPayload):
+                self._assert_evaluation_retry(connection, payload, user_message_id)
             if enforce_active_limit:
                 self._assert_active_limit(connection, payload.conversation_id)
             row = self._insert_queued_job(
@@ -282,6 +468,8 @@ class JobRepository:
                     user_message_created_at=datetime.fromisoformat(message["created_at"]),
                     created=False,
                 )
+            if isinstance(payload, ChatAnswerPayload):
+                self._assert_evaluation_submission(connection, payload)
             self._assert_active_limit(connection, payload.conversation_id)
             conversation = connection.execute(
                 "SELECT id FROM chat_conversations WHERE id = ?",
@@ -328,6 +516,107 @@ class JobRepository:
             connection.execute(
                 "UPDATE chat_conversations SET updated_at = ? WHERE id = ?",
                 (queued_timestamp, str(payload.conversation_id)),
+            )
+        return EnqueuedChat(
+            job=self._row_to_record(row),
+            user_message_id=user_message_id,
+            user_message_content=payload.message,
+            user_message_created_at=queued_at.astimezone(UTC),
+            created=True,
+        )
+
+    def enqueue_evaluation_question(
+        self,
+        *,
+        run_id: str,
+        question_id: str,
+        profile: str,
+        message: str,
+        client_request_id: UUID,
+        priority: int = 100,
+        now: datetime | None = None,
+    ) -> EnqueuedChat:
+        """Atomically create one isolated conversation and its immutable evaluation cell."""
+
+        queued_at = now or datetime.now(UTC)
+        queued_timestamp = _timestamp(queued_at)
+        conversation_id = uuid4()
+        payload = ChatAnswerPayload(
+            message=message,
+            conversation_id=conversation_id,
+            client_request_id=client_request_id,
+            use_external_sources=False,
+            analyze_figures=False,
+            interaction_mode="research",
+            evaluation_run_id=run_id,
+            evaluation_question_id=question_id,
+            evaluation_profile=profile,
+        )
+        with self.database.transaction() as connection:
+            existing = connection.execute(
+                """
+                SELECT * FROM jobs
+                WHERE type = ?
+                  AND json_extract(payload_json, '$.evaluation_run_id') = ?
+                  AND json_extract(payload_json, '$.evaluation_question_id') = ?
+                  AND json_extract(payload_json, '$.evaluation_profile') = ?
+                LIMIT 1
+                """,
+                (JobType.CHAT_ANSWER.value, run_id, question_id, profile),
+            ).fetchone()
+            if existing is not None:
+                if existing["client_request_id"] != str(client_request_id):
+                    raise EvaluationQuestionAlreadySubmittedError(
+                        "this evaluation run/profile/question cell has already been submitted"
+                    )
+                user_message = connection.execute(
+                    """
+                    SELECT id, content, created_at FROM chat_messages
+                    WHERE id = ? AND role = 'user'
+                    """,
+                    (existing["user_message_id"],),
+                ).fetchone()
+                if user_message is None:
+                    raise RuntimeError("idempotent evaluation job has no persisted user message")
+                return EnqueuedChat(
+                    job=self._row_to_record(existing),
+                    user_message_id=UUID(user_message["id"]),
+                    user_message_content=user_message["content"],
+                    user_message_created_at=datetime.fromisoformat(user_message["created_at"]),
+                    created=False,
+                )
+            self._assert_evaluation_submission(connection, payload)
+            title = f"[{profile.upper()} {question_id}] {' '.join(message.split())}"[:120]
+            connection.execute(
+                """
+                INSERT INTO chat_conversations(id, title, created_at, updated_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (str(conversation_id), title, queued_timestamp, queued_timestamp),
+            )
+            user_message_id = uuid4()
+            connection.execute(
+                """
+                INSERT INTO chat_messages(
+                    id, conversation_id, position, role, content, created_at
+                ) VALUES (?, ?, 0, 'user', ?, ?)
+                """,
+                (
+                    str(user_message_id),
+                    str(conversation_id),
+                    payload.message,
+                    queued_timestamp,
+                ),
+            )
+            row = self._insert_queued_job(
+                connection,
+                job_id=uuid4(),
+                payload=payload,
+                user_message_id=user_message_id,
+                priority=priority,
+                available_at=queued_timestamp,
+                created_at=queued_timestamp,
+                job_type=JobType.CHAT_ANSWER,
             )
         return EnqueuedChat(
             job=self._row_to_record(row),
@@ -421,26 +710,26 @@ class JobRepository:
             now=now,
         )
 
-    def enqueue_private_ingestion(
+    def enqueue_corpus_ingestion(
         self,
-        payload: PrivateIngestionPayload,
+        payload: CorpusIngestionPayload,
         *,
         now: datetime | None = None,
     ) -> JobRecord:
-        """Queue private PDFs by staged file name without exposing their content."""
+        """Queue corpus PDFs by staged file name without exposing their content."""
 
         return self._enqueue_background(
             payload,
-            job_type=JobType.PRIVATE_INGESTION,
-            title="Ingestions privées",
-            user_message=f"Ingestion privée de {len(payload.staged_files)} document(s)",
+            job_type=JobType.CORPUS_INGESTION,
+            title="Ingestions de documents",
+            user_message=f"Ingestion de {len(payload.staged_files)} document(s)",
             priority=90,
             now=now,
         )
 
     def _enqueue_background(
         self,
-        payload: LongSynthesisPayload | PrivateIngestionPayload,
+        payload: LongSynthesisPayload | CorpusIngestionPayload,
         *,
         job_type: JobType,
         title: str,
@@ -549,6 +838,36 @@ class JobRepository:
                 (str(conversation_id), *states),
             ).fetchall()
         return [self._row_to_record(row) for row in rows]
+
+    def list_active_diagnostics(self, *, limit: int = 100) -> list[ActiveJobDiagnostic]:
+        """List bounded active-work metadata without loading job payloads."""
+
+        if not 1 <= limit <= 100:
+            raise ValueError("diagnostic limit must be between 1 and 100")
+        states = tuple(state.value for state in ACTIVE_JOB_STATES)
+        placeholders = ", ".join("?" for _ in states)
+        with closing(self.database.connect()) as connection:
+            rows = connection.execute(
+                f"""
+                SELECT id, type, state, step, created_at, heartbeat_at
+                FROM jobs
+                WHERE state IN ({placeholders})
+                ORDER BY created_at, id
+                LIMIT ?
+                """,
+                (*states, limit),
+            ).fetchall()
+        return [
+            ActiveJobDiagnostic(
+                id=UUID(row["id"]),
+                type=JobType(row["type"]),
+                state=JobState(row["state"]),
+                step=JobStep(row["step"]),
+                created_at=datetime.fromisoformat(row["created_at"]),
+                heartbeat_at=_parse_timestamp(row["heartbeat_at"]),
+            )
+            for row in rows
+        ]
 
     def claim_next(
         self,
@@ -929,6 +1248,7 @@ class JobRepository:
         worker_id: str,
         error_code: JobErrorKind,
         safe_message: str,
+        diagnostic_code: str | None = None,
         retry_at: datetime | None = None,
         now: datetime | None = None,
     ) -> JobRecord | None:
@@ -945,7 +1265,7 @@ class JobRepository:
         with self.database.transaction() as connection:
             current = connection.execute(
                 """
-                SELECT attempt, step FROM jobs
+                SELECT attempt, step, type, conversation_id FROM jobs
                 WHERE id = ? AND worker_id = ? AND state = ?
                   AND lease_expires_at >= ?
                 """,
@@ -978,12 +1298,28 @@ class JobRepository:
                 completed_at = failed_timestamp
                 technical_message = "job.failed"
 
+            result_message_id: UUID | None = None
+            if target_state is JobState.FAILED and JobType(current["type"]) in {
+                JobType.CHAT_ANSWER,
+                JobType.DEEP_RESEARCH,
+            }:
+                result_message_id = self._persist_terminal_notice(
+                    connection,
+                    job_id=job_id,
+                    conversation_id=current["conversation_id"],
+                    state=target_state,
+                    content=f"**Réponse non produite.** {cleaned_message}",
+                    created_at=failed_timestamp,
+                    error_code=error_code.value,
+                    diagnostic_code=diagnostic_code,
+                )
+
             connection.execute(
                 """
                 UPDATE jobs
                 SET state = ?, available_at = ?,
                     worker_id = NULL, lease_expires_at = NULL, heartbeat_at = NULL,
-                    error_code = ?, error_message = ?,
+                    error_code = ?, error_message = ?, result_message_id = ?,
                     updated_at = ?, completed_at = ?
                 WHERE id = ?
                 """,
@@ -992,6 +1328,7 @@ class JobRepository:
                     available_at,
                     error_code.value,
                     cleaned_message,
+                    str(result_message_id) if result_message_id is not None else None,
                     failed_timestamp,
                     completed_at,
                     str(job_id),
@@ -1079,19 +1416,33 @@ class JobRepository:
         cancelled_timestamp = _timestamp(cancelled_at)
         with self.database.transaction() as connection:
             current = connection.execute(
-                "SELECT step FROM jobs WHERE id = ? AND state = ?",
+                "SELECT step, type, conversation_id FROM jobs WHERE id = ? AND state = ?",
                 (str(job_id), JobState.QUEUED.value),
             ).fetchone()
             if current is None:
                 return None
+            result_message_id: UUID | None = None
+            if JobType(current["type"]) in {JobType.CHAT_ANSWER, JobType.DEEP_RESEARCH}:
+                result_message_id = self._persist_terminal_notice(
+                    connection,
+                    job_id=job_id,
+                    conversation_id=current["conversation_id"],
+                    state=JobState.CANCELLED,
+                    content=(
+                        "**Traitement annulé.** Aucune réponse scientifique n'a été produite "
+                        "pour cette question."
+                    ),
+                    created_at=cancelled_timestamp,
+                )
             connection.execute(
                 """
                 UPDATE jobs
-                SET state = ?, updated_at = ?, completed_at = ?
+                SET state = ?, result_message_id = ?, updated_at = ?, completed_at = ?
                 WHERE id = ? AND state = ?
                 """,
                 (
                     JobState.CANCELLED.value,
+                    str(result_message_id) if result_message_id is not None else None,
                     cancelled_timestamp,
                     cancelled_timestamp,
                     str(job_id),
@@ -1155,7 +1506,7 @@ class JobRepository:
         with self.database.transaction() as connection:
             current = connection.execute(
                 """
-                SELECT step FROM jobs
+                SELECT step, type, conversation_id FROM jobs
                 WHERE id = ? AND state = ? AND worker_id = ?
                   AND lease_expires_at >= ?
                 """,
@@ -1168,16 +1519,30 @@ class JobRepository:
             ).fetchone()
             if current is None:
                 return None
+            result_message_id: UUID | None = None
+            if JobType(current["type"]) in {JobType.CHAT_ANSWER, JobType.DEEP_RESEARCH}:
+                result_message_id = self._persist_terminal_notice(
+                    connection,
+                    job_id=job_id,
+                    conversation_id=current["conversation_id"],
+                    state=JobState.CANCELLED,
+                    content=(
+                        "**Traitement annulé.** Aucune réponse scientifique n'a été produite "
+                        "pour cette question."
+                    ),
+                    created_at=cancelled_timestamp,
+                )
             connection.execute(
                 """
                 UPDATE jobs
                 SET state = ?, worker_id = NULL,
                     lease_expires_at = NULL, heartbeat_at = NULL,
-                    updated_at = ?, completed_at = ?
+                    result_message_id = ?, updated_at = ?, completed_at = ?
                 WHERE id = ?
                 """,
                 (
                     JobState.CANCELLED.value,
+                    str(result_message_id) if result_message_id is not None else None,
                     cancelled_timestamp,
                     cancelled_timestamp,
                     str(job_id),
@@ -1209,7 +1574,7 @@ class JobRepository:
         with self.database.transaction() as connection:
             expired = connection.execute(
                 """
-                SELECT id, state, step, attempt
+                SELECT id, state, step, attempt, type, conversation_id
                 FROM jobs
                 WHERE state IN (?, ?) AND lease_expires_at < ?
                 ORDER BY created_at, id
@@ -1249,12 +1614,35 @@ class JobRepository:
                     technical_message = "job.failed"
                     failed.append(job_id)
 
+                result_message_id: UUID | None = None
+                if target_state in {JobState.FAILED, JobState.CANCELLED} and JobType(
+                    row["type"]
+                ) in {JobType.CHAT_ANSWER, JobType.DEEP_RESEARCH}:
+                    notice_content = (
+                        "**Traitement annulé.** Aucune réponse scientifique n'a été produite "
+                        "pour cette question."
+                        if target_state is JobState.CANCELLED
+                        else f"**Réponse non produite.** {error_message}"
+                    )
+                    result_message_id = self._persist_terminal_notice(
+                        connection,
+                        job_id=job_id,
+                        conversation_id=row["conversation_id"],
+                        state=target_state,
+                        content=notice_content,
+                        created_at=recovered_timestamp,
+                        error_code=error_code,
+                        diagnostic_code=(
+                            "worker_lease_exhausted" if target_state is JobState.FAILED else None
+                        ),
+                    )
+
                 connection.execute(
                     """
                     UPDATE jobs
                     SET state = ?, available_at = ?,
                         worker_id = NULL, lease_expires_at = NULL, heartbeat_at = NULL,
-                        error_code = ?, error_message = ?,
+                        error_code = ?, error_message = ?, result_message_id = ?,
                         updated_at = ?, completed_at = ?
                     WHERE id = ?
                     """,
@@ -1263,6 +1651,7 @@ class JobRepository:
                         available_at,
                         error_code,
                         error_message,
+                        str(result_message_id) if result_message_id is not None else None,
                         recovered_timestamp,
                         completed_at,
                         str(job_id),
@@ -1327,6 +1716,18 @@ class JobRepository:
         available_at: str,
         created_at: str,
     ) -> sqlite3.Row:
+        active_evaluation = connection.execute(
+            """
+            SELECT id FROM jobs
+            WHERE state IN ('queued', 'running', 'cancel_requested')
+              AND json_extract(payload_json, '$.evaluation_run_id') IS NOT NULL
+            LIMIT 1
+            """
+        ).fetchone()
+        if active_evaluation is not None:
+            raise EvaluationRunBusyError(
+                "no new durable job can be queued while an evaluation cell is active"
+            )
         connection.execute(
             """
             INSERT INTO jobs(
@@ -1369,8 +1770,8 @@ class JobRepository:
             return JobType.WEEKLY_MAINTENANCE
         if isinstance(payload, LongSynthesisPayload):
             return JobType.LONG_SYNTHESIS
-        if isinstance(payload, PrivateIngestionPayload):
-            return JobType.PRIVATE_INGESTION
+        if isinstance(payload, CorpusIngestionPayload):
+            return JobType.CORPUS_INGESTION
         raise TypeError("unsupported durable job payload")
 
     @staticmethod
@@ -1409,7 +1810,7 @@ class JobRepository:
         elif job_type is JobType.LONG_SYNTHESIS:
             payload = LongSynthesisPayload.model_validate_json(row["payload_json"])
         else:
-            payload = PrivateIngestionPayload.model_validate_json(row["payload_json"])
+            payload = CorpusIngestionPayload.model_validate_json(row["payload_json"])
         return JobRecord(
             id=UUID(row["id"]),
             type=job_type,

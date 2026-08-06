@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from app.llm.argo_client import ArgoProtocolError
+from app.llm.argo_client import ArgoProtocolError, ArgoScientificValidationError
 from app.llm.contracts import GenerationMetrics, GenerationResponse
 from app.llm.response_style import ResponseStyle
 from app.models.chatbot import ChatEvidencePassage, ChatEvidenceRecord
@@ -14,7 +14,9 @@ from app.updates.pilot_rag import (
     CiderEvidenceRagService,
     CitedEvidenceStatement,
     _apa_reference,
+    _clean_author_names,
     _reject_internal_process_leaks,
+    _renderable_doi,
     _salvage_grounded_evidence_answer,
 )
 from app.updates.vector_index import BibliographicHybridResult
@@ -91,6 +93,89 @@ def test_apa_reference_does_not_invent_a_missing_doi() -> None:
 
     assert "doi.org" not in reference
     assert reference.endswith("*Cider Science*.")
+
+
+def test_bibliographic_cleanup_deduplicates_authors_and_rejects_corrupt_metadata() -> None:
+    assert _clean_author_names(["Ada Test", " Ada  Test ", "B, Z."]) == ["Ada Test"]
+    assert _renderable_doi("https://doi.org/10.1000/Valid") == "10.1000/valid"
+    assert _renderable_doi("not-a-doi") is None
+
+    record = _record("11111111-1111-1111-1111-111111111111", "not-a-doi")
+    record.authors = ["B, Z."]
+
+    reference = _apa_reference(record)
+
+    assert "B, Z." not in reference
+    assert "doi.org" not in reference
+    assert "Métadonnées bibliographiques incomplètes" in reference
+
+
+def test_evidence_rag_uses_only_indirect_evidence_with_explicit_scope() -> None:
+    passage = ChatEvidencePassage(
+        evidence_id="common:indirect:abstract",
+        text="The study concerns a related downstream process.",
+    )
+    record = ChatEvidenceRecord(
+        record_id="common:indirect",
+        origin="local_rag",
+        evidence_level="abstract",
+        scope="common",
+        title="Related downstream process",
+        evidence_grade="B",
+        passages=[passage],
+    )
+
+    class FakeClient:
+        def chat(self, _messages, **_options):
+            return GenerationResponse(
+                content=json.dumps(
+                    {
+                        "status": "answerable",
+                        "response_format": "prose",
+                        "definition": "Effet du procédé demandé.",
+                        "statements": [
+                            {
+                                "statement": (
+                                    "Preuve indirecte : cette étude porte sur un procédé aval "
+                                    "connexe et non sur le procédé exact demandé."
+                                ),
+                                "evidence_ids": ["common:indirect:abstract"],
+                                "section": "synthetic_answer",
+                                "mechanism": None,
+                            }
+                        ],
+                        "limitations": ["La transposition au procédé exact reste indirecte."],
+                        "insufficiency_message": None,
+                    }
+                ),
+                model="test",
+                done_reason="stop",
+                metrics=GenerationMetrics(
+                    total_duration_seconds=0.1,
+                    load_duration_seconds=0.0,
+                    prompt_eval_count=1,
+                    prompt_eval_duration_seconds=0.0,
+                    eval_count=1,
+                    eval_duration_seconds=0.1,
+                ),
+            )
+
+    result = CiderEvidenceRagService(FakeClient()).answer(
+        "Quel est l'effet du procédé exact ?",
+        [record],
+    )
+
+    assert result.answer.status == "answerable"
+    assert result.cited_evidence_ids == ["common:indirect:abstract"]
+    assert result.source_record_ids == ["common:indirect"]
+    assert "Preuve indirecte" in result.answer_markdown
+    assert "Définition retenue" not in result.answer_markdown
+    assert "Effet du procédé demandé." not in result.answer_markdown
+    assert "## Réponse synthétique" in result.answer_markdown
+    assert "## Effets documentés" in result.answer_markdown
+    assert "## Limites des preuves" in result.answer_markdown
+    assert "Related downstream process" in result.answer_markdown
+    assert "## Références" in result.answer_markdown
 
 
 def test_pilot_rag_constrains_ids_and_renders_abstract_citations() -> None:
@@ -182,12 +267,14 @@ def test_evidence_rag_uses_full_text_passages_and_renders_exact_pages() -> None:
     class FakeClient:
         def chat(self, messages, *, json_schema, max_output_tokens):
             assert max_output_tokens == 4096
-            assert "jus de pomme standard, commercial ou concentré" in messages[0]["content"]
-            assert (
-                "Une souche inoculée ne constitue jamais une donnée de prévalence"
-                in (messages[0]["content"])
-            )
+            assert "matrice ou le procédé exact" in messages[0]["content"]
+            assert "Une condition expérimentale ne constitue jamais" in messages[0]["content"]
             payload = json.loads(messages[1]["content"])
+            assert payload["query_interpretation"] == {
+                "concept_definition": "Fermentation conduite à température contrôlée.",
+                "ambiguities": ["température de fermentation ou de stockage"],
+                "excluded_concepts": ["stockage après fermentation"],
+            }
             assert payload["evidence"][0]["evidence_level"] == "full_text"
             assert payload["evidence"][0]["page_start"] == 4
             assert payload["evidence"][0]["text"].startswith("Fermentation at 18")
@@ -223,6 +310,9 @@ def test_evidence_rag_uses_full_text_passages_and_renders_exact_pages() -> None:
         "Que montre l'article sur la température ?",
         [record],
         coverage_notes=["Axe « mécanismes » : couverture documentaire partial."],
+        concept_definition="Fermentation conduite à température contrôlée.",
+        ambiguities=["température de fermentation ou de stockage"],
+        excluded_concepts=["stockage après fermentation"],
     )
 
     assert result.source_record_ids == ["common:article-1"]
@@ -230,6 +320,56 @@ def test_evidence_rag_uses_full_text_passages_and_renders_exact_pages() -> None:
     assert "(Test, 2025, pp. 4–5)" in result.answer_markdown
     assert "abstract ne remplace" not in result.answer_markdown
     assert "mécanismes moléculaires" in result.answer_markdown
+
+
+def test_evidence_rag_exhausted_grounding_retries_raise_worker_safe_error() -> None:
+    passage = ChatEvidencePassage(
+        evidence_id="common:article-1:chunk:42",
+        chunk_id=42,
+        section="Results",
+        page_start=4,
+        page_end=5,
+        text="Fermentation increased ester production in the cider trial.",
+    )
+    record = ChatEvidenceRecord(
+        record_id="common:article-1",
+        origin="local_rag",
+        evidence_level="full_text",
+        scope="common",
+        article_id="article-1",
+        title="Temperature and cider aroma",
+        authors=["Ada Test"],
+        publication_year=2025,
+        providers=["local"],
+        passages=[passage],
+    )
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def chat(self, _messages, **_options):
+            self.calls += 1
+            return _response(
+                json.dumps(
+                    {
+                        "response_format": "prose",
+                        "statements": [
+                            {
+                                "statement": "La production a augmente de 15 %.",
+                                "evidence_ids": [passage.evidence_id],
+                            }
+                        ],
+                        "limitations": [],
+                    }
+                )
+            )
+
+    client = FakeClient()
+    with pytest.raises(ArgoScientificValidationError, match="numeric value 15"):
+        CiderEvidenceRagService(client).answer("Quel est l'effet observe ?", [record])
+
+    assert client.calls == 2
 
 
 def test_faceted_evidence_rag_keeps_cited_drafts_and_assembles_them() -> None:
@@ -289,7 +429,9 @@ def test_faceted_evidence_rag_keeps_cited_drafts_and_assembles_them() -> None:
                 assert max_output_tokens == 6144
                 assert json_schema["properties"]["statements"]["maxItems"] == 16
                 assert len(payload["facet_drafts"]) == 3
-                assert "Une étude sur le vin ne prouve jamais" in messages[0]["content"]
+                assert "A=direct, B=indirect" in messages[0]["content"]
+                assert "N'utilise jamais C ou D comme preuve" in messages[0]["content"]
+                assert "un tableau statements vide est invalide" in messages[0]["content"]
                 cited = enum[0]
             return _response(
                 json.dumps(

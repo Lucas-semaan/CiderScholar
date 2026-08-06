@@ -64,10 +64,12 @@ def test_worker_command_once_mode(settings, monkeypatch, capsys) -> None:
 
 def test_worker_command_continuous_mode(settings, monkeypatch, capsys) -> None:
     fakes: list[_FakeWorker] = []
+    build_options = []
 
-    def build_fake(_settings, **_kwargs):
+    def build_fake(_settings, **kwargs):
         fake = _FakeWorker()
         fakes.append(fake)
+        build_options.append(kwargs)
         return fake
 
     monkeypatch.setattr(worker_cli, "load_settings", lambda _path: settings)
@@ -84,6 +86,8 @@ def test_worker_command_continuous_mode(settings, monkeypatch, capsys) -> None:
     assert len(fakes) == 2
     assert all(fake.once_calls == 0 for fake in fakes)
     assert all(fake.forever_calls == 1 for fake in fakes)
+    assert build_options[0]["lease_recovery_enabled"] is True
+    assert build_options[1]["lease_recovery_enabled"] is False
     assert json.loads(capsys.readouterr().out) == {
         "mode": "continuous",
         "processed_count": 6,

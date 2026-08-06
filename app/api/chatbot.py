@@ -17,6 +17,7 @@ from app.api.schemas import (
     ChatFeedbackRequest,
     ChatJobSubmitRequest,
     ChatJobSubmitResponse,
+    EvaluationJobSubmitRequest,
     PersistedUserMessage,
 )
 from app.chat_exports import export_conversations
@@ -24,7 +25,13 @@ from app.config import Settings
 from app.database.sqlite import Database
 from app.deep_research.promotion import deep_research_availability
 from app.jobs.contracts import ChatAnswerPayload, DeepResearchPayload
-from app.jobs.repository import ActiveJobLimitError, JobRepository
+from app.jobs.repository import (
+    ActiveJobLimitError,
+    EvaluationConversationIsolationError,
+    EvaluationQuestionAlreadySubmittedError,
+    EvaluationRunBusyError,
+    JobRepository,
+)
 
 router = APIRouter(prefix="/api/chatbot", tags=["chatbot"])
 
@@ -40,6 +47,50 @@ def _with_active_jobs(database: Database, conversation: dict[str, Any]) -> dict[
         "active_job_count": len(active_jobs),
         "active_jobs": active_jobs,
     }
+
+
+@router.post(
+    "/evaluation/jobs",
+    response_model=ChatJobSubmitResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def enqueue_evaluation_job(
+    payload: EvaluationJobSubmitRequest,
+    database: Annotated[Database, Depends(get_database)],
+) -> ChatJobSubmitResponse:
+    repository = JobRepository(database.path)
+    try:
+        enqueued = repository.enqueue_evaluation_question(
+            run_id=payload.run_id,
+            question_id=payload.question_id,
+            profile=payload.profile,
+            message=payload.message,
+            client_request_id=payload.client_request_id,
+        )
+    except EvaluationRunBusyError as error:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "evaluation_run_busy",
+                "message": "Attendez le résultat terminal de la cellule active.",
+            },
+        ) from error
+    except EvaluationQuestionAlreadySubmittedError as error:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "evaluation_cell_already_submitted",
+                "message": "Cette cellule run/profil/question a déjà été soumise.",
+            },
+        ) from error
+    return ChatJobSubmitResponse(
+        job=enqueued.job.to_public(),
+        user_message=PersistedUserMessage(
+            id=enqueued.user_message_id,
+            content=enqueued.user_message_content,
+            created_at=enqueued.user_message_created_at,
+        ),
+    )
 
 
 @router.get("/conversations")
@@ -80,6 +131,13 @@ def enqueue_chat_job(
     try:
         repository = JobRepository(database.path)
         if payload.mode == "deep_research":
+            if payload.evaluation_run_id is not None:
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        "Le mode d'évaluation automatisée utilise uniquement le job quick isolé."
+                    ),
+                )
             availability = deep_research_availability(settings)
             if not availability.available:
                 raise HTTPException(
@@ -112,6 +170,9 @@ def enqueue_chat_job(
                     use_external_sources=payload.use_external_sources,
                     analyze_figures=payload.analyze_figures,
                     interaction_mode=payload.interaction_mode,
+                    evaluation_run_id=payload.evaluation_run_id,
+                    evaluation_question_id=payload.evaluation_question_id,
+                    evaluation_profile=payload.evaluation_profile,
                 )
             )
     except ActiveJobLimitError as error:
@@ -121,6 +182,30 @@ def enqueue_chat_job(
                 "code": "active_job_limit",
                 "message": "Attendez la fin d'un travail actif avant d'en envoyer un autre.",
                 "limit": error.limit,
+            },
+        ) from error
+    except EvaluationRunBusyError as error:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "evaluation_run_busy",
+                "message": "Une cellule d'évaluation attend la fin du job durable actif.",
+            },
+        ) from error
+    except EvaluationQuestionAlreadySubmittedError as error:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "evaluation_cell_already_submitted",
+                "message": "Cette cellule run/profil/question a déjà été soumise.",
+            },
+        ) from error
+    except EvaluationConversationIsolationError as error:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "evaluation_conversation_not_empty",
+                "message": "Chaque question d'évaluation exige une conversation neuve.",
             },
         ) from error
     except ValueError as error:

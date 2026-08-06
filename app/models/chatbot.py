@@ -72,6 +72,7 @@ class ChatEvidenceRecord(BaseModel):
     score: float = 0.0
     matched_facets: list[str] = Field(default_factory=list, max_length=12)
     matrix_tier: Literal["exact", "near", "distant", "none"] = "none"
+    evidence_grade: Literal["A", "B", "C", "D", "unassessed"] = "unassessed"
     passages: list[ChatEvidencePassage] = Field(min_length=1, max_length=8)
 
     @model_validator(mode="after")
@@ -119,6 +120,17 @@ class ChatbotFacetDraft(BaseModel):
     source_record_ids: list[str] = Field(default_factory=list, max_length=64)
 
 
+class ChatbotEvaluationTrace(BaseModel):
+    """Immutable identity of one prompt-profile evaluation cell."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    run_id: str = Field(pattern=r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,79}$")
+    question_id: str = Field(pattern=r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,79}$")
+    profile: Literal["p0", "p1", "p2"]
+    question_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
 class ChatbotResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -134,6 +146,12 @@ class ChatbotResult(BaseModel):
     prompt_tokens: int = Field(ge=0)
     completion_tokens: int = Field(ge=0)
     duration_seconds: float = Field(ge=0.0)
+    generation_status: Literal[
+        "generated",
+        "extractive_fallback",
+        "diagnostic_only",
+    ] = "generated"
+    diagnostic_code: str | None = Field(default=None, max_length=100)
     interaction_mode: Literal["research", "conversation"] = "research"
     reused_previous_sources: bool = False
     facet_drafts: list[ChatbotFacetDraft] = Field(default_factory=list, max_length=12)
@@ -141,3 +159,4 @@ class ChatbotResult(BaseModel):
     figure_analysis_count: int = Field(default=0, ge=0, le=10)
     figure_analysis_duration_seconds: float = Field(default=0.0, ge=0.0)
     figure_analysis_model: str | None = Field(default=None, max_length=200)
+    evaluation: ChatbotEvaluationTrace | None = None

@@ -14,6 +14,7 @@ from app.jobs.contracts import (
     MAX_JOB_ATTEMPTS,
     RESERVED_FUTURE_JOB_TYPES,
     ChatAnswerPayload,
+    CorpusIngestionPayload,
     DeepResearchPayload,
     JobErrorDisposition,
     JobErrorKind,
@@ -23,7 +24,6 @@ from app.jobs.contracts import (
     JobStep,
     JobType,
     LongSynthesisPayload,
-    PrivateIngestionPayload,
     can_transition,
     retry_delay_after,
 )
@@ -35,17 +35,56 @@ def test_job_type_is_closed_and_reserves_future_names() -> None:
         JobType.WEEKLY_MAINTENANCE,
         JobType.DEEP_RESEARCH,
         JobType.LONG_SYNTHESIS,
-        JobType.PRIVATE_INGESTION,
+        JobType.CORPUS_INGESTION,
     )
     assert JobType("chat_answer") is JobType.CHAT_ANSWER
     assert JobType("weekly_maintenance") is JobType.WEEKLY_MAINTENANCE
     assert JobType("deep_research") is JobType.DEEP_RESEARCH
     assert JobType("long_synthesis") is JobType.LONG_SYNTHESIS
-    assert JobType("private_ingestion") is JobType.PRIVATE_INGESTION
+    assert JobType("corpus_ingestion") is JobType.CORPUS_INGESTION
     assert not RESERVED_FUTURE_JOB_TYPES
 
     with pytest.raises(ValueError):
         JobType("unknown")
+
+
+def test_evaluation_chat_payload_is_fingerprinted_and_isolated() -> None:
+    payload = ChatAnswerPayload(
+        message="  Question   scientifique ? ",
+        conversation_id=uuid4(),
+        client_request_id=uuid4(),
+        interaction_mode="research",
+        evaluation_run_id="run-20260806",
+        evaluation_question_id="Q1",
+        evaluation_profile="p1",
+    )
+
+    assert payload.message == "Question scientifique ?"
+    assert payload.evaluation_question_sha256 is not None
+    assert len(payload.evaluation_question_sha256) == 64
+
+    with pytest.raises(ValidationError, match="isolated research"):
+        ChatAnswerPayload(
+            message="Question scientifique ?",
+            conversation_id=uuid4(),
+            client_request_id=uuid4(),
+            interaction_mode="conversation",
+            evaluation_run_id="run-20260806",
+            evaluation_question_id="Q1",
+            evaluation_profile="p1",
+        )
+
+    with pytest.raises(ValidationError, match="fingerprint does not match"):
+        ChatAnswerPayload(
+            message="Question scientifique ?",
+            conversation_id=uuid4(),
+            client_request_id=uuid4(),
+            interaction_mode="research",
+            evaluation_run_id="run-20260806",
+            evaluation_question_id="Q1",
+            evaluation_profile="p1",
+            evaluation_question_sha256="0" * 64,
+        )
 
 
 def test_job_states_and_transitions_are_closed_and_explicit() -> None:
@@ -71,9 +110,14 @@ def test_job_states_and_transitions_are_closed_and_explicit() -> None:
 def test_every_job_step_has_a_safe_user_label() -> None:
     assert {step.value for step in JobStep} == {
         "waiting",
+        "planning",
         "search",
         "reranking",
         "enrichment",
+        "evidence_selection",
+        "coverage",
+        "figure_analysis",
+        "generation",
         "argo",
         "validation",
         "persistence",
@@ -97,16 +141,16 @@ def test_background_payloads_are_versioned_and_reject_unsafe_paths() -> None:
         conversation_id=uuid4(),
         client_request_id=uuid4(),
     )
-    private = PrivateIngestionPayload(
+    corpus = CorpusIngestionPayload(
         staged_files=["digest-report.pdf"],
         conversation_id=uuid4(),
         client_request_id=uuid4(),
     )
 
     assert synthesis.query_id == "query-1"
-    assert synthesis.version == private.version == 1
+    assert synthesis.version == corpus.version == 1
     with pytest.raises(ValidationError):
-        PrivateIngestionPayload(
+        CorpusIngestionPayload(
             staged_files=["../outside.pdf"],
             conversation_id=uuid4(),
             client_request_id=uuid4(),

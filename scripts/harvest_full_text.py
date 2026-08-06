@@ -36,6 +36,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Override the configured maximum accepted PDFs for this run",
     )
     parser.add_argument(
+        "--max-native-downloads",
+        type=int,
+        help="Override the configured maximum JATS/TEI/text source files for this run",
+    )
+    parser.add_argument(
         "--no-index",
         action="store_true",
         help="Leave newly ingested chunks pending instead of updating Qdrant",
@@ -70,6 +75,7 @@ def main(argv: list[str] | None = None) -> int:
         audit_only=arguments.audit_only,
         include_slow_fallbacks=not arguments.fast,
         max_downloads=arguments.max_downloads,
+        max_native_downloads=arguments.max_native_downloads,
         progress=lambda message: print(message, flush=True),
     )
 
@@ -102,6 +108,13 @@ def main(argv: list[str] | None = None) -> int:
         f"ingestion=téléchargés:{harvest.downloaded} ingérés:{harvest.ingested} "
         f"doublons:{harvest.duplicate} différés:{harvest.deferred} "
         f"échecs:{harvest.failed}",
+        flush=True,
+    )
+    print(
+        "natif="
+        f"téléchargés:{harvest.native_downloaded} "
+        f"déjà_présents:{harvest.native_already_downloaded} "
+        f"différés:{harvest.native_deferred} échecs:{harvest.native_failed}",
         flush=True,
     )
     print(f"rapport={report_path.resolve()}", flush=True)

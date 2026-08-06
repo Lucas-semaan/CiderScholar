@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "local-science-rag"
-version = "0.2.3"
+version = "0.2.7"
 description = "Local, sovereign scientific bibliography and RAG application"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"

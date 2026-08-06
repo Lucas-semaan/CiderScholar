@@ -44,7 +44,20 @@ describe("JobStatusCard", () => {
       createElement(JobStatusCard, { job: { ...job, step: "reranking" } }),
     );
 
-    expect(markup).toContain("Reranking des passages");
+    expect(markup).toContain("Classement et fusion des passages");
+  });
+
+  it("distinguishes planning from final answer generation", () => {
+    const planning = renderToStaticMarkup(
+      createElement(JobStatusCard, { job: { ...job, step: "planning" } }),
+    );
+    const generation = renderToStaticMarkup(
+      createElement(JobStatusCard, { job: { ...job, step: "generation" } }),
+    );
+
+    expect(planning).toContain("Analyse et planification de la question");
+    expect(planning).not.toContain("Génération de la réponse finale");
+    expect(generation).toContain("Génération de la réponse finale");
   });
 
   it("keeps a failed job visible with its retry action", () => {

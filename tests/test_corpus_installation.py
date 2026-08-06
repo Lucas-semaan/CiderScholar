@@ -40,7 +40,6 @@ from app.corpus_packages.models import (
 from app.corpus_packages.updates import read_installed_state
 from app.database.migrations import CURRENT_SCHEMA_VERSION
 from app.database.sqlite import Database
-from app.services.corpus_updates import directory_hashes
 
 
 def _staged_package(settings, payload: bytes = b"SQLite snapshot") -> StagedCorpusPackage:
@@ -172,9 +171,6 @@ def test_rollback_is_scheduled_without_hot_swap_and_applied_at_startup(settings)
 def test_validated_update_is_marked_for_restart_without_hot_activation(settings) -> None:
     active = settings.paths.common_dir / "active.txt"
     active.write_text("still active", encoding="utf-8")
-    private = settings.paths.private_pdf_dir / "private.pdf"
-    private.write_bytes(b"private content")
-    private_before = directory_hashes(settings.paths.private_dir)
     source = settings.paths.cache_dir / "empty-source.sqlite3"
     Database(source).initialize()
     with sqlite3.connect(source) as connection:
@@ -200,7 +196,6 @@ def test_validated_update_is_marked_for_restart_without_hot_activation(settings)
     )
     assert not ready_update_path(settings).exists()
     assert read_installed_state(settings).corpus_version == activation.corpus_version
-    assert directory_hashes(settings.paths.private_dir) == private_before
 
     rolled_back = rollback_previous_at_startup(settings, Path(activation.previous_path))
 
@@ -210,7 +205,6 @@ def test_validated_update_is_marked_for_restart_without_hot_activation(settings)
     )
     assert rolled_back.previous_path is not None
     assert Path(rolled_back.previous_path).is_dir()
-    assert directory_hashes(settings.paths.private_dir) == private_before
 
 
 def test_interrupted_copy_and_extraction_leave_active_corpus_valid(

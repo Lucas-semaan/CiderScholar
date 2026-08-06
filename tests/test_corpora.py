@@ -1,39 +1,27 @@
 from __future__ import annotations
 
-from uuid import UUID
-
 import pytest
 from fastapi.testclient import TestClient
 from pydantic import TypeAdapter, ValidationError
 
-from app.corpora import (
-    LOCAL_PROFILE_ENV,
-    CorpusMutationForbiddenError,
-    CorpusScope,
-    LocalProfile,
-    authorize_corpus_mutation,
-    corpus_paths,
-    load_local_profile,
-    settings_for_corpus,
-)
+from app.corpora import CorpusScope, corpus_paths, settings_for_corpus
 from app.database.sqlite import Database
-from app.jobs.contracts import PrivateIngestionPayload
-from app.jobs.repository import JobRepository
 from app.main import create_app
 from app.retrieval.lexical_search import LexicalSearchResult
 from app.retrieval.vector_search import QdrantLocalIndex
 
 
-def test_corpus_scopes_are_closed() -> None:
+def test_corpus_scope_has_one_authoritative_value() -> None:
     adapter = TypeAdapter(CorpusScope)
 
     assert adapter.validate_python("common") is CorpusScope.COMMON
-    assert adapter.validate_python("private") is CorpusScope.PRIVATE
+    with pytest.raises(ValidationError):
+        adapter.validate_python("private")
     with pytest.raises(ValidationError):
         adapter.validate_python("shared")
 
 
-def test_retrieval_result_always_carries_an_origin() -> None:
+def test_retrieval_result_always_carries_the_common_origin() -> None:
     result = LexicalSearchResult(
         rank=1,
         chunk_id=1,
@@ -52,48 +40,31 @@ def test_retrieval_result_always_carries_an_origin() -> None:
     assert result.model_dump(mode="json")["scope"] == "common"
 
 
-def test_common_and_private_paths_are_disjoint_and_created(settings) -> None:
-    paths = settings.paths
+def test_only_common_corpus_paths_are_created(settings) -> None:
+    paths = corpus_paths(settings, CorpusScope.COMMON)
 
-    assert paths.common_dir.parent == paths.data_dir
-    assert paths.private_dir.parent == paths.data_dir
-    assert paths.common_dir != paths.private_dir
-    assert not paths.common_dir.is_relative_to(paths.private_dir)
-    assert not paths.private_dir.is_relative_to(paths.common_dir)
-    assert paths.common_database_path.is_file() is False
-    assert paths.common_database_path.parent.is_dir()
-    assert paths.private_database_path.parent.is_dir()
-    assert paths.common_qdrant_dir.is_dir()
-    assert paths.private_qdrant_dir.is_dir()
+    assert paths.root == settings.paths.common_dir
+    assert paths.database_path == settings.paths.common_database_path
+    assert paths.database_path.parent.is_dir()
+    assert paths.pdf_dir.is_dir()
+    assert paths.extracted_dir.is_dir()
+    assert paths.qdrant_dir.is_dir()
+    assert not (settings.paths.data_dir / "private").exists()
 
 
-def test_user_profile_cannot_mutate_common_corpus(settings, monkeypatch, tmp_path) -> None:
-    monkeypatch.delenv(LOCAL_PROFILE_ENV, raising=False)
+def test_corpus_settings_redirect_every_scientific_path(settings) -> None:
+    scoped = settings_for_corpus(settings, CorpusScope.COMMON)
+    paths = corpus_paths(settings, CorpusScope.COMMON)
 
-    with pytest.raises(CorpusMutationForbiddenError):
-        authorize_corpus_mutation(CorpusScope.COMMON, load_local_profile())
-    with TestClient(create_app(settings)) as client:
-        responses = [
-            client.post("/api/corpus/folder", json={"folder": str(tmp_path)}),
-            client.post("/api/corpus/index", json={"retry_failed": False}),
-            client.post("/api/corpus/article-1/reindex"),
-            client.delete("/api/corpus/article-1"),
-            client.post(
-                "/api/corpus/upload",
-                files={"files": ("private.pdf", b"%PDF-1.4", "application/pdf")},
-            ),
-        ]
-
-    assert {response.status_code for response in responses} == {403}
+    assert scoped.paths.database_path == paths.database_path
+    assert scoped.paths.pdf_dir == paths.pdf_dir
+    assert scoped.paths.extracted_dir == paths.extracted_dir
+    assert scoped.paths.qdrant_dir == paths.qdrant_dir
 
 
-def test_admin_profile_is_local_only_and_can_mutate_common(settings, monkeypatch, tmp_path) -> None:
-    profile = load_local_profile({LOCAL_PROFILE_ENV: "admin"})
+def test_every_local_profile_can_ingest_the_common_corpus(settings, monkeypatch, tmp_path) -> None:
+    monkeypatch.delenv("CIDERSCHOLAR_LOCAL_PROFILE", raising=False)
 
-    authorize_corpus_mutation(CorpusScope.COMMON, profile)
-    assert profile is LocalProfile.ADMIN
-    assert "profile" not in settings.model_dump(mode="json")["app"]
-    monkeypatch.setenv(LOCAL_PROFILE_ENV, "admin")
     with TestClient(create_app(settings)) as client:
         response = client.post("/api/corpus/folder", json={"folder": str(tmp_path)})
 
@@ -101,125 +72,82 @@ def test_admin_profile_is_local_only_and_can_mutate_common(settings, monkeypatch
     assert response.json() == {"discovered_files": 0, "reports": []}
 
 
-def test_sqlite_is_isolated_by_corpus_scope(settings) -> None:
-    common = corpus_paths(settings, CorpusScope.COMMON)
-    private = corpus_paths(settings, CorpusScope.PRIVATE)
-
-    assert common.database_path != private.database_path
-    common_database = Database(common.database_path)
-    private_database = Database(private.database_path)
-    common_database.initialize()
-    private_database.initialize()
-
-    assert common.database_path.is_file()
-    assert private.database_path.is_file()
-    with common_database.connect() as connection:
-        assert (
-            connection.execute(
-                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'articles'"
-            ).fetchone()
-            is not None
-        )
-    with private_database.connect() as connection:
-        assert (
-            connection.execute(
-                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'articles'"
-            ).fetchone()
-            is not None
-        )
-
-
-def test_common_and_private_listings_share_the_same_summary_contract(settings) -> None:
-    for scope, database_path, state in (
-        ("common", settings.paths.common_database_path, "failed"),
-        ("private", settings.paths.private_database_path, "ocr_required"),
-    ):
-        database = Database(database_path)
-        database.initialize()
-        database.save_article_and_chunks(
+def test_corpus_listing_is_single_and_has_no_scope_field(settings) -> None:
+    database = Database(settings.paths.common_database_path)
+    database.initialize()
+    database.save_article_and_chunks(
+        {
+            "id": "article-1",
+            "sha256": "a" * 64,
+            "title": "Common article",
+            "authors": [],
+            "pdf_path": str(settings.paths.common_pdf_dir / "article.pdf"),
+        },
+        [
             {
-                "id": f"{scope}-article",
-                "sha256": ("a" if scope == "common" else "b") * 64,
-                "title": f"{scope} article",
-                "authors": [],
-                "pdf_path": str(settings.paths.data_dir / f"{scope}.pdf"),
-            },
-            [
-                {
-                    "page_start": 1,
-                    "page_end": 1,
-                    "chunk_index": 0,
-                    "text": "Scientific evidence",
-                    "token_count": 2,
-                }
-            ],
-        )
-        database.upsert_ingestion_job(
-            pdf_path=str(settings.paths.data_dir / f"{scope}.pdf"),
-            sha256=("a" if scope == "common" else "b") * 64,
-            state=state,
-        )
+                "page_start": 1,
+                "page_end": 1,
+                "chunk_index": 0,
+                "text": "Scientific evidence",
+                "token_count": 2,
+            }
+        ],
+    )
 
     with TestClient(create_app(settings)) as client:
-        common = client.get("/api/corpus")
-        private = client.get("/api/private-corpus")
+        response = client.get("/api/corpus")
+        removed_route = client.get("/api/private-corpus")
 
-    assert common.status_code == 200
-    assert private.status_code == 200
-    assert common.json()["scope"] == "common"
-    assert private.json()["scope"] == "private"
-    assert common.json()["summary"] == {
-        "articles": 1,
-        "chunks": 1,
-        "indexed_chunks": 0,
-        "failed_jobs": 1,
-        "ocr_jobs": 0,
-    }
-    assert private.json()["summary"] == {
+    assert response.status_code == 200
+    assert "scope" not in response.json()
+    assert response.json()["summary"] == {
         "articles": 1,
         "chunks": 1,
         "indexed_chunks": 0,
         "failed_jobs": 0,
-        "ocr_jobs": 1,
+        "ocr_jobs": 0,
     }
+    assert removed_route.status_code == 404
 
 
-def test_qdrant_storage_is_isolated_by_corpus_scope(settings) -> None:
-    common = corpus_paths(settings, CorpusScope.COMMON)
-    private = corpus_paths(settings, CorpusScope.PRIVATE)
-    common_index = QdrantLocalIndex(settings, path=common.qdrant_dir)
-    private_index = QdrantLocalIndex(settings, path=private.qdrant_dir)
-
-    assert common_index.path == common.qdrant_dir
-    assert private_index.path == private.qdrant_dir
-    assert common_index.path != private_index.path
-    assert common_index.collection_name == private_index.collection_name
-
-
-def test_private_upload_stages_only_private_paths_and_queues_work(settings) -> None:
-    with TestClient(create_app(settings)) as client:
-        response = client.post(
-            "/api/private-corpus/upload",
-            files={"files": ("research.pdf", b"%PDF-1.4", "application/pdf")},
+def test_article_listing_is_not_truncated_at_five_thousand(settings) -> None:
+    database = Database(settings.paths.common_database_path)
+    database.initialize()
+    with database.transaction() as connection:
+        connection.executemany(
+            """
+            INSERT INTO articles (id, sha256, title, authors, pdf_path)
+            VALUES (?, ?, ?, '[]', ?)
+            """,
+            (
+                (
+                    f"article-{index}",
+                    f"{index:064x}",
+                    f"Article {index}",
+                    str(settings.paths.common_pdf_dir / f"{index}.pdf"),
+                )
+                for index in range(5_101)
+            ),
         )
-        listing = client.get("/api/private-corpus")
 
-    private_settings = settings_for_corpus(settings, CorpusScope.PRIVATE)
-    payload = response.json()
-    job = JobRepository(settings.paths.database_path).get(UUID(payload["job"]["id"]))
-    assert response.status_code == 202
-    assert listing.json()["scope"] == "private"
-    assert listing.json()["summary"]["articles"] == 0
-    assert job is not None
-    assert isinstance(job.payload, PrivateIngestionPayload)
-    stored_path = settings.paths.private_pdf_dir / job.payload.staged_files[0]
-    assert stored_path.is_file()
-    assert stored_path.is_relative_to(settings.paths.private_pdf_dir)
-    assert not stored_path.is_relative_to(settings.paths.common_dir)
-    assert private_settings.paths.qdrant_dir == settings.paths.private_qdrant_dir
+    with TestClient(create_app(settings)) as client:
+        payload = client.get("/api/corpus").json()
+
+    assert payload["summary"]["articles"] == 5_101
+    assert len(payload["articles"]) == 5_101
 
 
-def test_private_delete_and_reindex_receive_no_common_storage(settings, monkeypatch) -> None:
+def test_qdrant_uses_the_common_corpus_path(settings) -> None:
+    common = corpus_paths(settings, CorpusScope.COMMON)
+    index = QdrantLocalIndex(settings, path=common.qdrant_dir)
+
+    try:
+        assert index.path == common.qdrant_dir
+    finally:
+        index.close()
+
+
+def test_delete_and_reindex_receive_common_storage(settings, monkeypatch) -> None:
     calls: list[tuple[str, object, object]] = []
 
     class FakeReport:
@@ -234,18 +162,17 @@ def test_private_delete_and_reindex_receive_no_common_storage(settings, monkeypa
         calls.append((article_id, active_settings, database))
         return {"deleted_chunks": 0}
 
-    monkeypatch.setattr("app.api.private_corpus.reindex_article", fake_reindex)
-    monkeypatch.setattr("app.api.private_corpus.delete_article", fake_delete)
+    monkeypatch.setattr("app.api.ingestion.reindex_article", fake_reindex)
+    monkeypatch.setattr("app.api.ingestion.delete_article", fake_delete)
     with TestClient(create_app(settings)) as client:
-        reindexed = client.post("/api/private-corpus/private-1/reindex")
-        deleted = client.delete("/api/private-corpus/private-1")
+        reindexed = client.post("/api/corpus/article-1/reindex")
+        deleted = client.delete("/api/corpus/article-1")
 
     assert reindexed.status_code == 200
     assert deleted.status_code == 200
     assert len(calls) == 2
     for article_id, active_settings, database in calls:
-        assert article_id == "private-1"
-        assert active_settings.paths.database_path == settings.paths.private_database_path
-        assert active_settings.paths.qdrant_dir == settings.paths.private_qdrant_dir
-        assert database.path == settings.paths.private_database_path
-        assert database.path != settings.paths.common_database_path
+        assert article_id == "article-1"
+        assert active_settings.paths.database_path == settings.paths.common_database_path
+        assert active_settings.paths.qdrant_dir == settings.paths.common_qdrant_dir
+        assert database.path == settings.paths.common_database_path

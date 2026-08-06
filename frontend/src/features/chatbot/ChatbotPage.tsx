@@ -24,7 +24,7 @@ import {
   createPendingChatSubmission,
   enqueuePendingChat,
   loadConversationWithActiveJobs,
-  reloadSucceededConversation,
+  reloadTerminalConversation,
   releaseSubmissionLock,
   type ChatInteractionMode,
   type PendingChatSubmission,
@@ -56,7 +56,7 @@ export function ChatbotPage() {
   const pendingSubmissionRef = useRef<PendingChatSubmission | null>(null);
   const submissionLockRef = useRef(false);
   const endRef = useRef<HTMLDivElement>(null);
-  const handledSuccessesRef = useRef(new Set<string>());
+  const handledTerminalsRef = useRef(new Set<string>());
   const { jobs, removeJob, trackJob, trackJobs } = useDurableJobs({
     onTerminal: (job) => {
       if (terminalJobDisposition(job, activeConversationId) === "notify_other") {
@@ -147,26 +147,26 @@ export function ChatbotPage() {
   }, [messages, enqueueing]);
 
   useEffect(() => {
-    const succeededJob = jobs.find(
+    const terminalJob = jobs.find(
       (job) =>
-        job.state === "succeeded" &&
+        (job.state === "succeeded" || job.state === "failed" || job.state === "cancelled") &&
         job.conversation_id === activeConversationId &&
-        !handledSuccessesRef.current.has(job.id),
+        !handledTerminalsRef.current.has(job.id),
     );
-    if (!succeededJob) return;
+    if (!terminalJob) return;
 
-    handledSuccessesRef.current.add(succeededJob.id);
-    void reloadSucceededConversation(succeededJob)
+    handledTerminalsRef.current.add(terminalJob.id);
+    void reloadTerminalConversation(terminalJob)
       .then((conversation) => {
         setMessages([welcomeMessage, ...toConversationMessages(conversation)]);
         setConversations((previous) => [
           toSummary(conversation),
           ...previous.filter((item) => item.id !== conversation.id),
         ]);
-        removeJob(succeededJob.id);
+        if (terminalJob.state !== "failed") removeJob(terminalJob.id);
       })
       .catch((caught: unknown) => {
-        handledSuccessesRef.current.delete(succeededJob.id);
+        handledTerminalsRef.current.delete(terminalJob.id);
         setError(caught instanceof Error ? caught.message : "La réponse n’a pas pu être relue.");
       });
   }, [activeConversationId, jobs, removeJob]);

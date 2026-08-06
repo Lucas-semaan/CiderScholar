@@ -120,6 +120,7 @@ class IngestionPipeline:
         pdf_path: str | Path,
         *,
         catalog_metadata: PdfCatalogMetadata | None = None,
+        precomputed_sha256: str | None = None,
     ) -> IngestionReport:
         started = datetime.now(UTC)
         path = Path(pdf_path).resolve()
@@ -132,9 +133,14 @@ class IngestionPipeline:
                 raise FileNotFoundError(f"PDF not found: {path}")
             if path.suffix.lower() != ".pdf":
                 raise ValueError("ingestion accepts PDF files only")
+            if precomputed_sha256 is not None and (
+                len(precomputed_sha256) != 64
+                or any(character not in "0123456789abcdef" for character in precomputed_sha256)
+            ):
+                raise ValueError("precomputed SHA-256 must be lowercase hexadecimal")
 
             self.memory.check("PDF ingestion")
-            sha256 = sha256_file(path)
+            sha256 = precomputed_sha256 or sha256_file(path)
             existing = self.database.article_by_sha256(sha256)
             if existing is not None and self.database.chunk_count(existing["id"]) > 0:
                 return self._report(

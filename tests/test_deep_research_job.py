@@ -185,7 +185,18 @@ def test_deep_research_cancellation_stops_at_the_next_checkpoint(tmp_path) -> No
     }
     persisted = repository.database.chat_conversation(str(payload.conversation_id))
     assert persisted is not None
-    assert [message["role"] for message in persisted["messages"]] == ["user"]
+    assert [message["role"] for message in persisted["messages"]] == [
+        "user",
+        "assistant",
+    ]
+    terminal_notice = persisted["messages"][-1]["response"]
+    assert terminal_notice == {
+        "kind": "job_terminal_notice",
+        "job_id": str(enqueued.job.id),
+        "state": "cancelled",
+        "error_code": None,
+        "diagnostic_code": None,
+    }
 
 
 class ScopedLexicalBackend:
@@ -230,13 +241,13 @@ class ScopedVectorBackend:
             results=[
                 VectorSearchResult(
                     chunk_id=7,
-                    article_id="private-article",
+                    article_id="common-vector-article",
                     score=0.8,
                     section="Discussion",
                     page_start=4,
                     page_end=5,
-                    text="private full-text content",
-                    scope=CorpusScope.PRIVATE,
+                    text="common vector full-text content",
+                    scope=CorpusScope.COMMON,
                 )
             ],
             duration_seconds_by_scope={scope: 0.01 for scope in scopes},
@@ -294,7 +305,7 @@ def test_production_worker_runs_scoped_search_through_durable_stages(settings) -
         "messages"
     ][-1]["response"]
     assert cached_response["details"]["cache"]["hit"] is True
-    expected_scopes = (CorpusScope.COMMON, CorpusScope.PRIVATE)
+    expected_scopes = (CorpusScope.COMMON,)
     assert lexical.requested_scopes
     assert vector.requested_scopes
     assert set(lexical.requested_scopes) == {expected_scopes}
@@ -302,7 +313,7 @@ def test_production_worker_runs_scoped_search_through_durable_stages(settings) -
     snapshot = operations.retrieval.load(payload)
     assert {(hit.scope, hit.article_id) for hit in snapshot.hits} == {
         (CorpusScope.COMMON, "common-article"),
-        (CorpusScope.PRIVATE, "private-article"),
+        (CorpusScope.COMMON, "common-vector-article"),
     }
     assert snapshot.contextual_summary_attempted is True
     assert len(snapshot.contextual_summaries) == 2

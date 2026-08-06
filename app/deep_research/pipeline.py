@@ -64,7 +64,7 @@ class SQLiteFragmentTextLoader:
 
     def load(self, hits: list[DeepResearchFragmentHit]) -> dict[FragmentIdentity, str]:
         loaded: dict[FragmentIdentity, str] = {}
-        for scope in (CorpusScope.COMMON, CorpusScope.PRIVATE):
+        for scope in (CorpusScope.COMMON,):
             scoped_hits = [hit for hit in hits if hit.scope is scope]
             if not scoped_hits:
                 continue
@@ -159,8 +159,8 @@ class DeepResearchPreparationOperations:
         snapshot = self.retrieval.load(payload, iteration=iteration)
         if snapshot.contextual_evidence is not None:
             return
-        if snapshot.scopes != [CorpusScope.COMMON, CorpusScope.PRIVATE]:
-            raise RuntimeError("deep-research snapshot has incomplete corpus scopes")
+        if snapshot.scopes != [CorpusScope.COMMON]:
+            raise RuntimeError("deep-research snapshot has an invalid corpus scope")
         fragments = [
             SummarisableFragment.from_hit_and_text(hit, text)
             for hit, text in self.retrieval.retained_fragments(
@@ -295,7 +295,7 @@ class DeepResearchPreparationOperations:
             epistemic,
         )
         self.abstention.decide(payload, loop, admission)
-        allowed_scopes = {CorpusScope.COMMON, CorpusScope.PRIVATE}
+        allowed_scopes = {CorpusScope.COMMON}
         for record in loop.iterations:
             snapshot = self.retrieval.load(payload, iteration=record.index)
             self.retrieval.contextual_evidence(payload, iteration=record.index)

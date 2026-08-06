@@ -13,6 +13,7 @@ from app.ingestion.embeddings import (
     model_storage_name,
     prepare_prefixed_texts,
 )
+from app.memory import MemoryLimitError
 
 
 class FakeEmbeddingBackend:
@@ -43,6 +44,12 @@ class RecordingSink:
         if self.fail:
             raise RuntimeError("synthetic vector sink interruption")
         self.batches.append(batch)
+
+
+class MemoryGuardThatStopsAfterPersistence:
+    def check(self, operation: str) -> None:
+        if operation == "embedding persistence":
+            raise MemoryLimitError("synthetic low-memory condition")
 
 
 def _seed_chunks(database: Database, count: int = 5) -> None:
@@ -127,6 +134,25 @@ def test_failed_sink_marks_only_current_batch_failed(settings) -> None:
     assert report.chunks_failed == 2
     assert report.error_type == "RuntimeError"
     assert database.embedding_status_counts() == {"failed": 2, "pending": 3}
+
+
+def test_memory_limit_after_upsert_keeps_the_durable_batch_indexed(settings) -> None:
+    settings.embeddings.batch_size = 2
+    database = Database(settings.paths.database_path)
+    database.initialize()
+    _seed_chunks(database, count=3)
+    sink = RecordingSink()
+    processor = EmbeddingBatchProcessor(settings, database, FakeEmbeddingBackend())
+    processor.memory = MemoryGuardThatStopsAfterPersistence()  # type: ignore[assignment]
+
+    report = processor.run(sink)
+
+    assert report.chunks_indexed == 2
+    assert report.chunks_failed == 0
+    assert report.batches_completed == 1
+    assert report.error_type == "MemoryLimitError"
+    assert database.embedding_status_counts() == {"indexed": 2, "pending": 1}
+    assert [len(batch.chunk_ids) for batch in sink.batches] == [2]
 
 
 def test_interrupted_processing_state_is_recovered(settings) -> None:

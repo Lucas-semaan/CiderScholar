@@ -24,18 +24,9 @@ const corpusTabs: Array<{ id: CorpusTab; label: string }> = [
   { id: "activity", label: "Journal d’ingestion" },
 ];
 
-export function CorpusPage({
-  embedded = false,
-  scope = "common",
-}: {
-  embedded?: boolean;
-  scope?: "common" | "private";
-}) {
+export function CorpusPage({ embedded = false }: { embedded?: boolean }) {
   const [searchParams, setSearchParams] = useSearchParams();
-  const corpusApi = scope === "private" ? api.privateCorpus : api.corpus;
-  const { data, error, loading, refresh } = useRemoteData(
-    useCallback(() => corpusApi.list(), [corpusApi]),
-  );
+  const { data, error, loading, refresh } = useRemoteData(useCallback(() => api.corpus.list(), []));
   const [files, setFiles] = useState<File[]>([]);
   const [folder, setFolder] = useState("");
   const [recursive, setRecursive] = useState(true);
@@ -77,7 +68,7 @@ export function CorpusPage({
         .then((finalJob) => {
           setQueuedJob(finalJob);
           refresh();
-          if (finalJob.state === "succeeded") setNotice("Ingestion privée terminée.");
+          if (finalJob.state === "succeeded") setNotice("Ingestion terminée.");
         })
         .catch((caught: unknown) =>
           setActionError(
@@ -91,7 +82,7 @@ export function CorpusPage({
     void runAction(
       "upload",
       async () => {
-        const response = await corpusApi.upload(files);
+        const response = await api.corpus.upload(files);
         setReports(response.reports ?? []);
         if (response.job) trackQueuedJob(response.job);
         setFiles([]);
@@ -102,7 +93,7 @@ export function CorpusPage({
     void runAction(
       "folder",
       async () => {
-        const response = await corpusApi.folder(folder, recursive);
+        const response = await api.corpus.folder(folder, recursive);
         setReports(response.reports ?? []);
         if (response.job) trackQueuedJob(response.job);
       },
@@ -112,7 +103,7 @@ export function CorpusPage({
   if (loading && !data) return <LoadingState label="Lecture du corpus PDF…" />;
   if (error && !data) return <ErrorState message={error} retry={refresh} />;
   if (!data) return null;
-  const destinations = corpusDestinations(scope);
+  const destinations = corpusDestinations();
   return (
     <div className="space-y-8">
       <PageHeader
@@ -122,13 +113,9 @@ export function CorpusPage({
             Ajouter des documents
           </Button>
         }
-        description={
-          scope === "private"
-            ? "Ces PDF, leurs fragments et leur index restent sur ce poste et ne sont jamais partagés automatiquement."
-            : "Gérez les PDF du corpus commun, leurs fragments et leur index vectoriel local."
-        }
-        eyebrow={scope === "private" ? "Espace local non partagé" : "Base documentaire"}
-        title={scope === "private" ? "Documents privés" : embedded ? "Corpus commun" : "Corpus PDF"}
+        description="Ajoutez des PDF à la base documentaire et contrôlez l’extraction de leur texte ainsi que leur indexation locale."
+        eyebrow="Base documentaire"
+        title={embedded ? "Administration documentaire" : "Base documentaire"}
       />
       <section className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
         <MetricCard
@@ -214,14 +201,14 @@ export function CorpusPage({
           onIndex={() =>
             void runAction(
               "index",
-              () => corpusApi.index(retryFailed),
+              () => api.corpus.index(retryFailed),
               "Index vectoriel actualisé.",
             )
           }
           onReindex={(article) =>
             void runAction(
               `reindex-${article.id}`,
-              () => corpusApi.reindex(article.id),
+              () => api.corpus.reindex(article.id),
               "Article réindexé.",
             )
           }
@@ -255,7 +242,7 @@ export function CorpusPage({
           if (!deleteTarget) return;
           void runAction(
             "delete",
-            () => corpusApi.remove(deleteTarget.id),
+            () => api.corpus.remove(deleteTarget.id),
             "Métadonnées et vecteurs supprimés ; le PDF source est conservé.",
           ).then(() => setDeleteTarget(null));
         }}

@@ -8,7 +8,7 @@ Statut : accepté pour le pilote.
 - l’application écoute uniquement sur `127.0.0.1` ;
 - aucun compte ou écran de connexion CiderScholar n’est requis ;
 - le compte Windows et le profil local constituent la frontière de confidentialité ;
-- les conversations, travaux, documents privés et clé ARGO restent sur le poste utilisateur.
+- les conversations, travaux et clé ARGO restent sur le poste utilisateur.
 
 ## Clé ARGO
 
@@ -26,14 +26,6 @@ Statut : accepté pour le pilote.
 - chaque poste installe la même version validée du corpus commun ;
 - une mise à jour est téléchargée, vérifiée puis activée atomiquement au redémarrage ;
 - le corpus commun est traité comme non modifiable sur les postes utilisateurs.
-
-## Documents privés
-
-- chaque utilisateur peut importer des documents personnels ;
-- ces documents ne sont jamais ajoutés automatiquement au corpus commun ;
-- ils utilisent un stockage et un index séparés ;
-- la recherche locale peut interroger le corpus commun et l’espace privé, en indiquant leur origine ;
-- une mise à jour du corpus commun ne remplace ni ne supprime les documents privés.
 
 ## Suggestions
 

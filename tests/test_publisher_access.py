@@ -112,7 +112,7 @@ def test_cookie_bridge_rejects_redirect_outside_allow_list() -> None:
 
 
 def test_publisher_assets_are_linked_to_bibliographic_records(settings) -> None:
-    database = Database(settings.paths.database_path)
+    database = Database(settings.paths.common_database_path)
     database.initialize()
     _insert_record(database)
     records, missing = database.publisher_records_for_targets(["10.1000/TEST"])
@@ -171,7 +171,7 @@ def test_publisher_api_never_returns_ldap_password(settings, monkeypatch) -> Non
 
 def test_authorized_collection_endpoint_is_explicit_and_bounded(settings, monkeypatch) -> None:
     _enable(settings)
-    database = Database(settings.paths.database_path)
+    database = Database(settings.paths.common_database_path)
     database.initialize()
     _insert_record(database)
     monkeypatch.setattr(PublisherCredentialStore, "configured", lambda _self: True)

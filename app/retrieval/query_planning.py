@@ -56,7 +56,7 @@ class ResearchAxis(BaseModel):
     question: str = Field(min_length=2, max_length=800)
     terms_fr: list[ScientificTerm] = Field(min_length=1, max_length=10)
     terms_en: list[ScientificTerm] = Field(min_length=1, max_length=10)
-    search_queries: list[SearchQuery] = Field(min_length=1, max_length=2)
+    search_queries: list[SearchQuery] = Field(min_length=1, max_length=4)
 
 
 class ResearchQueryPlan(BaseModel):
@@ -65,6 +65,9 @@ class ResearchQueryPlan(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     interpreted_question: str = Field(min_length=2, max_length=2000)
+    concept_definition: str | None = Field(default=None, min_length=2, max_length=1000)
+    ambiguities: list[ScientificTerm] = Field(default_factory=list, max_length=10)
+    excluded_concepts: list[ScientificTerm] = Field(default_factory=list, max_length=24)
     requires_faceted_answer: bool
     matrix_primary: list[ScientificTerm] = Field(default_factory=list, max_length=4)
     matrix_close: list[ScientificTerm] = Field(default_factory=list, max_length=8)
@@ -72,7 +75,7 @@ class ResearchQueryPlan(BaseModel):
     process_terms_fr: list[ScientificTerm] = Field(default_factory=list, max_length=10)
     process_terms_en: list[ScientificTerm] = Field(default_factory=list, max_length=10)
     axes: list[ResearchAxis] = Field(min_length=1, max_length=4)
-    retrieval_queries: list[SearchQuery] = Field(min_length=1, max_length=6)
+    retrieval_queries: list[SearchQuery] = Field(min_length=1, max_length=8)
 
     @model_validator(mode="after")
     def validate_decomposition(self) -> ResearchQueryPlan:
@@ -90,7 +93,7 @@ class ResearchQueryPlan(BaseModel):
                 ]
                 if query.strip()
             )
-        )[:6]
+        )[:8]
         return self
 
     def scientific_intent(self, original_question: str) -> ScientificIntent:
@@ -115,6 +118,7 @@ class ResearchQueryPlan(BaseModel):
             matrix_distant=distant,
             process_terms_fr=merged(self.process_terms_fr, fallback.process_terms_fr)[:24],
             process_terms_en=merged(self.process_terms_en, fallback.process_terms_en)[:24],
+            excluded_terms=merged(self.excluded_concepts, fallback.excluded_terms)[:24],
             facets=[
                 ScientificFacet(
                     key=axis.key,
@@ -174,6 +178,12 @@ class ArgoQueryPlanningService:
                 "role": "system",
                 "content": (
                     "Tu es le planificateur de recherche d'un moteur RAG scientifique. "
+                    "Avant toute recherche, reformule et désambiguïse le besoin dans "
+                    "interpreted_question, concept_definition et ambiguities. Distingue le "
+                    "procédé exact des procédés ressemblants et des faux amis. Fournis plusieurs "
+                    "requêtes spécialisées en français et en anglais lorsque pertinent, et liste "
+                    "dans excluded_concepts les matrices, procédés ou concepts à exclure ou "
+                    "pénaliser. "
                     "Tu ne réponds jamais à la question scientifique. Tu dois comprendre "
                     "l'intention réelle de l'utilisateur, expliciter la matrice étudiée, le "
                     "processus ou mécanisme demandé et les résultats à documenter, puis produire "
@@ -187,9 +197,9 @@ class ArgoQueryPlanningService:
                     "si utile, dans la langue de l'utilisateur. Recherche d'abord la matrice et "
                     "le traitement exacts, puis les matrices chimiquement proches avec une "
                     "étiquette explicite, et seulement ensuite les matrices distantes. Une "
-                    "correspondance sur le processus seul ne suffit pas. Pour une eau-de-vie "
-                    "nommée, emploie aussi ses synonymes scientifiques proches (par exemple "
-                    "Calvados, apple brandy, apple spirit, cider brandy) avant le vin. Sépare "
+                    "correspondance sur le processus seul ne suffit pas. Pour toute entité "
+                    "nommée, emploie ses synonymes scientifiques et traductions contrôlées avant "
+                    "d'élargir vers une matrice analogue ou distante. Sépare "
                     "clairement occurrence naturelle et inoculation expérimentale. N'inclus "
                     "aucune conclusion, citation ou fait supposé. Reste très concis : chaque "
                     "terme contient au plus huit mots, chaque requête au plus trente mots et "
@@ -268,17 +278,20 @@ def deterministic_query_plan(question: str) -> QueryPlanningResult:
             key=facet.key,
             label=facet.label,
             question=f"{cleaned} — {facet.label}"[:800],
-            terms_fr=facet.terms_fr[:10],
-            terms_en=facet.terms_en[:10],
+            terms_fr=[term[:100] for term in facet.terms_fr[:10]],
+            terms_en=[term[:100] for term in facet.terms_en[:10]],
             search_queries=[
                 query
                 for facet_key, query, _tier in intent_query_variants(intent)
                 if facet_key in {facet.key, "overall"}
-            ][:2]
+            ][:4]
             or [cleaned],
         )
         for facet in facets[:4]
     ]
+    for axis in axes:
+        if len(axis.search_queries) == 1:
+            axis.search_queries.append(f"{axis.search_queries[0]} scientific literature"[:600])
     queries = list(
         dict.fromkeys(
             [
@@ -296,6 +309,7 @@ def deterministic_query_plan(question: str) -> QueryPlanningResult:
     return QueryPlanningResult(
         plan=ResearchQueryPlan(
             interpreted_question=cleaned,
+            excluded_concepts=intent.excluded_terms[:24],
             requires_faceted_answer=len(axes) > 1,
             matrix_primary=intent.matrix_primary[:4],
             matrix_close=intent.matrix_close[:8],

@@ -9,7 +9,21 @@ from app.ingestion.pdf_extractor import (
     ExtractedDocument,
     PyMuPdfExtractor,
     ScientificDocumentElement,
+    sorted_page_text,
 )
+
+
+def test_sorted_page_text_uses_sorted_blocks_without_line_sort() -> None:
+    class FakePage:
+        def get_text(self, kind: str, *, sort: bool):
+            assert kind == "blocks"
+            assert sort is True
+            return [
+                (0, 0, 10, 10, "First block\n"),
+                (0, 20, 10, 30, "Second block\x00"),
+            ]
+
+    assert sorted_page_text(FakePage()) == "First block\n\nSecond block"
 
 
 def test_extracts_text_with_one_based_page_numbers(tmp_path: Path) -> None:

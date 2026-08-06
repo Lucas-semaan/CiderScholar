@@ -194,7 +194,7 @@ def main(argv: list[str] | None = None) -> int:
         "fulltext_index": fulltext_index,
         "bibliography_index": bibliography_index,
         "bibliographic_statistics": store.statistics(),
-        "local_pdf_articles": len(database.list_articles(limit=5000)),
+        "local_pdf_articles": len(database.list_articles()),
     }
     report_path = _write_report(settings.paths.exports_dir, report)
     if args.json:

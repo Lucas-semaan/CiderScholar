@@ -1,3 +1,37 @@
+# CiderScholar 0.2.7
+
+- Rend les campagnes d'évaluation P0/P1/P2 séquentielles et auditables : une conversation
+  immuable par cellule, un seul job actif et une identité question/profil persistée.
+- Garantit une sortie visible pour chaque question : réponse validée, repli extractif,
+  diagnostic explicite ou notice terminale en cas d'échec et d'annulation.
+- Supprime de la réponse visible du chatbot le bloc redondant `Définition retenue` qui
+  reformulait la question avant la synthèse.
+- Décompose la progression réelle d'une réponse en planification, recherche, enrichissement,
+  classement, sélection des preuves, couverture, figures, génération finale, validation et
+  enregistrement. Le premier appel ARGO n'est plus affiché comme une génération finale.
+- Intègre les corrections et consolidations applicatives présentes dans le workspace depuis la
+  0.2.6, avec migration SQLite 29 rétrocompatible et conservation des données utilisateur.
+
+# CiderScholar 0.2.6
+
+- Ajoute un diagnostic local des travaux durables : état et fraîcheur du worker, étapes et durée des
+  travaux actifs, ainsi que la mémoire de l’API, du worker et du système. Il ne révèle ni contenu des
+  questions, ni réponses, ni clés, ni identifiants de processus.
+- La vue documentaire unifiée `Corpus` reste volontairement différée jusqu’à la validation d’une
+  réponse chatbot traçable, conformément à la roadmap.
+
+# CiderScholar 0.2.5
+
+- Une interruption de sécurité après un upsert Qdrant conserve désormais le lot déjà durablement
+  écrit comme `indexed`, au lieu de le marquer à tort `failed` dans SQLite.
+
+# CiderScholar 0.2.4
+
+- Le runtime Windows suit les migrations de schéma 27 et 28 du corpus commun, afin qu'une
+  installation mise à jour puisse rouvrir la base sans perdre les conversations ni les preuves.
+- Les acquisitions de texte intégral natives sont persistées dans le corpus commun avant leur
+  éventuelle indexation, avec leur provenance et leur statut de téléchargement.
+
 # CiderScholar 0.2.3
 
 - La sélection des preuves couvre séparément les axes scientifiques, filtre leur pertinence

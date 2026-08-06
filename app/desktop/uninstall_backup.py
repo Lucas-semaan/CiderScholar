@@ -1,4 +1,4 @@
-"""Verified uninstall backup limited to conversations, jobs and private corpus."""
+"""Verified uninstall backup limited to conversations, jobs and the corpus."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.config import Settings
-from app.services.private_backup import create_private_backup
+from app.services.corpus_backup import create_corpus_backup
 
 
 class UninstallBackupManifest(BaseModel):
@@ -47,7 +47,7 @@ def _database_snapshot(source: Path, destination: Path) -> None:
 
 
 def create_uninstall_backup(settings: Settings, destination: Path) -> Path:
-    """Atomically archive durable queue/chat SQLite plus the hashed private backup."""
+    """Atomically archive durable queue/chat SQLite plus the hashed corpus backup."""
 
     target = destination.resolve()
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -56,18 +56,18 @@ def create_uninstall_backup(settings: Settings, destination: Path) -> Path:
     with tempfile.TemporaryDirectory(dir=settings.paths.cache_dir) as temporary:
         root = Path(temporary)
         database = root / "conversations-and-jobs.sqlite3"
-        private = root / "private-corpus.zip"
+        corpus = root / "corpus.zip"
         _database_snapshot(settings.paths.database_path, database)
-        create_private_backup(settings, private)
+        create_corpus_backup(settings, corpus)
         manifest = UninstallBackupManifest(
             created_at=datetime.now(UTC),
-            files={database.name: _sha256(database), private.name: _sha256(private)},
+            files={database.name: _sha256(database), corpus.name: _sha256(corpus)},
         )
         try:
             with zipfile.ZipFile(temporary_archive, "w", zipfile.ZIP_DEFLATED) as archive:
                 archive.writestr("manifest.json", manifest.model_dump_json(indent=2))
                 archive.write(database, database.name)
-                archive.write(private, private.name)
+                archive.write(corpus, corpus.name)
             temporary_archive.replace(target)
         finally:
             temporary_archive.unlink(missing_ok=True)

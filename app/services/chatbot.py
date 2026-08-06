@@ -16,7 +16,6 @@ from app.updates.vector_index import BibliographicHybridResult
 TITLE_TOKEN = re.compile(r"[^a-z0-9]+")
 EXTERNAL_PREFIX = "external:"
 COMMON_PREFIX = "common:"
-PRIVATE_PREFIX = "private:"
 ChatInteractionMode = Literal["auto", "research", "conversation"]
 ResolvedChatInteractionMode = Literal["research", "conversation"]
 
@@ -295,8 +294,6 @@ def chatbot_sources_from_evidence(
 def _record_scope(record_id: str) -> CorpusScope | None:
     if record_id.startswith(EXTERNAL_PREFIX):
         return None
-    if record_id.startswith(PRIVATE_PREFIX):
-        return CorpusScope.PRIVATE
     return CorpusScope.COMMON
 
 

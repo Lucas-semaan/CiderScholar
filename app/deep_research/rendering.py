@@ -77,8 +77,7 @@ class DeepResearchRenderedAnswer(BaseModel):
 class SQLiteDeepResearchRenderer:
     def __init__(self, settings: Settings, checkpoint_root: Path) -> None:
         self.databases = {
-            scope: Database(corpus_paths(settings, scope).database_path)
-            for scope in (CorpusScope.COMMON, CorpusScope.PRIVATE)
+            CorpusScope.COMMON: Database(corpus_paths(settings, CorpusScope.COMMON).database_path)
         }
         self.checkpoint_root = checkpoint_root
 

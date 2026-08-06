@@ -1,15 +1,17 @@
 from __future__ import annotations
 
 from io import BytesIO
+from unittest.mock import Mock, patch
 
 import pytest
 from pydantic import ValidationError
 
-from app.corpora import CorpusScope
+from app.ingestion.pipeline import IngestionReport
 from app.models.synthesis import BibliographyEntry
 from app.services.workflows import (
     apply_runtime_overrides,
     bibliography_to_bibtex,
+    ingest_paths,
     pdf_paths,
     save_uploaded_pdf,
 )
@@ -37,13 +39,83 @@ def test_pdf_folder_discovery_is_explicit_and_recursive(settings) -> None:
     nested.mkdir(parents=True)
     (root / "one.pdf").write_bytes(b"one")
     (nested / "two.pdf").write_bytes(b"two")
+    (nested / "three.PDF").write_bytes(b"three")
     (nested / "ignored.txt").write_text("ignored", encoding="utf-8")
 
     assert [path.name for path in pdf_paths(root, recursive=False)] == ["one.pdf"]
     assert [path.name for path in pdf_paths(root, recursive=True)] == [
+        "three.PDF",
         "two.pdf",
         "one.pdf",
     ]
+
+
+def test_ingest_paths_runs_explicit_ocr_fallback(settings, tmp_path) -> None:
+    pdf = tmp_path / "scan.pdf"
+    pdf.write_bytes(b"synthetic scan")
+    native_pipeline = Mock()
+    native_pipeline.ingest_file.return_value = IngestionReport(
+        pdf_path=str(pdf),
+        status="ocr_required",
+        duration_seconds=0.0,
+    )
+    ocr_pipeline = Mock()
+    ocr_pipeline.ingest_file.return_value = IngestionReport(
+        pdf_path=str(pdf),
+        status="chunks_ready",
+        duration_seconds=0.0,
+    )
+
+    with patch(
+        "app.services.workflows.IngestionPipeline",
+        side_effect=[native_pipeline, ocr_pipeline],
+    ) as pipeline_factory:
+        reports = ingest_paths(
+            settings,
+            Mock(),
+            [pdf],
+            ocr_extractor=Mock(),
+        )
+
+    assert reports[0].status == "chunks_ready"
+    assert pipeline_factory.call_count == 2
+    ocr_pipeline.ingest_file.assert_called_once_with(pdf)
+
+
+def test_ingest_paths_waits_and_retries_memory_pressure(settings, tmp_path) -> None:
+    pdf = tmp_path / "large.pdf"
+    pdf.write_bytes(b"synthetic PDF")
+    pipeline = Mock()
+    pipeline.ingest_file.side_effect = [
+        IngestionReport(
+            pdf_path=str(pdf),
+            status="failed",
+            error_type="MemoryLimitError",
+            error_message="temporary pressure",
+            duration_seconds=0.0,
+        ),
+        IngestionReport(
+            pdf_path=str(pdf),
+            status="chunks_ready",
+            duration_seconds=0.0,
+        ),
+    ]
+
+    with (
+        patch("app.services.workflows.IngestionPipeline", return_value=pipeline),
+        patch("app.services.workflows.sleep") as wait,
+    ):
+        reports = ingest_paths(
+            settings,
+            Mock(),
+            [pdf],
+            memory_retry_attempts=2,
+            memory_retry_delay_seconds=0.01,
+        )
+
+    assert reports[0].status == "chunks_ready"
+    wait.assert_called_once_with(0.01)
+    assert pipeline.ingest_file.call_count == 2
 
 
 def test_runtime_overrides_are_validated_without_mutating_base(settings) -> None:
@@ -90,13 +162,12 @@ def test_bibtex_uses_only_structured_bibliography_metadata() -> None:
     assert "note = {Corpus commun}" in rendered
 
 
-def test_bibtex_never_exports_a_private_source_as_common() -> None:
+def test_bibtex_exports_every_source_as_the_common_corpus() -> None:
     rendered = bibliography_to_bibtex(
         [
             BibliographyEntry(
-                article_id="private-1",
-                scope=CorpusScope.PRIVATE,
-                title="Private study",
+                article_id="article-2",
+                title="Shared study",
                 authors=[],
                 journal=None,
                 publication_year=None,
@@ -105,6 +176,5 @@ def test_bibtex_never_exports_a_private_source_as_common() -> None:
         ]
     )
 
-    assert "ciderscholar_scope = {private}" in rendered
-    assert "note = {Document privé}" in rendered
-    assert "Corpus commun" not in rendered
+    assert "ciderscholar_scope = {common}" in rendered
+    assert "note = {Corpus commun}" in rendered

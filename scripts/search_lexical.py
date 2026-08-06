@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 
 from app.config import load_settings
+from app.corpora import CorpusScope, settings_for_corpus
 from app.database.sqlite import Database
 from app.retrieval.lexical_search import LexicalSearchService
 
@@ -28,7 +29,7 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
-    settings = load_settings(args.config)
+    settings = settings_for_corpus(load_settings(args.config), CorpusScope.COMMON)
     database = Database(settings.paths.database_path)
     database.initialize()
     response = LexicalSearchService(settings, database).search(

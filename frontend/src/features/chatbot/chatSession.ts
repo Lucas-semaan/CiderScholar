@@ -1,10 +1,11 @@
-import type { ChatbotResponse } from "@/types/api";
+import type { ChatbotResponse, ChatJobTerminalNotice } from "@/types/api";
 
 export interface ChatMessage {
   id: string;
   role: "user" | "assistant";
   content: string;
   response?: ChatbotResponse;
+  terminalNotice?: ChatJobTerminalNotice;
   responseTimeMilliseconds?: number;
   helpful?: boolean | null;
 }

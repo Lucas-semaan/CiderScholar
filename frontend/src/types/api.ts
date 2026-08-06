@@ -95,6 +95,39 @@ export interface ReadinessReport {
   };
 }
 
+export type DiagnosticWorkerState = "healthy" | "stale";
+
+export interface DiagnosticActiveJob {
+  id: string;
+  type: JobType;
+  state: JobState;
+  step: JobStep;
+  created_at: string;
+  heartbeat_at: string | null;
+}
+
+export interface DiagnosticWarning {
+  code: string;
+  severity: "info" | "warning";
+  message: string;
+}
+
+export interface SystemDiagnostics {
+  checked_at: string;
+  active_jobs: DiagnosticActiveJob[];
+  worker: {
+    state: DiagnosticWorkerState;
+    heartbeat_at: string | null;
+    heartbeat_age_seconds: number | null;
+  };
+  process: {
+    api_rss_bytes: number | null;
+    worker_rss_bytes: number | null;
+    system_available_bytes: number | null;
+  };
+  warnings: DiagnosticWarning[];
+}
+
 export interface MaintenanceSchedule {
   administrator: true;
   due: boolean;
@@ -181,10 +214,7 @@ export interface PublisherAccessRun {
 }
 
 export interface Overview {
-  corpus: {
-    common: CorpusScopeStatistics;
-    private: CorpusScopeStatistics;
-  };
+  corpus: CorpusStatistics;
   bibliography: LibraryStatistics;
   activity: {
     queries: number;
@@ -192,7 +222,7 @@ export interface Overview {
   runtime: RuntimeSettings;
 }
 
-export interface CorpusScopeStatistics {
+export interface CorpusStatistics {
   articles: number;
   chunks: number;
   indexed_chunks: number;
@@ -231,7 +261,6 @@ export interface IngestionJob {
 }
 
 export interface CorpusResponse {
-  scope: "common" | "private";
   articles: CorpusArticle[];
   jobs: IngestionJob[];
   summary: {
@@ -257,14 +286,10 @@ export interface IngestionReport {
 }
 
 export interface LibraryStatistics {
-  records: number;
-  abstracts: number;
-  indexed: number;
-  stored_records: number;
-  stored_abstracts: number;
-  review: number;
-  quarantined: number;
-  latest_run: Record<string, unknown> | null;
+  documents: number;
+  full_texts: number;
+  abstract_only: number;
+  searchable: number;
 }
 
 export interface LibrarySummary {
@@ -274,6 +299,7 @@ export interface LibrarySummary {
 
 export interface LibraryRecord {
   id: string;
+  library_id: string;
   canonical_key: string;
   doi: string | null;
   title: string;
@@ -291,6 +317,13 @@ export interface LibraryRecord {
   sources: string | null;
   first_seen_at: string | null;
   last_seen_at: string | null;
+  document_type: "full_text" | "abstract_only";
+  article_id: string | null;
+  pdf_available: boolean;
+  pdf_path: string | null;
+  validation_status: string | null;
+  chunk_count: number;
+  indexed_chunk_count: number;
 }
 
 export interface LibraryRecordsResponse {
@@ -309,16 +342,21 @@ export interface LibraryReviewDecisionResponse {
 }
 
 export type JobType =
-  "chat_answer" | "weekly_maintenance" | "deep_research" | "long_synthesis" | "private_ingestion";
+  "chat_answer" | "weekly_maintenance" | "deep_research" | "long_synthesis" | "corpus_ingestion";
 
 export type JobState =
   "queued" | "running" | "succeeded" | "failed" | "cancel_requested" | "cancelled";
 
 export type JobStep =
   | "waiting"
+  | "planning"
   | "search"
-  | "reranking"
   | "enrichment"
+  | "reranking"
+  | "evidence_selection"
+  | "coverage"
+  | "figure_analysis"
+  | "generation"
   | "argo"
   | "validation"
   | "persistence"
@@ -370,7 +408,6 @@ export interface ChatbotSource {
   record_id: string;
   origin: "local_rag" | "external_api";
   evidence_level: "abstract" | "full_text";
-  scope: "common" | "private" | null;
   article_id: string | null;
   chunk_ids: number[];
   page_ranges: string[];
@@ -394,6 +431,13 @@ export interface ChatbotFacetDraft {
   source_record_ids: string[];
 }
 
+export interface ChatbotEvaluationTrace {
+  run_id: string;
+  question_id: string;
+  profile: "p0" | "p1" | "p2";
+  question_sha256: string;
+}
+
 export interface ChatbotResponse {
   message: string;
   retrieval_query: string;
@@ -407,6 +451,8 @@ export interface ChatbotResponse {
   prompt_tokens: number;
   completion_tokens: number;
   duration_seconds: number;
+  generation_status?: "generated" | "extractive_fallback" | "diagnostic_only";
+  diagnostic_code?: string | null;
   interaction_mode: "research" | "conversation";
   reused_previous_sources: boolean;
   facet_drafts?: ChatbotFacetDraft[];
@@ -414,7 +460,18 @@ export interface ChatbotResponse {
   figure_analysis_count?: number;
   figure_analysis_duration_seconds?: number;
   figure_analysis_model?: string | null;
+  evaluation?: ChatbotEvaluationTrace | null;
 }
+
+export interface ChatJobTerminalNotice {
+  kind: "job_terminal_notice";
+  job_id: string;
+  state: "failed" | "cancelled";
+  error_code: string | null;
+  diagnostic_code: string | null;
+}
+
+export type StoredChatResponse = ChatbotResponse | ChatJobTerminalNotice;
 
 export interface ChatConversationSummary {
   id: string;
@@ -431,7 +488,7 @@ export interface StoredChatMessage {
   id: string;
   role: "user" | "assistant";
   content: string;
-  response: ChatbotResponse | null;
+  response: StoredChatResponse | null;
   response_time_milliseconds: number | null;
   created_at: string;
   helpful: boolean | null;

@@ -280,7 +280,7 @@ class DeepResearchRetrievalStage:
         active_query = " ".join((query or payload.message).split())
         if len(active_query) < 2:
             raise ValueError("deep-research query is too short")
-        scopes = (CorpusScope.COMMON, CorpusScope.PRIVATE)
+        scopes = (CorpusScope.COMMON,)
         variants = build_bilingual_variants(active_query)
         candidates: dict[tuple[CorpusScope, str, int], _FusionCandidate] = {}
         raw_hit_count = 0
@@ -400,11 +400,9 @@ class DeepResearchRetrievalStage:
                     candidate.text,
                 )
             )
-        scope_priority = {CorpusScope.COMMON: 0, CorpusScope.PRIVATE: 1}
         fused.sort(
             key=lambda item: (
                 -item[0].rrf_score,
-                scope_priority[item[0].scope],
                 item[0].article_id,
                 item[0].chunk_id,
             )

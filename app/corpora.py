@@ -16,10 +16,9 @@ LOCAL_PROFILE_ENV = "CIDERSCHOLAR_LOCAL_PROFILE"
 
 
 class CorpusScope(StrEnum):
-    """Origin of persisted scientific material."""
+    """Single authoritative scientific corpus."""
 
     COMMON = "common"
-    PRIVATE = "private"
 
 
 class LocalProfile(StrEnum):
@@ -36,7 +35,7 @@ class CorpusMutationForbiddenError(PermissionError):
 def corpus_scope_label(scope: CorpusScope) -> str:
     """Return the stable French label used in citations and exports."""
 
-    return "Corpus commun" if scope is CorpusScope.COMMON else "Document privé"
+    return "Corpus commun"
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,7 +49,7 @@ class CorpusPaths:
 
 
 def authorize_corpus_mutation(scope: CorpusScope, profile: LocalProfile) -> None:
-    """Users own private material; only the local admin may mutate common data."""
+    """Only the local administrator may publish or replace the shared corpus."""
 
     if scope is CorpusScope.COMMON and profile is not LocalProfile.ADMIN:
         raise CorpusMutationForbiddenError(
@@ -70,25 +69,16 @@ def load_local_profile(environ: Mapping[str, str] | None = None) -> LocalProfile
 
 
 def corpus_paths(settings: Settings, scope: CorpusScope) -> CorpusPaths:
-    """Resolve one isolated corpus without consulting a web request."""
+    """Resolve the single authoritative corpus without consulting a web request."""
 
     paths = settings.paths
-    if scope is CorpusScope.COMMON:
-        return CorpusPaths(
-            scope=scope,
-            root=paths.common_dir,
-            pdf_dir=paths.common_pdf_dir,
-            extracted_dir=paths.common_extracted_dir,
-            database_path=paths.common_database_path,
-            qdrant_dir=paths.common_qdrant_dir,
-        )
     return CorpusPaths(
         scope=scope,
-        root=paths.private_dir,
-        pdf_dir=paths.private_pdf_dir,
-        extracted_dir=paths.private_extracted_dir,
-        database_path=paths.private_database_path,
-        qdrant_dir=paths.private_qdrant_dir,
+        root=paths.common_dir,
+        pdf_dir=paths.common_pdf_dir,
+        extracted_dir=paths.common_extracted_dir,
+        database_path=paths.common_database_path,
+        qdrant_dir=paths.common_qdrant_dir,
     )
 
 

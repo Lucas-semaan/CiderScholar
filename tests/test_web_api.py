@@ -4,6 +4,7 @@ from contextlib import closing
 
 from fastapi.testclient import TestClient
 
+from app.corpora import CorpusScope, settings_for_corpus
 from app.database.sqlite import Database
 from app.main import create_app
 from app.updates.doi_exclusions import DoiExclusionRegistry
@@ -15,7 +16,7 @@ REVIEW_REJECTED_ID = "22222222-2222-4222-8222-222222222222"
 
 
 def _insert_review_record(settings, record_id: str) -> Database:
-    database = Database(settings.paths.database_path)
+    database = Database(settings.paths.common_database_path)
     database.initialize()
     with database.transaction() as connection:
         connection.execute(
@@ -74,22 +75,12 @@ def test_web_overview_and_library_are_available_on_an_empty_database(settings) -
 
     assert overview.status_code == 200
     assert overview.json()["corpus"] == {
-        "common": {
-            "articles": 0,
-            "chunks": 0,
-            "indexed_chunks": 0,
-            "index_coverage": 0.0,
-            "failed_ingestions": 0,
-            "ocr_required": 0,
-        },
-        "private": {
-            "articles": 0,
-            "chunks": 0,
-            "indexed_chunks": 0,
-            "index_coverage": 0.0,
-            "failed_ingestions": 0,
-            "ocr_required": 0,
-        },
+        "articles": 0,
+        "chunks": 0,
+        "indexed_chunks": 0,
+        "index_coverage": 0.0,
+        "failed_ingestions": 0,
+        "ocr_required": 0,
     }
     assert corpus.status_code == 200
     assert corpus.json()["summary"]["articles"] == 0
@@ -97,40 +88,34 @@ def test_web_overview_and_library_are_available_on_an_empty_database(settings) -
     assert library.json() == {"records": [], "total": 0, "limit": 50, "offset": 0}
 
 
-def test_overview_keeps_common_and_private_statistics_separate(settings) -> None:
-    for scope, database_path, count in (
-        ("common", settings.paths.common_database_path, 1),
-        ("private", settings.paths.private_database_path, 2),
-    ):
-        database = Database(database_path)
-        database.initialize()
-        for index in range(count):
-            database.save_article_and_chunks(
+def test_overview_reports_the_single_corpus_statistics(settings) -> None:
+    database = Database(settings.paths.common_database_path)
+    database.initialize()
+    for index in range(2):
+        database.save_article_and_chunks(
+            {
+                "id": f"article-{index}",
+                "sha256": str(index + 1) * 64,
+                "title": f"article {index}",
+                "authors": [],
+                "pdf_path": str(settings.paths.common_pdf_dir / f"article-{index}.pdf"),
+            },
+            [
                 {
-                    "id": f"{scope}-{index}",
-                    "sha256": (str(index + 1) if scope == "common" else str(index + 5)) * 64,
-                    "title": f"{scope} article {index}",
-                    "authors": [],
-                    "pdf_path": str(settings.paths.data_dir / f"{scope}-{index}.pdf"),
-                },
-                [
-                    {
-                        "page_start": 1,
-                        "page_end": 1,
-                        "chunk_index": 0,
-                        "text": "Scientific evidence",
-                        "token_count": 2,
-                    }
-                ],
-            )
+                    "page_start": 1,
+                    "page_end": 1,
+                    "chunk_index": 0,
+                    "text": "Scientific evidence",
+                    "token_count": 2,
+                }
+            ],
+        )
 
     with TestClient(create_app(settings)) as client:
         corpus = client.get("/api/system/overview").json()["corpus"]
 
-    assert corpus["common"]["articles"] == 1
-    assert corpus["private"]["articles"] == 2
-    assert corpus["common"]["chunks"] == 1
-    assert corpus["private"]["chunks"] == 2
+    assert corpus["articles"] == 2
+    assert corpus["chunks"] == 2
 
 
 def test_review_notice_can_be_admitted_and_manual_decision_is_preserved(settings) -> None:
@@ -177,6 +162,7 @@ def test_review_notice_can_be_admitted_and_manual_decision_is_preserved(settings
 
 def test_review_rejection_removes_all_record_data(settings) -> None:
     database = _insert_review_record(settings, REVIEW_REJECTED_ID)
+    corpus_settings = settings_for_corpus(settings, CorpusScope.COMMON)
     with database.transaction() as connection:
         connection.execute(
             """
@@ -186,7 +172,7 @@ def test_review_rejection_removes_all_record_data(settings) -> None:
             """,
             (REVIEW_REJECTED_ID, f"doi:10.1000/{REVIEW_REJECTED_ID}"),
         )
-    with BibliographicVectorIndex(settings) as index:
+    with BibliographicVectorIndex(corpus_settings) as index:
         index.upsert(
             record_ids=[REVIEW_REJECTED_ID],
             vectors=[[0.1, 0.2]],
@@ -206,7 +192,7 @@ def test_review_rejection_removes_all_record_data(settings) -> None:
     assert DoiExclusionRegistry.for_database(database.path).is_excluded(
         f"10.1000/{REVIEW_REJECTED_ID}"
     )
-    with BibliographicVectorIndex(settings) as index:
+    with BibliographicVectorIndex(corpus_settings) as index:
         assert index.count() == 0
     with closing(database.connect()) as connection:
         assert (
@@ -354,3 +340,50 @@ def test_chatbot_conversation_history_can_be_managed_and_reloaded(settings) -> N
     assert renamed.json()["title"] == "Levures non-Saccharomyces"
     assert deleted.json() == {"deleted": True}
     assert missing.status_code == 404
+
+
+def test_evaluation_job_endpoint_creates_one_fresh_immutable_conversation(settings) -> None:
+    payload = {
+        "message": "Question scientifique immuable",
+        "client_request_id": "11111111-1111-4111-8111-111111111111",
+        "run_id": "run-20260806",
+        "question_id": "Q1",
+        "profile": "p0",
+    }
+    with TestClient(create_app(settings)) as client:
+        first = client.post("/api/chatbot/evaluation/jobs", json=payload)
+        repeated = client.post("/api/chatbot/evaluation/jobs", json=payload)
+        conversation_id = first.json()["job"]["conversation_id"]
+        conversation = client.get(f"/api/chatbot/conversations/{conversation_id}")
+        busy = client.post(
+            "/api/chatbot/evaluation/jobs",
+            json={
+                **payload,
+                "client_request_id": "22222222-2222-4222-8222-222222222222",
+                "question_id": "Q2",
+            },
+        )
+        normal_conversation = client.post(
+            "/api/chatbot/conversations",
+            json={"title": "Conversation pendant évaluation"},
+        ).json()
+        blocked_normal = client.post(
+            f"/api/chatbot/conversations/{normal_conversation['id']}/jobs",
+            json={
+                "message": "Question hors campagne",
+                "client_request_id": "33333333-3333-4333-8333-333333333333",
+            },
+        )
+        normal_after_block = client.get(f"/api/chatbot/conversations/{normal_conversation['id']}")
+
+    assert first.status_code == 202
+    assert repeated.status_code == 202
+    assert repeated.json()["job"]["id"] == first.json()["job"]["id"]
+    assert [message["content"] for message in conversation.json()["messages"]] == [
+        "Question scientifique immuable"
+    ]
+    assert busy.status_code == 409
+    assert busy.json()["detail"]["code"] == "evaluation_run_busy"
+    assert blocked_normal.status_code == 409
+    assert blocked_normal.json()["detail"]["code"] == "evaluation_run_busy"
+    assert normal_after_block.json()["messages"] == []

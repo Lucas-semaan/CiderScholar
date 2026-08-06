@@ -6,6 +6,7 @@ import type { LibraryRecord } from "@/types/api";
 function record(id: string, relevance_status: LibraryRecord["relevance_status"]): LibraryRecord {
   return {
     id,
+    library_id: `abstract:${id}`,
     canonical_key: id,
     doi: null,
     title: id,
@@ -23,6 +24,13 @@ function record(id: string, relevance_status: LibraryRecord["relevance_status"])
     sources: null,
     first_seen_at: null,
     last_seen_at: null,
+    document_type: "abstract_only",
+    article_id: null,
+    pdf_available: false,
+    pdf_path: null,
+    validation_status: null,
+    chunk_count: 0,
+    indexed_chunk_count: 0,
   };
 }
 
@@ -34,7 +42,7 @@ describe("bibliographic review queue", () => {
       record("two", "review"),
     ];
 
-    expect(nextReviewRecordId(records, "one")).toBe("two");
+    expect(nextReviewRecordId(records, "one")).toBe("abstract:two");
   });
 
   it("wraps to an earlier review notice when needed", () => {
@@ -44,7 +52,7 @@ describe("bibliographic review queue", () => {
       record("two", "review"),
     ];
 
-    expect(nextReviewRecordId(records, "two")).toBe("one");
+    expect(nextReviewRecordId(records, "two")).toBe("abstract:one");
   });
 
   it("returns null when no other review notice remains", () => {

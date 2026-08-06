@@ -1,36 +1,57 @@
 # Travaux locaux durables
 
-La file SQLite accepte cinq types fermés :
+La file SQLite accepte cinq types fermés : `chat_answer`, `deep_research`,
+`weekly_maintenance`, `long_synthesis` et `corpus_ingestion`.
 
-- `chat_answer` ;
-- `deep_research` ;
-- `weekly_maintenance` ;
-- `long_synthesis` ;
-- `private_ingestion`.
+Les campagnes contrôlées de profils P0/P1/P2 utilisent le même job `chat_answer`, mais avec une
+identité de cellule et une conversation isolée. Voir
+[`CHAT_FINETUNING_EVALUATION.md`](CHAT_FINETUNING_EVALUATION.md).
 
-Les synthèses longues et l’ingestion privée sont soumises par HTTP avec une réponse `202`, puis
-exécutées par `python -m scripts.run_job_worker`. Elles utilisent les mêmes leases, heartbeats,
-reprises bornées, annulations, projections publiques sans payload et notifications facultatives que
-les réponses conversationnelles.
+Les synthèses longues et les ingestions de corpus sont exécutées par
+`python -m scripts.run_job_worker`. Elles utilisent les mêmes leases,
+heartbeats, reprises bornées, annulations, projections publiques sans payload
+et notifications facultatives que les réponses conversationnelles.
 
-Le worker renouvelle automatiquement le lease pendant tout handler long, au plus toutes les
-30 secondes et avant le tiers de sa durée. Une perte de lease interdit la persistance du résultat ;
-un test avec lease court couvre un traitement plus long que sa durée initiale.
+Le worker renouvelle automatiquement le lease pendant tout handler long, au
+plus toutes les 30 secondes et avant le tiers de sa durée. Une perte de lease
+interdit la persistance du résultat.
 
-## Synthèse longue
+## Ingestion du corpus
 
-`POST /api/synthesis/{query_id}/run` vérifie que la requête et ses preuves SQLite existent, persiste
-un `LongSynthesisPayload` versionné et rend immédiatement le travail public. Le handler appelle la
-synthèse hiérarchique reprenable et ne publie le résultat qu’après le contrôle d’annulation final.
+Les PDF placés dans le répertoire du corpus commun sont validés comme chemins
+relatifs sûrs, puis le handler les résout sous `data/common/pdf`. Les textes,
+preuves et vecteurs sont tous écrits dans l’unique base SQLite et l’unique
+index Qdrant du corpus. Le résultat de file ne contient que des compteurs
+d’état, jamais le texte ni les chemins des documents.
 
-## Ingestion privée
+Les travaux peuvent être suivis, annulés ou relancés via `/api/jobs/{job_id}`.
 
-Les routes `/api/private-corpus/upload` et `/api/private-corpus/folder` copient d’abord au plus
-100 PDF dans `private/pdf/uploads`, puis ne placent en file que des chemins relatifs validés. Le
-handler reconstruit chaque chemin sous cette racine, refuse toute sortie de répertoire et utilise
-uniquement la base SQLite privée. Le résultat stocké dans la file contient des compteurs d’état,
-jamais le texte ni les chemins des documents.
+## Progression d'une réponse scientifique
 
-Les travaux peuvent être suivis, annulés ou relancés via `/api/jobs/{job_id}`. Le worker doit rester
-actif dans l’application desktop ; une interruption de processus est récupérée par expiration du
-lease sans perdre le payload ni les checkpoints de synthèse.
+Un job `chat_answer` publie des frontières durables correspondant au travail réel, dans cet
+ordre :
+
+1. analyse et planification de la question ;
+2. recherche locale dans le corpus ;
+3. enrichissement bibliographique, seulement lorsqu'il est autorisé et demandé ;
+4. classement et fusion des passages ;
+5. sélection sémantique des preuves ;
+6. contrôle de couverture et recherche complémentaire éventuelle ;
+7. analyse locale des figures, seulement lorsqu'elle est demandée ;
+8. génération de la réponse finale ;
+9. validation scientifique ;
+10. enregistrement atomique du résultat.
+
+Le premier appel ARGO sert normalement à la planification. Il ne doit donc jamais être affiché
+comme une génération finale. L'étape historique `argo` reste acceptée en lecture pour les anciens
+jobs, mais les nouveaux jobs utilisent les étapes détaillées ci-dessus.
+
+## Diagnostic de traitement
+
+`GET /api/system/diagnostics` expose l’état local utile à l’exploitation : heartbeat du worker,
+travaux actifs, mémoire du processus API et du worker, mémoire système disponible et alertes
+structurées. Il ne retourne ni payload de job, ni question, ni réponse, ni PID ou secret.
+
+La page **Diagnostic** présente ces mesures pour distinguer une recherche longue d’un worker
+indisponible. Le bouton d’actualisation effectue seulement ces lectures locales ; il ne génère pas
+de réponse ARGO.

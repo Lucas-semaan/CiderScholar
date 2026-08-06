@@ -125,9 +125,7 @@ def build_corpus_package(
     """Build in a temporary directory and expose the complete immutable pair atomically."""
 
     root = (output_root or settings.paths.exports_dir / "corpus-packages").resolve()
-    if root.is_relative_to(settings.paths.common_dir.resolve()) or root.is_relative_to(
-        settings.paths.private_dir.resolve()
-    ):
+    if root.is_relative_to(settings.paths.common_dir.resolve()):
         raise CorpusPackageBuildError("package output cannot be inside an active corpus")
     root.mkdir(parents=True, exist_ok=True)
     now = (clock or (lambda: datetime.now(UTC)))()

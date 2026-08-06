@@ -16,7 +16,12 @@ from app.jobs.contracts import (
     JobType,
     LongSynthesisPayload,
 )
-from app.jobs.repository import JobRepository
+from app.jobs.repository import (
+    EvaluationConversationIsolationError,
+    EvaluationQuestionAlreadySubmittedError,
+    EvaluationRunBusyError,
+    JobRepository,
+)
 
 
 def _seed_user_message(repository: JobRepository) -> tuple[UUID, UUID]:
@@ -52,6 +57,16 @@ def _seed_assistant_message(repository: JobRepository, conversation_id: UUID) ->
             (str(message_id), str(conversation_id), position),
         )
     return message_id
+
+
+def _seed_empty_conversation(repository: JobRepository) -> UUID:
+    conversation_id = uuid4()
+    with repository.database.transaction() as connection:
+        connection.execute(
+            "INSERT INTO chat_conversations(id, title) VALUES (?, 'Evaluation')",
+            (str(conversation_id),),
+        )
+    return conversation_id
 
 
 def test_job_repository_uses_a_temporary_sqlite_file(tmp_path) -> None:
@@ -144,6 +159,125 @@ def test_atomic_chat_enqueue_rolls_back_user_message_when_job_event_fails(
         assert connection.execute("SELECT COUNT(*) FROM chat_messages").fetchone()[0] == 0
         assert connection.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 0
         assert connection.execute("SELECT COUNT(*) FROM job_events").fetchone()[0] == 0
+
+
+def test_evaluation_submission_requires_an_idle_queue_and_fresh_conversation(tmp_path) -> None:
+    repository = JobRepository(tmp_path / "queue.sqlite3")
+    repository.initialize()
+    first_conversation = _seed_empty_conversation(repository)
+    first = repository.enqueue_chat(
+        ChatAnswerPayload(
+            message="Question A",
+            conversation_id=first_conversation,
+            client_request_id=uuid4(),
+            interaction_mode="research",
+            evaluation_run_id="run-1",
+            evaluation_question_id="Q1",
+            evaluation_profile="p0",
+        )
+    )
+
+    busy_conversation = _seed_empty_conversation(repository)
+    with pytest.raises(EvaluationRunBusyError):
+        repository.enqueue_chat(
+            ChatAnswerPayload(
+                message="Question B",
+                conversation_id=busy_conversation,
+                client_request_id=uuid4(),
+                interaction_mode="research",
+                evaluation_run_id="run-1",
+                evaluation_question_id="Q2",
+                evaluation_profile="p0",
+            )
+        )
+
+    normal_conversation = _seed_empty_conversation(repository)
+    with pytest.raises(EvaluationRunBusyError):
+        repository.enqueue_chat(
+            ChatAnswerPayload(
+                message="Question hors campagne",
+                conversation_id=normal_conversation,
+                client_request_id=uuid4(),
+            )
+        )
+
+    with repository.database.transaction() as connection:
+        connection.execute(
+            "UPDATE jobs SET state = 'failed', completed_at = updated_at WHERE id = ?",
+            (str(first.job.id),),
+        )
+
+    with pytest.raises(EvaluationConversationIsolationError):
+        repository.enqueue_chat(
+            ChatAnswerPayload(
+                message="Question B",
+                conversation_id=first_conversation,
+                client_request_id=uuid4(),
+                interaction_mode="research",
+                evaluation_run_id="run-1",
+                evaluation_question_id="Q2",
+                evaluation_profile="p0",
+            )
+        )
+
+    duplicate_conversation = _seed_empty_conversation(repository)
+    with pytest.raises(EvaluationQuestionAlreadySubmittedError):
+        repository.enqueue_chat(
+            ChatAnswerPayload(
+                message="Question A",
+                conversation_id=duplicate_conversation,
+                client_request_id=uuid4(),
+                interaction_mode="research",
+                evaluation_run_id="run-1",
+                evaluation_question_id="Q1",
+                evaluation_profile="p0",
+            )
+        )
+
+
+def test_evaluation_retry_preserves_global_single_job_execution(tmp_path) -> None:
+    repository = JobRepository(tmp_path / "queue.sqlite3")
+    repository.initialize()
+    original = repository.enqueue_evaluation_question(
+        run_id="run-retry",
+        question_id="Q1",
+        profile="p1",
+        message="Question immuable",
+        client_request_id=uuid4(),
+    )
+    with repository.database.transaction() as connection:
+        connection.execute(
+            "UPDATE jobs SET state = 'failed', completed_at = updated_at WHERE id = ?",
+            (str(original.job.id),),
+        )
+
+    other_conversation, other_message = _seed_user_message(repository)
+    other_job = repository.enqueue(
+        ChatAnswerPayload(
+            message="Autre travail actif",
+            conversation_id=other_conversation,
+            client_request_id=uuid4(),
+        ),
+        user_message_id=other_message,
+    )
+
+    with pytest.raises(EvaluationRunBusyError):
+        repository.retry_failed(original.job.id, client_request_id=uuid4())
+
+    with repository.database.transaction() as connection:
+        connection.execute(
+            "UPDATE jobs SET state = 'failed', completed_at = updated_at WHERE id = ?",
+            (str(other_job.id),),
+        )
+    retried = repository.retry_failed(original.job.id, client_request_id=uuid4())
+
+    assert retried is not None
+    assert retried.state is JobState.QUEUED
+    assert retried.conversation_id == original.job.conversation_id
+    assert retried.user_message_id == original.job.user_message_id
+    assert retried.payload.evaluation_question_sha256 == (
+        original.job.payload.evaluation_question_sha256
+    )
 
 
 def test_enqueue_retry_returns_the_existing_job(tmp_path) -> None:

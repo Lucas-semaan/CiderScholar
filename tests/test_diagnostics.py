@@ -2,13 +2,20 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from uuid import UUID, uuid4
 
 from fastapi.testclient import TestClient
 
-from app.diagnostics import build_readiness_report, worker_heartbeat_path
+from app.diagnostics import (
+    _worker_rss_bytes,
+    build_readiness_report,
+    build_runtime_diagnostics,
+    worker_heartbeat_path,
+)
 from app.jobs.contracts import ChatAnswerPayload
 from app.jobs.repository import JobRepository
 from app.llm.argo_client import ArgoHealth
@@ -111,3 +118,100 @@ def test_diagnostic_api_returns_actionable_checks(settings, monkeypatch) -> None
 
     assert response.status_code == 200
     assert response.json() == payload
+
+
+def test_runtime_diagnostics_exposes_only_safe_active_job_metadata(settings) -> None:
+    now = datetime(2026, 7, 22, 12, tzinfo=UTC)
+    repository = JobRepository(settings.paths.database_path)
+    repository.initialize()
+    conversation = repository.database.create_chat_conversation("Diagnostic")
+    job = repository.enqueue_chat(
+        ChatAnswerPayload(
+            message="sentinel question must never enter runtime diagnostics",
+            conversation_id=UUID(conversation["id"]),
+            client_request_id=uuid4(),
+        ),
+        now=now - timedelta(seconds=20),
+    ).job
+    heartbeat = worker_heartbeat_path(settings)
+    heartbeat.parent.mkdir(parents=True, exist_ok=True)
+    heartbeat.write_text(
+        json.dumps({"schema_version": 1, "pid": 123, "updated_at": now.isoformat()}),
+        encoding="utf-8",
+    )
+
+    report = build_runtime_diagnostics(settings, now=now)
+
+    assert report["worker"] == {
+        "state": "healthy",
+        "heartbeat_at": now.isoformat(),
+        "heartbeat_age_seconds": 0,
+    }
+    assert report["active_jobs"] == [
+        {
+            "id": job.id,
+            "type": job.type,
+            "state": job.state,
+            "step": job.step,
+            "created_at": job.created_at,
+            "heartbeat_at": None,
+        }
+    ]
+    serialized = json.dumps(report, default=str)
+    assert "sentinel question" not in serialized
+    assert "conversation_id" not in serialized
+    assert "pid" not in serialized
+
+
+def test_worker_rss_lookup_is_best_effort_for_missing_or_inaccessible_process(monkeypatch) -> None:
+    class ProcessError(Exception):
+        pass
+
+    def unavailable_process(_pid: int):
+        raise ProcessError("worker has exited")
+
+    monkeypatch.setitem(
+        sys.modules,
+        "psutil",
+        SimpleNamespace(Error=ProcessError, Process=unavailable_process),
+    )
+
+    assert _worker_rss_bytes(None) is None
+    assert _worker_rss_bytes(123) is None
+
+
+def test_runtime_diagnostic_api_reports_stale_worker_for_active_work(settings) -> None:
+    now = datetime.now(UTC)
+    repository = JobRepository(settings.paths.database_path)
+    repository.initialize()
+    conversation = repository.database.create_chat_conversation("Diagnostic")
+    repository.enqueue_chat(
+        ChatAnswerPayload(
+            message="diagnostic job",
+            conversation_id=UUID(conversation["id"]),
+            client_request_id=uuid4(),
+        )
+    )
+    heartbeat = worker_heartbeat_path(settings)
+    heartbeat.parent.mkdir(parents=True, exist_ok=True)
+    heartbeat.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "pid": 123,
+                "updated_at": (now - timedelta(seconds=6)).isoformat(),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with TestClient(create_app(settings)) as client:
+        response = client.get("/api/system/diagnostics")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["worker"]["state"] == "stale"
+    assert {warning["code"] for warning in payload["warnings"]} == {
+        "worker_heartbeat_stale",
+        "active_work_without_healthy_worker",
+    }

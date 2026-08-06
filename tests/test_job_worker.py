@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import sqlite3
 from datetime import UTC, datetime, timedelta
 from threading import Event
 from time import sleep
@@ -11,7 +12,14 @@ import pytest
 
 from app.corpora import LOCAL_PROFILE_ENV
 from app.jobs.chat_handler import ChatAnswerHandler
-from app.jobs.contracts import ChatAnswerPayload, JobPublic, JobStep, JobType
+from app.jobs.contracts import (
+    ChatAnswerPayload,
+    JobErrorKind,
+    JobPublic,
+    JobState,
+    JobStep,
+    JobType,
+)
 from app.jobs.repository import JobRepository
 from app.jobs.worker import (
     DurableJobWorker,
@@ -240,6 +248,53 @@ def test_continuous_worker_stops_cleanly_and_closes_handlers(tmp_path) -> None:
     assert handler.closed is True
 
 
+def test_continuous_worker_retries_transient_database_contention(tmp_path, caplog) -> None:
+    repository = JobRepository(tmp_path / "queue.sqlite3")
+    repository.initialize()
+    stop_event = Event()
+
+    class ContendedWorker(DurableJobWorker):
+        calls = 0
+
+        def run_once(self):
+            self.calls += 1
+            if self.calls == 1:
+                raise sqlite3.OperationalError("database is locked")
+            stop_event.set()
+            return None
+
+    worker = ContendedWorker(
+        repository=repository,
+        registry=JobHandlerRegistry({}),
+        worker_id="contention-test",
+    )
+
+    with caplog.at_level(logging.WARNING, logger="ciderscholar.jobs.worker"):
+        completed_count = worker.run_forever(stop_event, idle_seconds=0.01)
+
+    assert completed_count == 0
+    assert worker.calls == 2
+    assert "job_database_contention_retry worker_id=contention-test" in caplog.messages
+
+
+def test_continuous_worker_does_not_hide_unrelated_database_errors(tmp_path) -> None:
+    repository = JobRepository(tmp_path / "queue.sqlite3")
+    repository.initialize()
+
+    class BrokenWorker(DurableJobWorker):
+        def run_once(self):
+            raise sqlite3.OperationalError("malformed database schema")
+
+    worker = BrokenWorker(
+        repository=repository,
+        registry=JobHandlerRegistry({}),
+        worker_id="database-error-test",
+    )
+
+    with pytest.raises(sqlite3.OperationalError, match="malformed database schema"):
+        worker.run_forever(Event(), idle_seconds=0.01)
+
+
 def test_default_worker_id_is_process_stable_and_not_public(tmp_path) -> None:
     repository = JobRepository(tmp_path / "queue.sqlite3")
     registry = JobHandlerRegistry({})
@@ -294,6 +349,26 @@ def test_worker_recovers_expired_leases_before_new_claim(tmp_path) -> None:
         assert connection.execute("SELECT COUNT(*) FROM chat_messages").fetchone()[0] == 2
 
 
+def test_secondary_worker_leaves_lease_recovery_to_the_coordinator(tmp_path) -> None:
+    repository = JobRepository(tmp_path / "queue.sqlite3")
+    repository.initialize()
+    now = datetime(2026, 7, 22, 12, tzinfo=UTC)
+    expired = _claimed_job(repository, now)
+    secondary = DurableJobWorker(
+        repository=repository,
+        registry=JobHandlerRegistry({}),
+        worker_id="secondary-worker",
+        clock=lambda: now + timedelta(minutes=6),
+        lease_recovery_enabled=False,
+    )
+
+    assert secondary.run_once() is None
+    unchanged = repository.get(expired.id)
+    assert unchanged is not None
+    assert unchanged.state is JobState.RUNNING
+    assert unchanged.worker_id == expired.worker_id
+
+
 def test_chat_handler_delegates_to_existing_answer_chatbot_workflow(settings, tmp_path) -> None:
     repository = JobRepository(tmp_path / "queue.sqlite3")
     repository.initialize()
@@ -312,14 +387,27 @@ def test_chat_handler_delegates_to_existing_answer_chatbot_workflow(settings, tm
         previous_sources,
         on_argo_reserved,
         on_argo_response,
+        on_progress,
     ) -> ChatbotResult:
+        on_progress("planning")
         persisted = repository.get(job.id)
         assert persisted is not None
-        assert persisted.step is JobStep.SEARCH
+        assert persisted.step is JobStep.PLANNING
         on_argo_reserved()
         persisted = repository.get(job.id)
         assert persisted is not None
-        assert persisted.step is JobStep.ARGO
+        assert persisted.step is JobStep.PLANNING
+        for stage, expected in (
+            ("search", JobStep.SEARCH),
+            ("reranking", JobStep.RERANKING),
+            ("evidence_selection", JobStep.EVIDENCE_SELECTION),
+            ("coverage", JobStep.COVERAGE),
+            ("generation", JobStep.GENERATION),
+        ):
+            on_progress(stage)
+            persisted = repository.get(job.id)
+            assert persisted is not None
+            assert persisted.step is expected
         on_argo_response()
         calls.append((active_settings, database, message, history, use_external_sources))
         return ChatbotResult(
@@ -355,6 +443,227 @@ def test_chat_handler_delegates_to_existing_answer_chatbot_workflow(settings, tm
     assert result.response_time_milliseconds == 500
     assert len(calls) == 1
     assert calls[0][2:] == ("Question durable", [], False)
+
+
+def test_evaluation_job_pins_profile_and_persists_cell_identity(settings, tmp_path) -> None:
+    repository = JobRepository(tmp_path / "queue.sqlite3")
+    repository.initialize()
+    now = datetime(2026, 7, 22, 12, tzinfo=UTC)
+    conversation = repository.database.create_chat_conversation("Evaluation Q1")
+    enqueued = repository.enqueue_chat(
+        ChatAnswerPayload(
+            message="Question scientifique immuable",
+            conversation_id=conversation["id"],
+            client_request_id=uuid4(),
+            interaction_mode="research",
+            evaluation_run_id="run-1",
+            evaluation_question_id="Q1",
+            evaluation_profile="p1",
+        ),
+        now=now,
+    )
+    profiles = []
+
+    def fake_answer(
+        active_settings,
+        database,
+        *,
+        message,
+        history,
+        use_external_sources,
+        interaction_mode,
+        previous_sources,
+        on_argo_reserved,
+        on_argo_response,
+        on_progress,
+        experimental_profile,
+    ) -> ChatbotResult:
+        del active_settings, database, previous_sources
+        assert history == []
+        assert not use_external_sources
+        assert interaction_mode == "research"
+        profiles.append(experimental_profile)
+        on_progress("generation")
+        on_argo_reserved()
+        on_argo_response()
+        return ChatbotResult(
+            message=message,
+            retrieval_query=message,
+            answer_markdown="Réponse évaluée",
+            sources=[],
+            warnings=[],
+            model="test-model",
+            local_result_count=0,
+            external_result_count=0,
+            external_enrichment_used=False,
+            prompt_tokens=1,
+            completion_tokens=1,
+            duration_seconds=0.1,
+        )
+
+    completed = DurableJobWorker(
+        repository=repository,
+        registry=JobHandlerRegistry(
+            {JobType.CHAT_ANSWER: ChatAnswerHandler(settings, repository.database, fake_answer)}
+        ),
+        worker_id="worker-evaluation",
+        clock=lambda: now,
+    ).run_once()
+
+    assert completed is not None
+    assert completed.state.value == "succeeded"
+    assert profiles == ["p1"]
+    persisted = repository.database.chat_conversation(str(enqueued.job.conversation_id))
+    assert persisted is not None
+    trace = persisted["messages"][-1]["response"]["evaluation"]
+    assert trace["run_id"] == "run-1"
+    assert trace["question_id"] == "Q1"
+    assert trace["profile"] == "p1"
+    assert len(trace["question_sha256"]) == 64
+
+
+def test_evaluation_job_rejects_a_contaminated_conversation_before_generation(
+    settings, tmp_path
+) -> None:
+    repository = JobRepository(tmp_path / "queue.sqlite3")
+    repository.initialize()
+    now = datetime(2026, 7, 22, 12, tzinfo=UTC)
+    conversation = repository.database.create_chat_conversation("Evaluation Q1")
+    enqueued = repository.enqueue_chat(
+        ChatAnswerPayload(
+            message="Question scientifique immuable",
+            conversation_id=conversation["id"],
+            client_request_id=uuid4(),
+            interaction_mode="research",
+            evaluation_run_id="run-1",
+            evaluation_question_id="Q1",
+            evaluation_profile="p0",
+        ),
+        now=now,
+    )
+    with repository.database.transaction() as connection:
+        connection.execute(
+            """
+            INSERT INTO chat_messages(id, conversation_id, position, role, content, created_at)
+            VALUES (?, ?, 1, 'user', 'Question différente', ?)
+            """,
+            (str(uuid4()), str(enqueued.job.conversation_id), now.isoformat()),
+        )
+    calls = 0
+
+    def must_not_generate(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        raise AssertionError("generation must not start for a contaminated evaluation cell")
+
+    failed = DurableJobWorker(
+        repository=repository,
+        registry=JobHandlerRegistry(
+            {
+                JobType.CHAT_ANSWER: ChatAnswerHandler(
+                    settings, repository.database, must_not_generate
+                )
+            }
+        ),
+        worker_id="worker-evaluation",
+        clock=lambda: now,
+    ).run_once()
+
+    assert failed is not None
+    assert failed.state.value == "failed"
+    assert calls == 0
+    persisted = repository.database.chat_conversation(str(enqueued.job.conversation_id))
+    assert persisted is not None
+    notice = persisted["messages"][-1]["response"]
+    assert notice["diagnostic_code"] == "question_integrity"
+
+
+def test_evaluation_retry_excludes_terminal_notice_from_generation_history(
+    settings, tmp_path
+) -> None:
+    repository = JobRepository(tmp_path / "queue.sqlite3")
+    repository.initialize()
+    now = datetime(2026, 7, 22, 12, tzinfo=UTC)
+    enqueued = repository.enqueue_evaluation_question(
+        run_id="run-1",
+        question_id="Q1",
+        profile="p0",
+        message="Question scientifique immuable",
+        client_request_id=uuid4(),
+        now=now,
+    )
+
+    class InvalidHandler:
+        def handle(self, job, context) -> JobHandlerResult:
+            raise ArgoScientificValidationError("unsupported numeric claim")
+
+    failed = DurableJobWorker(
+        repository=repository,
+        registry=JobHandlerRegistry({JobType.CHAT_ANSWER: InvalidHandler()}),
+        worker_id="worker-first",
+        clock=lambda: now,
+    ).run_once()
+    assert failed is not None and failed.state.value == "failed"
+    retried = repository.retry_failed(
+        enqueued.job.id,
+        client_request_id=uuid4(),
+        now=now + timedelta(minutes=1),
+    )
+    assert retried is not None
+    captured_history = []
+
+    def fake_answer(
+        active_settings,
+        database,
+        *,
+        message,
+        history,
+        use_external_sources,
+        interaction_mode,
+        previous_sources,
+        on_argo_reserved,
+        on_argo_response,
+        on_progress,
+        experimental_profile,
+    ) -> ChatbotResult:
+        del (
+            active_settings,
+            database,
+            use_external_sources,
+            interaction_mode,
+            previous_sources,
+            experimental_profile,
+            on_progress,
+        )
+        captured_history.extend(history)
+        on_argo_reserved()
+        on_argo_response()
+        return ChatbotResult(
+            message=message,
+            retrieval_query=message,
+            answer_markdown="Réponse après correction",
+            sources=[],
+            warnings=[],
+            model="test-model",
+            local_result_count=0,
+            external_result_count=0,
+            external_enrichment_used=False,
+            prompt_tokens=1,
+            completion_tokens=1,
+            duration_seconds=0.1,
+        )
+
+    completed = DurableJobWorker(
+        repository=repository,
+        registry=JobHandlerRegistry(
+            {JobType.CHAT_ANSWER: ChatAnswerHandler(settings, repository.database, fake_answer)}
+        ),
+        worker_id="worker-second",
+        clock=lambda: now + timedelta(minutes=1),
+    ).run_once()
+
+    assert completed is not None and completed.state.value == "succeeded"
+    assert captured_history == []
 
 
 def test_chat_handler_reads_authoritative_history_from_sqlite(settings, tmp_path) -> None:
@@ -413,6 +722,7 @@ def test_chat_handler_reads_authoritative_history_from_sqlite(settings, tmp_path
         previous_sources,
         on_argo_reserved,
         on_argo_response,
+        on_progress,
     ) -> ChatbotResult:
         del (
             active_settings,
@@ -421,6 +731,7 @@ def test_chat_handler_reads_authoritative_history_from_sqlite(settings, tmp_path
             use_external_sources,
             on_argo_reserved,
             on_argo_response,
+            on_progress,
         )
         captured_history.extend(history)
         return ChatbotResult(
@@ -539,9 +850,12 @@ def test_chat_handler_reuses_persisted_sources_without_search_step(settings, tmp
         previous_sources,
         on_argo_reserved,
         on_argo_response,
+        on_progress,
     ) -> ChatbotResult:
         del active_settings, database, message, history
         captured.extend([use_external_sources, interaction_mode, previous_sources])
+        on_progress("planning")
+        on_progress("generation")
         on_argo_reserved()
         on_argo_response()
         return ChatbotResult(
@@ -619,9 +933,14 @@ def test_external_enrichment_requires_profile_authorization(
         previous_sources,
         on_argo_reserved,
         on_argo_response,
+        on_progress,
     ) -> ChatbotResult:
         del active_settings, database, history, on_argo_reserved, on_argo_response
         received_external.append(use_external_sources)
+        on_progress("planning")
+        on_progress("search")
+        if use_external_sources:
+            on_progress("enrichment")
         return ChatbotResult(
             message=message,
             retrieval_query=message,
@@ -670,8 +989,10 @@ def test_validation_rejection_is_attributed_to_validation_step(settings, tmp_pat
         previous_sources,
         on_argo_reserved,
         on_argo_response,
+        on_progress,
     ) -> ChatbotResult:
         del active_settings, database, message, history, use_external_sources
+        on_progress("generation")
         on_argo_reserved()
         on_argo_response()
         raise RuntimeError("simulated scientific validation rejection")
@@ -768,7 +1089,7 @@ def test_argo_timeout_uses_bounded_retry_delays(tmp_path) -> None:
     assert third.attempt == 3
 
 
-def test_invalid_scientific_generation_retries_without_stopping_worker(tmp_path) -> None:
+def test_invalid_scientific_generation_is_terminal_without_exposing_detail(tmp_path) -> None:
     repository = JobRepository(tmp_path / "queue.sqlite3")
     repository.initialize()
     now = datetime(2026, 7, 22, 12, tzinfo=UTC)
@@ -788,19 +1109,112 @@ def test_invalid_scientific_generation_retries_without_stopping_worker(tmp_path)
         def handle(self, job, context) -> JobHandlerResult:
             raise ArgoScientificValidationError("unsupported numeric claim")
 
-    retried = DurableJobWorker(
+    failed = DurableJobWorker(
         repository=repository,
         registry=JobHandlerRegistry({JobType.CHAT_ANSWER: InvalidScientificAnswerHandler()}),
         worker_id="worker-scientific-validation",
         clock=lambda: now,
     ).run_once()
 
-    assert retried is not None
-    assert retried.state.value == "queued"
-    assert retried.available_at == now + timedelta(seconds=30)
-    assert retried.error_code.value == "timeout"
-    assert "nouvelle génération scientifique complète" in retried.error_message
-    assert "unsupported numeric claim" not in retried.error_message
+    assert failed is not None
+    assert failed.state.value == "failed"
+    assert failed.attempt == 1
+    assert failed.error_code.value == "validation"
+    assert "arrêtée pour vérification" in failed.error_message
+    assert "unsupported numeric claim" not in failed.error_message
+    conversation = repository.database.chat_conversation(str(job.conversation_id))
+    assert conversation is not None
+    assert [message["role"] for message in conversation["messages"]] == ["user", "assistant"]
+    notice = conversation["messages"][-1]
+    assert notice["response"] == {
+        "kind": "job_terminal_notice",
+        "job_id": str(job.id),
+        "state": "failed",
+        "error_code": "validation",
+        "diagnostic_code": "unsupported_numeric_claim",
+    }
+    assert "unsupported numeric claim" not in notice["content"]
+
+
+def test_unexpected_handler_bug_becomes_a_visible_terminal_diagnostic(tmp_path) -> None:
+    repository = JobRepository(tmp_path / "queue.sqlite3")
+    repository.initialize()
+    now = datetime(2026, 7, 22, 12, tzinfo=UTC)
+    job = _claimed_job(repository, now)
+    with repository.database.transaction() as connection:
+        connection.execute(
+            """
+            UPDATE jobs
+            SET state = 'queued', attempt = 0, worker_id = NULL,
+                lease_expires_at = NULL, heartbeat_at = NULL
+            WHERE id = ?
+            """,
+            (str(job.id),),
+        )
+
+    class BuggyHandler:
+        def handle(self, job, context) -> JobHandlerResult:
+            del job, context
+            raise RuntimeError("sensitive implementation detail")
+
+    failed = DurableJobWorker(
+        repository=repository,
+        registry=JobHandlerRegistry({JobType.CHAT_ANSWER: BuggyHandler()}),
+        worker_id="worker-bug",
+        clock=lambda: now + timedelta(seconds=1),
+    ).run_once()
+
+    assert failed is not None
+    assert failed.state is JobState.FAILED
+    assert failed.error_code is JobErrorKind.VALIDATION
+    assert "sensitive implementation detail" not in failed.error_message
+    conversation = repository.database.chat_conversation(str(job.conversation_id))
+    assert conversation is not None
+    notice = conversation["messages"][-1]
+    assert notice["role"] == "assistant"
+    assert notice["response"]["diagnostic_code"] == "internal_handler_error"
+    assert "sensitive implementation detail" not in notice["content"]
+
+
+def test_unserializable_handler_result_becomes_a_visible_persistence_diagnostic(tmp_path) -> None:
+    repository = JobRepository(tmp_path / "queue.sqlite3")
+    repository.initialize()
+    now = datetime(2026, 7, 22, 12, tzinfo=UTC)
+    job = _claimed_job(repository, now)
+    with repository.database.transaction() as connection:
+        connection.execute(
+            """
+            UPDATE jobs
+            SET state = 'queued', attempt = 0, worker_id = NULL,
+                lease_expires_at = NULL, heartbeat_at = NULL
+            WHERE id = ?
+            """,
+            (str(job.id),),
+        )
+
+    class InvalidResultHandler:
+        def handle(self, job, context) -> JobHandlerResult:
+            del job, context
+            return JobHandlerResult(
+                assistant_content="Résultat non sérialisable",
+                assistant_response={"invalid": object()},
+                response_time_milliseconds=10,
+            )
+
+    failed = DurableJobWorker(
+        repository=repository,
+        registry=JobHandlerRegistry({JobType.CHAT_ANSWER: InvalidResultHandler()}),
+        worker_id="worker-persistence",
+        clock=lambda: now + timedelta(seconds=1),
+    ).run_once()
+
+    assert failed is not None
+    assert failed.state is JobState.FAILED
+    conversation = repository.database.chat_conversation(str(job.conversation_id))
+    assert conversation is not None
+    assert conversation["messages"][-1]["response"]["diagnostic_code"] == (
+        "internal_persistence_error"
+    )
 
 
 def test_argo_authentication_failure_is_terminal_and_actionable(tmp_path) -> None:
@@ -1033,9 +1447,11 @@ def test_cancellation_before_argo_sends_no_argo_request(settings, tmp_path) -> N
         previous_sources,
         on_argo_reserved,
         on_argo_response,
+        on_progress,
     ) -> ChatbotResult:
         nonlocal argo_requests
         del active_settings, database, message, history, use_external_sources, on_argo_response
+        on_progress("planning")
         repository.request_cancellation(job.id, now=now + timedelta(seconds=1))
         on_argo_reserved()
         argo_requests += 1
@@ -1087,9 +1503,11 @@ def test_cancellation_after_non_interruptible_argo_call_is_honest(settings, tmp_
         previous_sources,
         on_argo_reserved,
         on_argo_response,
+        on_progress,
     ) -> ChatbotResult:
         nonlocal argo_requests
         del active_settings, database, history, use_external_sources
+        on_progress("generation")
         on_argo_reserved()
         argo_requests += 1
         repository.request_cancellation(job.id, now=now + timedelta(seconds=1))
@@ -1127,7 +1545,9 @@ def test_cancellation_after_non_interruptible_argo_call_is_honest(settings, tmp_
     assert argo_requests == 1
     conversation = repository.database.chat_conversation(str(job.conversation_id))
     assert conversation is not None
-    assert [message["role"] for message in conversation["messages"]] == ["user"]
+    assert [message["role"] for message in conversation["messages"]] == ["user", "assistant"]
+    assert conversation["messages"][-1]["response"]["kind"] == "job_terminal_notice"
+    assert conversation["messages"][-1]["response"]["state"] == "cancelled"
 
 
 def test_worker_logs_only_structured_ids_steps_and_durations(tmp_path, caplog) -> None:

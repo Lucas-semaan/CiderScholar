@@ -44,6 +44,26 @@ class UnknownJobTypeError(LookupError):
     """Raised before execution when no closed handler exists for a job type."""
 
 
+def _is_transient_database_contention(error: sqlite3.OperationalError) -> bool:
+    """Recognize SQLite writer contention without hiding unrelated database failures."""
+
+    error_code = getattr(error, "sqlite_errorcode", None)
+    if isinstance(error_code, int) and error_code & 0xFF in {
+        sqlite3.SQLITE_BUSY,
+        sqlite3.SQLITE_LOCKED,
+    }:
+        return True
+    normalized = str(error).casefold()
+    return any(
+        marker in normalized
+        for marker in (
+            "database is busy",
+            "database is locked",
+            "database table is locked",
+        )
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class JobHandlerResult:
     """Persistable result returned by a successful job handler."""
@@ -158,6 +178,7 @@ class DurableJobWorker:
         logger: logging.Logger | None = None,
         terminal_notifier: Callable[[JobRecord], bool] | None = None,
         accepted_job_types: frozenset[JobType] | None = None,
+        lease_recovery_enabled: bool = True,
     ) -> None:
         self.repository = repository
         self.registry = registry
@@ -168,13 +189,15 @@ class DurableJobWorker:
         self.logger = logger or logging.getLogger("ciderscholar.jobs.worker")
         self.terminal_notifier = terminal_notifier
         self.accepted_job_types = accepted_job_types
+        self.lease_recovery_enabled = lease_recovery_enabled
 
     def run_once(self) -> JobRecord | None:
         """Claim and complete at most one job; return None when the queue is empty."""
 
         cycle_started_at = self.clock()
         cycle_started_monotonic = self.monotonic_clock()
-        self.repository.recover_expired_leases(now=cycle_started_at)
+        if self.lease_recovery_enabled:
+            self.repository.recover_expired_leases(now=cycle_started_at)
         job = self.repository.claim_next(
             worker_id=self.worker_id,
             lease_duration=self.lease_duration,
@@ -264,15 +287,22 @@ class DurableJobWorker:
                     "ARGO authorization failure could not be persisted"
                 ) from None
             return self._logged_result(failed, cycle_started_monotonic)
-        except ArgoScientificValidationError:
+        except ArgoScientificValidationError as error:
+            self.logger.warning(
+                "scientific_answer_validation_failed job_id=%s code=%s reason=%s",
+                job.id,
+                error.reason.value,
+                str(error)[:500],
+            )
             failed = self.repository.fail_attempt(
                 job.id,
                 worker_id=self.worker_id,
-                error_code=JobErrorKind.TIMEOUT,
+                error_code=JobErrorKind.VALIDATION,
                 safe_message=(
                     "ARGO a produit une réponse non validable ; "
-                    "une nouvelle génération scientifique complète est planifiée."
+                    f"la réponse est arrêtée pour vérification ({error.reason.value})."
                 ),
+                diagnostic_code=error.reason.value,
                 now=self.clock(),
             )
             if failed is None:
@@ -289,6 +319,7 @@ class DurableJobWorker:
                     "Aucune source scientifique qualifiée n'est disponible pour répondre "
                     "à cette question."
                 ),
+                diagnostic_code="no_qualified_sources",
                 now=self.clock(),
             )
             if failed is None:
@@ -296,14 +327,67 @@ class DurableJobWorker:
                     "source-unavailable failure could not be persisted"
                 ) from None
             return self._logged_result(failed, cycle_started_monotonic)
-        completed = self.repository.persist_result_and_succeed(
-            job.id,
-            worker_id=self.worker_id,
-            assistant_content=result.assistant_content,
-            assistant_response=result.assistant_response,
-            response_time_milliseconds=result.response_time_milliseconds,
-            now=self.clock(),
-        )
+        except JobLeaseLostError:
+            raise
+        except Exception as error:
+            if job.type not in {JobType.CHAT_ANSWER, JobType.DEEP_RESEARCH}:
+                raise
+            self.logger.error(
+                "job_handler_unexpected_failure job_id=%s job_type=%s error_type=%s",
+                job.id,
+                job.type.value,
+                type(error).__name__,
+            )
+            failed = self.repository.fail_attempt(
+                job.id,
+                worker_id=self.worker_id,
+                error_code=JobErrorKind.VALIDATION,
+                safe_message=(
+                    "Une erreur interne a empêché la production de la réponse. "
+                    "Le diagnostic a été enregistré sans perdre la question."
+                ),
+                diagnostic_code="internal_handler_error",
+                now=self.clock(),
+            )
+            if failed is None:
+                raise JobLeaseLostError(
+                    "unexpected handler failure could not be persisted"
+                ) from None
+            return self._logged_result(failed, cycle_started_monotonic)
+        try:
+            completed = self.repository.persist_result_and_succeed(
+                job.id,
+                worker_id=self.worker_id,
+                assistant_content=result.assistant_content,
+                assistant_response=result.assistant_response,
+                response_time_milliseconds=result.response_time_milliseconds,
+                now=self.clock(),
+            )
+        except Exception as error:
+            if job.type not in {JobType.CHAT_ANSWER, JobType.DEEP_RESEARCH}:
+                raise
+            self.logger.error(
+                "job_result_persistence_failed job_id=%s job_type=%s error_type=%s",
+                job.id,
+                job.type.value,
+                type(error).__name__,
+            )
+            failed = self.repository.fail_attempt(
+                job.id,
+                worker_id=self.worker_id,
+                error_code=JobErrorKind.VALIDATION,
+                safe_message=(
+                    "La réponse produite n'a pas pu être enregistrée. "
+                    "Le diagnostic a été conservé avec la question."
+                ),
+                diagnostic_code="internal_persistence_error",
+                now=self.clock(),
+            )
+            if failed is None:
+                raise JobLeaseLostError(
+                    "result persistence failure could not be recorded"
+                ) from None
+            return self._logged_result(failed, cycle_started_monotonic)
         if completed is None:
             raise JobLeaseLostError("job result could not be persisted under its worker lease")
         return self._logged_result(completed, cycle_started_monotonic)
@@ -375,7 +459,17 @@ class DurableJobWorker:
         completed_count = 0
         try:
             while not stop_event.is_set():
-                completed = self.run_once()
+                try:
+                    completed = self.run_once()
+                except sqlite3.OperationalError as error:
+                    if not _is_transient_database_contention(error):
+                        raise
+                    self.logger.warning(
+                        "job_database_contention_retry worker_id=%s",
+                        self.worker_id,
+                    )
+                    stop_event.wait(idle_seconds)
+                    continue
                 if completed is None:
                     stop_event.wait(idle_seconds)
                 else:

@@ -6,7 +6,7 @@ import {
   createPendingChatSubmission,
   enqueuePendingChat,
   loadConversationWithActiveJobs,
-  reloadSucceededConversation,
+  reloadTerminalConversation,
   releaseSubmissionLock,
 } from "./durableChat";
 
@@ -103,7 +103,7 @@ describe("durable chat submission", () => {
     expect(twice).toBe(once);
   });
 
-  it("reloads the persisted conversation only after job success", async () => {
+  it("reloads the persisted conversation after every terminal job outcome", async () => {
     const load = vi.fn().mockResolvedValue({ id: "conversation-1", messages: [] });
     const succeededJob = {
       id: "job-1",
@@ -119,12 +119,26 @@ describe("durable chat submission", () => {
       error: null,
     };
 
-    await reloadSucceededConversation(succeededJob, load);
+    await reloadTerminalConversation(succeededJob, load);
+    await reloadTerminalConversation(
+      {
+        ...succeededJob,
+        state: "failed",
+        result_message_id: "failure-notice",
+        error: { code: "validation", message: "Validation failed", retry_at: null },
+      },
+      load,
+    );
+    await reloadTerminalConversation(
+      { ...succeededJob, state: "cancelled", result_message_id: "cancellation-notice" },
+      load,
+    );
 
+    expect(load).toHaveBeenCalledTimes(3);
     expect(load).toHaveBeenCalledWith("conversation-1");
     await expect(
-      reloadSucceededConversation({ ...succeededJob, state: "running" }, load),
-    ).rejects.toThrow("before job success");
+      reloadTerminalConversation({ ...succeededJob, state: "running" }, load),
+    ).rejects.toThrow("before the job is terminal");
   });
 
   it("allows only one synchronous submit until the current enqueue settles", () => {

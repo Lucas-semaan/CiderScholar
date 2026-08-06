@@ -10,7 +10,7 @@ export function nextReviewRecordId(
   for (let step = 1; step <= records.length; step += 1) {
     const candidate = records[(startingIndex + step) % records.length];
     if (candidate && candidate.id !== reviewedRecordId && candidate.relevance_status === "review") {
-      return candidate.id;
+      return candidate.library_id;
     }
   }
   return null;

@@ -14,12 +14,12 @@ from uuid import uuid4
 from app.admin.maintenance_handler import WeeklyMaintenanceHandler
 from app.admin.secrets import AdminBibliographicKeyVault
 from app.config import Settings, load_settings
-from app.corpora import LocalProfile, load_local_profile
+from app.corpora import CorpusScope, LocalProfile, load_local_profile, settings_for_corpus
 from app.database.sqlite import Database
 from app.deep_research.pipeline import build_deep_research_operations
 from app.desktop.notifications import WindowsJobNotifier
 from app.diagnostics import worker_heartbeat
-from app.jobs.background_handlers import LongSynthesisHandler, PrivateIngestionHandler
+from app.jobs.background_handlers import CorpusIngestionHandler, LongSynthesisHandler
 from app.jobs.chat_handler import ChatAnswerHandler
 from app.jobs.contracts import JobType
 from app.jobs.deep_research_handler import DeepResearchHandler, DeepResearchOperations
@@ -60,6 +60,7 @@ def build_worker(
     deep_research_operations: DeepResearchOperations | None = None,
     job_types: frozenset[JobType] | None = None,
     worker_id: str | None = None,
+    lease_recovery_enabled: bool = True,
 ) -> DurableJobWorker:
     repository = JobRepository(settings.paths.database_path)
     repository.initialize()
@@ -78,12 +79,13 @@ def build_worker(
             settings,
             repository.database,
         )
-    if JobType.PRIVATE_INGESTION in requested_types:
-        private_database = Database(settings.paths.private_database_path)
-        private_database.initialize()
-        handlers[JobType.PRIVATE_INGESTION] = PrivateIngestionHandler(
-            settings,
-            private_database,
+    if JobType.CORPUS_INGESTION in requested_types:
+        corpus_settings = settings_for_corpus(settings, CorpusScope.COMMON)
+        corpus_database = Database(corpus_settings.paths.database_path)
+        corpus_database.initialize()
+        handlers[JobType.CORPUS_INGESTION] = CorpusIngestionHandler(
+            corpus_settings,
+            corpus_database,
         )
     if JobType.WEEKLY_MAINTENANCE in requested_types and load_local_profile() is LocalProfile.ADMIN:
         handlers[JobType.WEEKLY_MAINTENANCE] = WeeklyMaintenanceHandler(settings)
@@ -93,6 +95,7 @@ def build_worker(
         worker_id=worker_id,
         terminal_notifier=WindowsJobNotifier(settings).notify,
         accepted_job_types=frozenset(handlers),
+        lease_recovery_enabled=lease_recovery_enabled,
     )
 
 
@@ -175,12 +178,17 @@ def main(argv: list[str] | None = None) -> int:
     if not 1 <= chat_concurrency <= 20:
         raise ValueError("chat concurrency must be between 1 and 20")
     workers = [
-        build_worker(settings, worker_id=f"worker-{uuid4().hex}"),
+        build_worker(
+            settings,
+            worker_id=f"worker-{uuid4().hex}",
+            lease_recovery_enabled=True,
+        ),
         *(
             build_worker(
                 settings,
                 job_types=frozenset({JobType.CHAT_ANSWER}),
                 worker_id=f"worker-{uuid4().hex}",
+                lease_recovery_enabled=False,
             )
             for _ in range(chat_concurrency - 1)
         ),

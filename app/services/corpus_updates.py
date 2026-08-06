@@ -1,4 +1,4 @@
-"""Filesystem-safe common-corpus activation that cannot traverse private storage."""
+"""Filesystem-safe activation of the authoritative corpus."""
 
 from __future__ import annotations
 
@@ -47,11 +47,14 @@ def activate_prepared_common_corpus(
     authorize_corpus_mutation(CorpusScope.COMMON, profile)
     data_root = settings.paths.data_dir.resolve()
     common_root = settings.paths.common_dir.resolve()
-    private_root = settings.paths.private_dir.resolve()
     prepared = prepared_root.resolve()
     if not prepared.is_dir() or not prepared.is_relative_to(data_root):
         raise CommonCorpusSwapError("prepared common corpus must be a directory under data_dir")
-    if prepared in {common_root, private_root} or prepared.is_relative_to(private_root):
+    if (
+        prepared == common_root
+        or common_root.is_relative_to(prepared)
+        or prepared.is_relative_to(common_root)
+    ):
         raise CommonCorpusSwapError("prepared common corpus overlaps an active corpus")
 
     archive_root = data_root / "common-archive"

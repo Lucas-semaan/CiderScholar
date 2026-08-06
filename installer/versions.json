@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "application": "0.2.3",
+  "application": "0.2.7",
   "python": {
     "version": "3.12.10",
     "url": "https://www.python.org/ftp/python/3.12.10/python-3.12.10-embed-amd64.zip",

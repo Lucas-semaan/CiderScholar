@@ -1,6 +1,6 @@
 import { useId, useState } from "react";
 
-import { CheckCircle2, ExternalLink, ShieldX } from "lucide-react";
+import { CheckCircle2, ExternalLink, FileText, ShieldX } from "lucide-react";
 
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
@@ -49,9 +49,16 @@ export function RecordDetailHeader({ record }: { record: LibraryRecord }) {
   return (
     <>
       <div className="flex items-start justify-between gap-3">
-        <Badge tone={statusTone(record.relevance_status)}>
-          {statusLabels[record.relevance_status]}
-        </Badge>
+        <div className="flex flex-wrap gap-2">
+          <Badge tone={record.document_type === "full_text" ? "info" : "neutral"}>
+            {record.document_type === "full_text" ? "Full article" : "Abstract only"}
+          </Badge>
+          {record.relevance_status !== "accepted" && (
+            <Badge tone={statusTone(record.relevance_status)}>
+              {statusLabels[record.relevance_status]}
+            </Badge>
+          )}
+        </div>
         {record.doi && (
           <a
             aria-label={`Ouvrir le DOI de ${record.title}`}
@@ -82,6 +89,17 @@ export function RecordDetailBody({
       {record.relevance_status === "review" && (
         <RecordReviewDecision key={record.id} onReviewed={onReviewed} record={record} />
       )}
+      {record.pdf_available && record.article_id && (
+        <a
+          className="inline-flex min-h-[42px] w-full items-center justify-center gap-2 rounded-[10px] border border-forest-600 bg-forest-600 px-[18px] py-2.5 text-sm font-semibold leading-none text-white transition hover:border-forest-700 hover:bg-forest-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-forest-600 focus-visible:ring-offset-2"
+          href={`/api/corpus/${encodeURIComponent(record.article_id)}/pdf`}
+          rel="noreferrer"
+          target="_blank"
+        >
+          <FileText aria-hidden="true" className="size-4" />
+          Ouvrir le PDF
+        </a>
+      )}
       <dl className="grid grid-cols-2 gap-4 text-sm">
         <div>
           <dt className="text-xs text-slate-400">Année</dt>
@@ -99,6 +117,14 @@ export function RecordDetailBody({
           <dt className="text-xs text-slate-400">Auteurs</dt>
           <dd className="mt-1 leading-6 text-slate-700">{recordAuthors.join(", ") || "—"}</dd>
         </div>
+        {record.document_type === "full_text" && (
+          <div className="col-span-2">
+            <dt className="text-xs text-slate-400">Indexation du texte</dt>
+            <dd className="mt-1 font-semibold">
+              {record.indexed_chunk_count}/{record.chunk_count} fragments indexés
+            </dd>
+          </div>
+        )}
       </dl>
       {record.doi && (
         <div className="rounded-xl bg-forest-50 p-3">
@@ -150,7 +176,7 @@ function RecordReviewDecision({
       const result = await api.library.decideReview(record.id, decision);
       onReviewed(
         result.decision === "accepted"
-          ? "L’article a été admis au corpus et sera indexé."
+          ? "Le document a été validé dans la base scientifique et sera indexé."
           : "L’article a été rejeté et supprimé intégralement de la base.",
         record.id,
       );
@@ -171,7 +197,7 @@ function RecordReviewDecision({
           Décision de révision
         </legend>
         <p className="mt-1 text-xs leading-5 text-amber-800">
-          Choisissez si cette notice doit entrer dans le corpus scientifique.
+          Choisissez si cette référence doit être retenue pour les recherches scientifiques.
         </p>
         <div className="mt-3 grid gap-2">
           <label className="flex min-h-11 cursor-pointer items-center gap-3 rounded-xl border border-amber-200 bg-white px-3 py-2 text-sm font-semibold text-slate-800 has-[:checked]:border-forest-600 has-[:checked]:ring-2 has-[:checked]:ring-forest-600/20">
@@ -184,7 +210,7 @@ function RecordReviewDecision({
               type="radio"
             />
             <CheckCircle2 aria-hidden="true" className="size-4 text-forest-600" />
-            Admettre au corpus
+            Retenir dans la base
           </label>
           <label className="flex min-h-11 cursor-pointer items-center gap-3 rounded-xl border border-amber-200 bg-white px-3 py-2 text-sm font-semibold text-slate-800 has-[:checked]:border-red-600 has-[:checked]:ring-2 has-[:checked]:ring-red-600/20">
             <input
