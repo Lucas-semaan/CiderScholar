@@ -17,6 +17,7 @@ const props = {
   figureAnalysisAvailable: true,
   figureAnalysisEstimate: "+12 à 18 min",
   interactionMode: "auto" as const,
+  answerEffort: "balanced" as const,
   conversationContextAvailable: false,
   showSuggestions: false,
   onDraftChange: () => undefined,
@@ -24,6 +25,7 @@ const props = {
   onDeepResearchChange: () => undefined,
   onFigureAnalysisChange: () => undefined,
   onInteractionModeChange: () => undefined,
+  onAnswerEffortChange: () => undefined,
   onSubmit: () => undefined,
 };
 
@@ -55,6 +57,18 @@ describe("ChatComposer administrator enrichment", () => {
     expect(markup).toContain("Inclure les figures");
     expect(markup).toContain("+12 à 18 min");
     expect(markup).toContain('role="menuitemcheckbox"');
+  });
+
+  it("offers a compact accessible balanced effort menu next to the settings button", () => {
+    const markup = renderToStaticMarkup(createElement(ChatComposer, props));
+
+    expect(markup).toContain('aria-label="Régler l’effort de réponse : Équilibré"');
+    expect(markup).toContain("Équilibré");
+    expect(markup).toContain('aria-haspopup="menu"');
+    expect(markup).toContain('aria-expanded="false"');
+    expect(markup).toContain("lucide-chevron-down");
+    expect(markup).not.toContain("Intensité de la réponse");
+    expect(markup).not.toContain("Ajuste la longueur");
   });
 
   it("hides the external API toggle from user profiles", () => {

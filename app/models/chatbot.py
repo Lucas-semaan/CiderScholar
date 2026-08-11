@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import re
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from app.chat_effort import AnswerEffort, migrate_legacy_answer_effort
 from app.corpora import CorpusScope
 
 
@@ -19,6 +21,14 @@ class ChatEvidencePassage(BaseModel):
     evidence_kind: Literal["text", "figure"] = "text"
     chunk_id: int | None = Field(default=None, gt=0)
     section: str | None = Field(default=None, max_length=200)
+    context_role: Literal[
+        "anchor",
+        "result",
+        "method_or_conditions",
+        "discussion_or_limit",
+        "supporting_context",
+        "other",
+    ] = "other"
     page_start: int | None = Field(default=None, ge=1)
     page_end: int | None = Field(default=None, ge=1)
     figure_analysis_id: str | None = Field(
@@ -131,6 +141,120 @@ class ChatbotEvaluationTrace(BaseModel):
     question_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
+class ChatbotTiming(BaseModel):
+    """Content-free stage resource measurement safe to persist and expose.
+
+    Memory values are boundary observations, not sampled peak measurements.
+    When a stage is repeated, ``before`` is the first observation and ``after``
+    is the last one while token counts and durations are accumulated.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    stage: str = Field(min_length=1, max_length=80, pattern=r"^[a-z0-9_]+$")
+    duration_seconds: float = Field(ge=0.0)
+    count: int = Field(default=1, ge=1, le=10_000)
+    prompt_tokens: int = Field(default=0, ge=0)
+    completion_tokens: int = Field(default=0, ge=0)
+    process_rss_before_gb: float | None = Field(default=None, ge=0.0)
+    process_rss_after_gb: float | None = Field(default=None, ge=0.0)
+    system_used_before_gb: float | None = Field(default=None, ge=0.0)
+    system_used_after_gb: float | None = Field(default=None, ge=0.0)
+    system_available_before_gb: float | None = Field(default=None, ge=0.0)
+    system_available_after_gb: float | None = Field(default=None, ge=0.0)
+
+
+class ChatbotRetrievalTrace(BaseModel):
+    """Non-textual candidate-flow measurements for one retrieval stage."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal[1] = 1
+    stage: Literal[
+        "abstract_search",
+        "full_text_search",
+        "full_text_axis_search",
+        "full_text_pool_merge",
+        "full_text_reranking",
+        "full_text_evidence_selection",
+        "supplemental_abstract_search",
+        "supplemental_full_text_search",
+        "supplemental_full_text_axis_search",
+        "supplemental_full_text_pool_merge",
+        "supplemental_full_text_reranking",
+        "supplemental_full_text_evidence_selection",
+        "evidence_merge",
+        "semantic_filter",
+        "llm_context",
+    ]
+    query_variant_count: int = Field(default=0, ge=0)
+    lexical_candidate_count: int = Field(default=0, ge=0)
+    dense_candidate_count: int = Field(default=0, ge=0)
+    rrf_unique_candidate_count: int = Field(default=0, ge=0)
+    fused_candidate_count: int = Field(default=0, ge=0)
+    pre_rerank_candidate_count: int = Field(default=0, ge=0)
+    post_rerank_candidate_count: int = Field(default=0, ge=0)
+    selected_article_count: int = Field(default=0, ge=0)
+    selected_passage_count: int = Field(default=0, ge=0)
+    rejection_counts: dict[str, int] = Field(default_factory=dict)
+    vector_search_degraded: bool = False
+
+    @model_validator(mode="after")
+    def validate_rejection_counts(self) -> ChatbotRetrievalTrace:
+        for reason, count in self.rejection_counts.items():
+            if not re.fullmatch(r"[a-z0-9_]{1,80}", reason):
+                raise ValueError("retrieval rejection reasons must be stable codes")
+            if isinstance(count, bool) or count < 0:
+                raise ValueError("retrieval rejection counts must be non-negative integers")
+        return self
+
+
+class ScientificGenerationTrace(BaseModel):
+    """Non-textual measurements for one bounded scientific generation phase."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal[1] = 1
+    phase: Literal[
+        "abstract",
+        "evidence",
+        "facet_draft",
+        "final_assembly",
+        "deterministic_abstention",
+    ]
+    outcome: Literal["generated", "partial_generated", "abstained", "failed"]
+    request_count: int = Field(ge=0)
+    validation_retries: int = Field(ge=0)
+    length_retries: int = Field(ge=0)
+    correction_temperature: float | None = Field(default=None, ge=0.0, le=0.2)
+    prompt_tokens: int = Field(ge=0)
+    completion_tokens: int = Field(ge=0)
+
+    @model_validator(mode="after")
+    def coherent_attempts(self) -> ScientificGenerationTrace:
+        if self.phase == "deterministic_abstention":
+            if (
+                any(
+                    (
+                        self.request_count,
+                        self.validation_retries,
+                        self.length_retries,
+                        self.prompt_tokens,
+                        self.completion_tokens,
+                    )
+                )
+                or self.correction_temperature is not None
+            ):
+                raise ValueError("deterministic abstention cannot report model usage")
+            return self
+        minimum_requests = 1 + self.validation_retries + self.length_retries
+        if self.request_count < minimum_requests:
+            raise ValueError("generation trace request count is inconsistent with retries")
+        if (self.correction_temperature is None) == (self.validation_retries > 0):
+            raise ValueError("correction temperature must be recorded exactly when it is used")
+        return self
+
+
 class ChatbotResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -148,6 +272,8 @@ class ChatbotResult(BaseModel):
     duration_seconds: float = Field(ge=0.0)
     generation_status: Literal[
         "generated",
+        "partial_generated",
+        "abstained",
         "extractive_fallback",
         "diagnostic_only",
     ] = "generated"
@@ -159,4 +285,15 @@ class ChatbotResult(BaseModel):
     figure_analysis_count: int = Field(default=0, ge=0, le=10)
     figure_analysis_duration_seconds: float = Field(default=0.0, ge=0.0)
     figure_analysis_model: str | None = Field(default=None, max_length=200)
+    answer_effort: AnswerEffort = AnswerEffort.BALANCED
+    timings: list[ChatbotTiming] = Field(default_factory=list, max_length=40)
+    retrieval_traces: list[ChatbotRetrievalTrace] = Field(default_factory=list, max_length=40)
+    generation_traces: list[ScientificGenerationTrace] = Field(default_factory=list, max_length=5)
     evaluation: ChatbotEvaluationTrace | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_legacy_answer_intensity(cls, values: object) -> object:
+        """Read historical persisted answers without exposing the legacy field again."""
+
+        return migrate_legacy_answer_effort(values)

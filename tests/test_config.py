@@ -132,7 +132,11 @@ def test_argo_profile_keeps_bibliographic_apis_disabled() -> None:
 
     assert settings.argo.model == "chat-gpt-oss-120b"
     assert settings.argo.api_key_env == "LOCAL_SCIENCE_RAG_ARGO_API_KEY"
+    assert settings.argo.scientific_correction_temperature == 0.1
     assert settings.app.allow_bibliographic_apis is False
+
+    with pytest.raises(ValidationError, match="scientific_correction_temperature"):
+        Settings.model_validate({"argo": {"scientific_correction_temperature": 0.21}})
 
 
 def test_bibliographic_apis_require_explicit_enablement_and_official_urls() -> None:

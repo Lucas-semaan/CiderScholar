@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+import traceback
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -62,6 +63,21 @@ def _is_transient_database_contention(error: sqlite3.OperationalError) -> bool:
             "database table is locked",
         )
     )
+
+
+def _safe_exception_location(error: Exception) -> str:
+    """Return bounded code locations without logging exception messages or local values."""
+
+    frames = traceback.extract_tb(error.__traceback__, limit=8)
+    locations: list[str] = []
+    for frame in frames:
+        normalized = frame.filename.replace("\\", "/")
+        project_path = normalized.rsplit("/app/", maxsplit=1)
+        filename = (
+            f"app/{project_path[-1]}" if len(project_path) == 2 else normalized.rsplit("/", 1)[-1]
+        )
+        locations.append(f"{filename}:{frame.lineno}:{frame.name}")
+    return " > ".join(locations)[-1_000:] or "unavailable"
 
 
 @dataclass(frozen=True, slots=True)
@@ -333,10 +349,11 @@ class DurableJobWorker:
             if job.type not in {JobType.CHAT_ANSWER, JobType.DEEP_RESEARCH}:
                 raise
             self.logger.error(
-                "job_handler_unexpected_failure job_id=%s job_type=%s error_type=%s",
+                "job_handler_unexpected_failure job_id=%s job_type=%s error_type=%s location=%s",
                 job.id,
                 job.type.value,
                 type(error).__name__,
+                _safe_exception_location(error),
             )
             failed = self.repository.fail_attempt(
                 job.id,
@@ -367,10 +384,11 @@ class DurableJobWorker:
             if job.type not in {JobType.CHAT_ANSWER, JobType.DEEP_RESEARCH}:
                 raise
             self.logger.error(
-                "job_result_persistence_failed job_id=%s job_type=%s error_type=%s",
+                "job_result_persistence_failed job_id=%s job_type=%s error_type=%s location=%s",
                 job.id,
                 job.type.value,
                 type(error).__name__,
+                _safe_exception_location(error),
             )
             failed = self.repository.fail_attempt(
                 job.id,

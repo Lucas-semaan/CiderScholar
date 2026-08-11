@@ -1,3 +1,7 @@
+import type { JobState, JobStep, JobType } from "./chat";
+
+export type * from "./chat";
+
 export interface RuntimeSettings {
   offline_mode: boolean;
   bibliographic_apis: boolean;
@@ -236,6 +240,8 @@ export interface CorpusArticle {
   title: string;
   doi: string | null;
   journal: string | null;
+  work_type: string | null;
+  publisher: string | null;
   publication_year: number | null;
   language: string | null;
   validation_status: string;
@@ -277,6 +283,7 @@ export interface IngestionReport {
   sha256: string | null;
   article_id: string | null;
   status: "chunks_ready" | "duplicate" | "ocr_required" | "failed";
+  duplicate_reason: "sha256" | "doi" | "normalized_text" | null;
   page_count: number;
   chunk_count: number;
   resumed_from_cache: boolean;
@@ -306,6 +313,8 @@ export interface LibraryRecord {
   abstract: string | null;
   authors: string;
   journal: string | null;
+  work_type: string | null;
+  publisher: string | null;
   publication_year: number | null;
   citation_count: number | null;
   url: string | null;
@@ -314,6 +323,7 @@ export interface LibraryRecord {
   relevance_score: number | null;
   relevance_reason: string | null;
   relevance_theme: string | null;
+  themes: string[];
   sources: string | null;
   first_seen_at: string | null;
   last_seen_at: string | null;
@@ -341,164 +351,6 @@ export interface LibraryReviewDecisionResponse {
   vectors_deleted: number;
 }
 
-export type JobType =
-  "chat_answer" | "weekly_maintenance" | "deep_research" | "long_synthesis" | "corpus_ingestion";
-
-export type JobState =
-  "queued" | "running" | "succeeded" | "failed" | "cancel_requested" | "cancelled";
-
-export type JobStep =
-  | "waiting"
-  | "planning"
-  | "search"
-  | "enrichment"
-  | "reranking"
-  | "evidence_selection"
-  | "coverage"
-  | "figure_analysis"
-  | "generation"
-  | "argo"
-  | "validation"
-  | "persistence"
-  | "backup"
-  | "suggestions"
-  | "harvest"
-  | "index"
-  | "publish"
-  | "evidence"
-  | "verification"
-  | "synthesis"
-  | "ingestion";
-
-export type JobErrorCode = "timeout" | "quota" | "authentication" | "validation";
-
-export interface JobError {
-  code: JobErrorCode;
-  message: string;
-  retry_at: string | null;
-}
-
-export interface DurableJob {
-  id: string;
-  conversation_id: string;
-  type: JobType;
-  state: JobState;
-  step: JobStep;
-  attempt: number;
-  available_at: string;
-  created_at: string;
-  updated_at: string;
-  result_message_id: string | null;
-  error: JobError | null;
-}
-
-export interface PersistedUserMessage {
-  id: string;
-  role: "user";
-  content: string;
-  created_at: string;
-}
-
-export interface ChatJobSubmitResponse {
-  job: DurableJob;
-  user_message: PersistedUserMessage;
-}
-
-export interface ChatbotSource {
-  record_id: string;
-  origin: "local_rag" | "external_api";
-  evidence_level: "abstract" | "full_text";
-  article_id: string | null;
-  chunk_ids: number[];
-  page_ranges: string[];
-  figure_refs?: string[];
-  title: string;
-  authors: string[];
-  doi: string | null;
-  journal: string | null;
-  publication_year: number | null;
-  providers: string[];
-  url: string | null;
-  snippet: string;
-}
-
-export interface ChatbotFacetDraft {
-  key: string;
-  label: string;
-  query: string;
-  answer_markdown: string;
-  cited_evidence_ids: string[];
-  source_record_ids: string[];
-}
-
-export interface ChatbotEvaluationTrace {
-  run_id: string;
-  question_id: string;
-  profile: "p0" | "p1" | "p2";
-  question_sha256: string;
-}
-
-export interface ChatbotResponse {
-  message: string;
-  retrieval_query: string;
-  answer_markdown: string;
-  sources: ChatbotSource[];
-  warnings: string[];
-  model: string;
-  local_result_count: number;
-  external_result_count: number;
-  external_enrichment_used: boolean;
-  prompt_tokens: number;
-  completion_tokens: number;
-  duration_seconds: number;
-  generation_status?: "generated" | "extractive_fallback" | "diagnostic_only";
-  diagnostic_code?: string | null;
-  interaction_mode: "research" | "conversation";
-  reused_previous_sources: boolean;
-  facet_drafts?: ChatbotFacetDraft[];
-  figure_analysis_requested?: boolean;
-  figure_analysis_count?: number;
-  figure_analysis_duration_seconds?: number;
-  figure_analysis_model?: string | null;
-  evaluation?: ChatbotEvaluationTrace | null;
-}
-
-export interface ChatJobTerminalNotice {
-  kind: "job_terminal_notice";
-  job_id: string;
-  state: "failed" | "cancelled";
-  error_code: string | null;
-  diagnostic_code: string | null;
-}
-
-export type StoredChatResponse = ChatbotResponse | ChatJobTerminalNotice;
-
-export interface ChatConversationSummary {
-  id: string;
-  title: string;
-  created_at: string;
-  updated_at: string;
-  message_count: number;
-  last_message: string | null;
-  active_job_count: number;
-  favorite: boolean;
-}
-
-export interface StoredChatMessage {
-  id: string;
-  role: "user" | "assistant";
-  content: string;
-  response: StoredChatResponse | null;
-  response_time_milliseconds: number | null;
-  created_at: string;
-  helpful: boolean | null;
-}
-
-export interface ChatConversation extends ChatConversationSummary {
-  messages: StoredChatMessage[];
-  active_jobs: DurableJob[];
-}
-
 export interface SynthesisQuery {
   id: string;
   original_query: string;
@@ -523,17 +375,4 @@ export interface SynthesisDetail {
     bibliography: Array<Record<string, unknown>>;
     [key: string]: unknown;
   } | null;
-}
-
-export type PilotDefectType = "blocking" | "functional" | "usability" | "performance" | "other";
-
-export interface PilotDefectInput {
-  type: PilotDefectType;
-  step: string;
-  description: string;
-}
-
-export interface PilotDefect extends PilotDefectInput {
-  id: string;
-  created_at: string;
 }

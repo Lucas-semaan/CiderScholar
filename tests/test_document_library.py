@@ -28,7 +28,7 @@ def _seed_unified_documents(settings) -> Database:
                 "page_start": 1,
                 "page_end": 1,
                 "chunk_index": 0,
-                "text": "Malolactic fermentation evidence found only inside the PDF.",
+                "text": "Malolactic fermentation evidence found only inside the hard cider PDF.",
                 "token_count": 8,
                 "embedding_status": "indexed",
             }
@@ -57,7 +57,7 @@ def _seed_unified_documents(settings) -> Database:
                     "doi:10.1000/notice-only",
                     "10.1000/notice-only",
                     "Abstract-only study",
-                    "Keeving keyword present only in this abstract.",
+                    "Keeving keyword present only in this cidre abstract.",
                     "b" * 64,
                     "indexed",
                 ),
@@ -102,6 +102,22 @@ def test_document_library_merges_doi_and_searches_pdf_text(settings) -> None:
         "abstract_only": 1,
         "searchable": 2,
     }
+    assert summary["filters"]["themes"] == ["cidre", "fermentation"]
+
+
+def test_cidre_theme_is_transversal_across_metadata_and_full_text(settings) -> None:
+    database = _seed_unified_documents(settings)
+
+    result = browse_document_library(database, theme="cidre", availability="all")
+
+    assert result["total"] == 2
+    assert {record["document_type"] for record in result["records"]} == {
+        "abstract_only",
+        "full_text",
+    }
+    assert all("cidre" in record["themes"] for record in result["records"])
+    assert all(len(record["themes"]) <= 3 for record in result["records"])
+    assert all(record["relevance_theme"] == "fermentation" for record in result["records"])
 
 
 def test_library_api_uses_common_base_and_opens_selected_pdf(settings) -> None:

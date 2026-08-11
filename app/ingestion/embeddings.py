@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import gc
+import hashlib
 import logging
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -15,6 +17,11 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from app.config import Settings
 from app.database.sqlite import Database
+from app.desktop.model_integrity import (
+    MODEL_MANIFEST,
+    ModelIntegrityError,
+    verify_model_manifest,
+)
 from app.memory import MemoryGuard, MemoryLimitError
 
 LOGGER = logging.getLogger(__name__)
@@ -39,6 +46,59 @@ def model_storage_name(model_name: str) -> str:
 def local_model_path(settings: Settings, model_name: str | None = None) -> Path:
     selected = model_name or settings.embeddings.model_name
     return settings.paths.models_dir / model_storage_name(selected)
+
+
+def _model_revision(root: Path) -> str:
+    """Produce a cheap file-metadata revision key before a cached full hash audit."""
+
+    digest = hashlib.sha256()
+    try:
+        entries = sorted(root.rglob("*"))
+        for entry in entries:
+            relative = entry.relative_to(root).as_posix().encode("utf-8")
+            if entry.is_symlink():
+                digest.update(b"link\0" + relative + b"\n")
+                continue
+            if entry.is_file():
+                stat = entry.stat()
+                digest.update(
+                    b"file\0"
+                    + relative
+                    + b"\0"
+                    + str(stat.st_size).encode("ascii")
+                    + b"\0"
+                    + str(stat.st_mtime_ns).encode("ascii")
+                    + b"\n"
+                )
+    except OSError as exc:
+        raise ModelIntegrityError("embedding model cannot be inspected") from exc
+    return digest.hexdigest()
+
+
+@lru_cache(maxsize=16)
+def _verify_model_revision(root: str, model_name: str, revision: str) -> None:
+    """Hash weights once for an unchanged local model revision."""
+
+    del revision
+    verify_model_manifest(Path(root), model_name)
+
+
+def verify_local_embedding_model(
+    model_path: str | Path,
+    model_name: str,
+    *,
+    required: bool,
+) -> bool:
+    """Verify a local model if it is manifested, or require one for managed indexes."""
+
+    root = Path(model_path).resolve()
+    manifest_path = root / MODEL_MANIFEST
+    if not manifest_path.is_file():
+        if required:
+            raise ModelIntegrityError("managed embedding model manifest is missing or invalid")
+        return False
+    _verify_model_revision(str(root), model_name, _model_revision(root))
+    return True
 
 
 def prepare_prefixed_texts(texts: Sequence[str], prefix: str) -> list[str]:
@@ -76,6 +136,7 @@ class SentenceTransformerBackend:
         *,
         model_name: str | None = None,
         model_path: str | Path | None = None,
+        require_model_manifest: bool = False,
     ) -> None:
         self.settings = settings
         self._model_name = model_name or settings.embeddings.model_name
@@ -86,10 +147,20 @@ class SentenceTransformerBackend:
         )
         self._model: Any | None = None
         self._dimension: int | None = None
+        self.require_model_manifest = require_model_manifest
 
     @property
     def model_name(self) -> str:
         return self._model_name
+
+    def verify_model_integrity(self, *, required: bool | None = None) -> bool:
+        """Verify model files once per unchanged revision before a managed use."""
+
+        return verify_local_embedding_model(
+            self.path,
+            self._model_name,
+            required=self.require_model_manifest if required is None else required,
+        )
 
     def _load(self) -> Any:
         if self._model is not None:
@@ -99,6 +170,7 @@ class SentenceTransformerBackend:
                 f"local embedding model not found: {self.path}. "
                 "Run: python -m scripts.prepare_embedding_model --allow-network"
             )
+        self.verify_model_integrity()
         try:
             from sentence_transformers import SentenceTransformer
         except ImportError as exc:  # pragma: no cover - installation concern
@@ -157,8 +229,9 @@ class SentenceTransformerBackend:
         model = self._model
         self._model = None
         self._dimension = None
-        if model is not None:
-            del model
+        if model is None:
+            return
+        del model
         gc.collect()
         try:
             import torch

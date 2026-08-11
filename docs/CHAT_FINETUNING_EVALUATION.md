@@ -46,14 +46,20 @@ déjà créée et strictement vide. L'endpoint dédié reste la voie recommandé
 Chaque réponse réussie expose maintenant un statut explicite :
 
 - `generated` : synthèse ARGO validée ;
-- `extractive_fallback` : ARGO ou sa validation a échoué, mais les meilleurs passages du corpus
-  sont restitués directement avec leurs sources ;
-- `diagnostic_only` : le retrieval n'a fourni aucune preuve qualifiée ; cette sortie est une
-  anomalie mesurable du pipeline et non une affirmation d'absence dans le corpus.
+- `partial_generated` : une partie citée et validée de la synthèse est rendue dans la structure
+  normale, avec une limite localisée sur les axes non assemblés ;
+- `abstained` : les preuves ne permettent aucune affirmation scientifique validable ;
+- `diagnostic_only` : une étape technique n'a pas permis de produire une synthèse ; cette sortie est
+  une anomalie mesurable du pipeline et non une affirmation d'absence dans le corpus.
 
-Les deux sorties dégradées sont des succès techniques visibles et persistés. Elles permettent de
+`extractive_fallback` demeure lisible pour les anciennes réponses persistées, mais n'est plus produit :
+les passages bruts et la succession de sources ne constituent pas une synthèse scientifique.
+
+Les sorties dégradées sont des succès techniques visibles et persistés. Elles permettent de
 poursuivre un lot et de distinguer la fiabilité du pipeline de la qualité scientifique de la
-réponse. Elles ne doivent jamais être notées comme des synthèses ARGO réussies.
+réponse. Seules `generated` et les affirmations effectivement validées de `partial_generated` peuvent
+être notées comme contenu scientifique ; `abstained` et `diagnostic_only` ne sont pas des synthèses
+ARGO réussies.
 
 Un échec terminal ne disparaît plus du chat. Il persiste une réponse de type
 `job_terminal_notice`, avec :

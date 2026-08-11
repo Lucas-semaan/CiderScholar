@@ -1,13 +1,18 @@
 from __future__ import annotations
 
+import hashlib
 from datetime import UTC, datetime
 from pathlib import Path
+from unittest.mock import Mock
+from uuid import uuid4
 
 from app.admin.suggestion_ingest import import_shared_suggestions
 from app.corpus_packages.distribution import create_distribution_layout
 from app.database.sqlite import Database
+from app.ingestion.pipeline import IngestionReport
 from app.suggestions.models import (
     DoiSuggestionSource,
+    PdfSuggestionSource,
     SuggestionArgoDecision,
     SuggestionCandidateContext,
     SuggestionDraft,
@@ -50,6 +55,40 @@ def _inbox_package(settings, doi: str, *, uncertainty: str = "low") -> Path:
             uncertainty=uncertainty,
             confidence=0.95,
         ),
+    )
+    destination = (
+        settings.distribution.synchronized_root / "suggestions" / "inbox" / str(draft.suggestion_id)
+    )
+    Path(prepared.directory).replace(destination)
+    return destination
+
+
+def _inbox_pdf_package(settings, tmp_path: Path) -> Path:
+    payload = b"%PDF-1.7\nscientific content"
+    internal_name = f"suggestion-{uuid4().hex}.pdf"
+    pdf = tmp_path / internal_name
+    pdf.write_bytes(payload)
+    draft = SuggestionDraft(
+        created_at=datetime.now(UTC),
+        source=PdfSuggestionSource(
+            internal_filename=internal_name,
+            size_bytes=len(payload),
+            sha256=hashlib.sha256(payload).hexdigest(),
+        ),
+    )
+    candidate = SuggestionCandidateContext(title="Cider fermentation study")
+    prepared = build_suggestion_package(
+        settings,
+        draft,
+        candidate,
+        SuggestionArgoDecision(
+            relevant=True,
+            reason="Pertinence cidricole directe.",
+            theme="fermentation",
+            uncertainty="low",
+            confidence=0.95,
+        ),
+        pdf_path=pdf,
     )
     destination = (
         settings.distribution.synchronized_root / "suggestions" / "inbox" / str(draft.suggestion_id)
@@ -121,3 +160,51 @@ def test_corrupt_complete_suggestion_is_archived_without_import(settings, tmp_pa
         / "corrupt"
         / "bad-package"
     ).is_dir()
+
+
+def test_admin_pdf_import_runs_targeted_indexing_before_archiving(
+    settings, tmp_path, monkeypatch
+) -> None:
+    active = _configured(settings, tmp_path / "CiderScholar")
+    inbox = _inbox_pdf_package(active, tmp_path)
+    indexed = Mock(
+        return_value=(
+            [
+                IngestionReport(
+                    pdf_path="persisted.pdf",
+                    article_id="article-1",
+                    status="chunks_ready",
+                    duration_seconds=0.0,
+                )
+            ],
+            Mock(),
+        )
+    )
+    monkeypatch.setattr("app.admin.suggestion_ingest.ingest_and_index_paths", indexed)
+
+    report = import_shared_suggestions(active)
+
+    assert report.imported == 1
+    assert not inbox.exists()
+    indexed.assert_called_once()
+    assert indexed.call_args.args[0].paths.database_path == active.paths.common_database_path
+    assert indexed.call_args.args[1].path == active.paths.common_database_path
+    assert indexed.call_args.args[2][0].parent == active.paths.common_pdf_dir
+
+
+def test_admin_pdf_import_keeps_package_retryable_when_indexing_fails(
+    settings, tmp_path, monkeypatch
+) -> None:
+    active = _configured(settings, tmp_path / "CiderScholar")
+    inbox = _inbox_pdf_package(active, tmp_path)
+    monkeypatch.setattr(
+        "app.admin.suggestion_ingest.ingest_and_index_paths",
+        Mock(side_effect=RuntimeError("index unavailable")),
+    )
+
+    report = import_shared_suggestions(active)
+
+    assert report.imported == 0
+    assert report.rejected == 0
+    assert report.errors
+    assert inbox.is_dir()

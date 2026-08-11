@@ -44,6 +44,8 @@ def test_only_common_corpus_paths_are_created(settings) -> None:
     paths = corpus_paths(settings, CorpusScope.COMMON)
 
     assert paths.root == settings.paths.common_dir
+    assert settings.paths.bibliographic_database_path == paths.database_path
+    assert settings.paths.scientific_database_path == paths.database_path
     assert paths.database_path == settings.paths.common_database_path
     assert paths.database_path.parent.is_dir()
     assert paths.pdf_dir.is_dir()

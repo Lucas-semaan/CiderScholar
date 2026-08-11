@@ -1,10 +1,5 @@
-import type {
-  DiagnosticWorkerState,
-  JobState,
-  JobStep,
-  JobType,
-  ReadinessReport,
-} from "@/types/api";
+import type { DiagnosticWorkerState, JobType, ReadinessReport } from "@/types/api";
+import { jobStateLabels, jobStepLabels } from "@/lib/jobPresentation";
 
 export const diagnosticLabels: Record<keyof ReadinessReport["checks"], string> = {
   argo: "ARGO",
@@ -65,35 +60,5 @@ export const diagnosticJobTypeLabels: Record<JobType, string> = {
   corpus_ingestion: "Ingestion de documents",
 };
 
-export const diagnosticJobStateLabels: Record<JobState, string> = {
-  queued: "En attente",
-  running: "En cours",
-  succeeded: "Terminé",
-  failed: "Échec",
-  cancel_requested: "Annulation demandée",
-  cancelled: "Annulé",
-};
-
-export const diagnosticJobStepLabels: Record<JobStep, string> = {
-  waiting: "Préparation",
-  planning: "Analyse et planification de la question",
-  search: "Recherche locale dans le corpus",
-  enrichment: "Enrichissement bibliographique",
-  reranking: "Classement et fusion des passages",
-  evidence_selection: "Sélection sémantique des preuves",
-  coverage: "Contrôle et complément de la couverture",
-  figure_analysis: "Analyse locale des figures",
-  generation: "Génération de la réponse finale",
-  argo: "Traitement ARGO (ancien suivi)",
-  validation: "Validation scientifique",
-  persistence: "Enregistrement",
-  backup: "Sauvegarde du corpus",
-  suggestions: "Import des suggestions",
-  harvest: "Collecte bibliographique",
-  index: "Indexation et contrôles",
-  publish: "Publication du corpus",
-  evidence: "Extraction des preuves",
-  verification: "Vérification des affirmations",
-  synthesis: "Synthèse approfondie",
-  ingestion: "Ingestion des documents",
-};
+export const diagnosticJobStateLabels = jobStateLabels;
+export const diagnosticJobStepLabels = jobStepLabels;

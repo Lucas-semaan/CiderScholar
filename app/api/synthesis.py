@@ -6,7 +6,7 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, status
 
-from app.api.dependencies import get_database, get_settings
+from app.api.dependencies import get_common_corpus_database, get_database, get_settings
 from app.api.schemas import SynthesisRequest
 from app.api.serialization import serialize_row
 from app.config import Settings
@@ -24,7 +24,7 @@ router = APIRouter(prefix="/api/synthesis", tags=["synthesis"])
 
 @router.get("")
 def list_syntheses(
-    database: Annotated[Database, Depends(get_database)],
+    database: Annotated[Database, Depends(get_common_corpus_database)],
 ) -> dict[str, Any]:
     queries = [
         serialize_row(row, json_fields=("selected_article_ids",))
@@ -37,7 +37,7 @@ def list_syntheses(
 def synthesis_detail(
     query_id: str,
     settings: Annotated[Settings, Depends(get_settings)],
-    database: Annotated[Database, Depends(get_database)],
+    database: Annotated[Database, Depends(get_common_corpus_database)],
 ) -> dict[str, Any]:
     summary = next(
         (
@@ -96,14 +96,15 @@ def synthesis_detail(
 def run_synthesis(
     query_id: str,
     payload: SynthesisRequest,
-    database: Annotated[Database, Depends(get_database)],
+    scientific_database: Annotated[Database, Depends(get_common_corpus_database)],
+    application_database: Annotated[Database, Depends(get_database)],
 ) -> JobPublic:
     known_query = any(
-        str(row["id"]) == query_id for row in database.list_query_summaries(limit=1000)
+        str(row["id"]) == query_id for row in scientific_database.list_query_summaries(limit=1000)
     )
     if not known_query:
         raise HTTPException(status_code=404, detail="Synthèse introuvable.")
-    if not database.evidence_records_for_query(query_id):
+    if not scientific_database.evidence_records_for_query(query_id):
         raise HTTPException(
             status_code=409,
             detail=(
@@ -112,7 +113,7 @@ def run_synthesis(
             ),
         )
     try:
-        job = JobRepository(database.path).enqueue_long_synthesis(
+        job = JobRepository(application_database.path).enqueue_long_synthesis(
             LongSynthesisPayload(
                 query_id=query_id,
                 resume=payload.resume,

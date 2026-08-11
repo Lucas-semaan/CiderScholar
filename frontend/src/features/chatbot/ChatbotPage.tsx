@@ -1,12 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 
-import { Bot, History } from "lucide-react";
-
 import { Card } from "@/components/ui/Card";
 import { api } from "@/lib/api";
 import type { ChatConversationSummary, DurableJob } from "@/types/api";
 
-import { ChatMessage } from "./ChatMessage";
 import { ChatbotHero, ConversationHeader } from "./ChatbotChrome";
 import { ChatComposer } from "./ChatComposer";
 import {
@@ -16,6 +13,7 @@ import {
 } from "./chatNavigation";
 import type { ChatMessage as ChatMessageValue } from "./chatSession";
 import { ConversationSidebar } from "./ConversationSidebar";
+import { ConversationTranscript } from "./ConversationTranscript";
 import { createConversationTitle, withTrackedJobCounts } from "./conversationHistory";
 import { toConversationMessages, toSummary, welcomeMessage } from "./conversationView";
 import {
@@ -26,10 +24,10 @@ import {
   loadConversationWithActiveJobs,
   reloadTerminalConversation,
   releaseSubmissionLock,
+  type AnswerEffort,
   type ChatInteractionMode,
   type PendingChatSubmission,
 } from "./durableChat";
-import { JobStatusCard } from "./JobStatusCard";
 import { JobCompletionNotice } from "./JobCompletionNotice";
 import { useDurableJobs } from "./useDurableJobs";
 
@@ -44,6 +42,7 @@ export function ChatbotPage() {
   const [figureAnalysisEstimate, setFigureAnalysisEstimate] = useState("+12 à 18 min");
   const [deepResearch, setDeepResearch] = useState(false);
   const [interactionMode, setInteractionMode] = useState<ChatInteractionMode>("auto");
+  const [answerEffort, setAnswerEffort] = useState<AnswerEffort>("balanced");
   const [deepResearchAvailable, setDeepResearchAvailable] = useState(false);
   const [administrator, setAdministrator] = useState(false);
   const [enqueueing, setEnqueueing] = useState(false);
@@ -306,7 +305,8 @@ export function ChatbotPage() {
       existingPending.useExternalSources === externalSources &&
       existingPending.analyzeFigures === figureAnalysis &&
       existingPending.mode === (deepResearch ? "deep_research" : "quick") &&
-      existingPending.interactionMode === interactionMode
+      existingPending.interactionMode === interactionMode &&
+      existingPending.answerEffort === (deepResearch ? "deep" : answerEffort)
         ? existingPending
         : createPendingChatSubmission(
             question,
@@ -315,6 +315,7 @@ export function ChatbotPage() {
             deepResearch,
             interactionMode,
             figureAnalysis,
+            answerEffort,
           );
     pendingSubmissionRef.current = pending;
     setDraft("");
@@ -422,46 +423,16 @@ export function ChatbotPage() {
               title={activeConversation?.title ?? "Nouvelle conversation scientifique"}
             />
 
-            <div
-              aria-live="polite"
-              className="max-h-[58vh] min-h-[430px] space-y-5 overflow-y-auto bg-stone-50/60 p-4 sm:p-6"
-              role="log"
-            >
-              {messages.map((message) => (
-                <ChatMessage
-                  key={message.id}
-                  message={message}
-                  onFeedback={(messageId, helpful) => void saveFeedback(messageId, helpful)}
-                />
-              ))}
-              {activeJobs.map((job) => (
-                <JobStatusCard
-                  job={job}
-                  key={job.id}
-                  onCancel={(cancellableJob) => cancelJob(cancellableJob.id)}
-                  onRetry={(failedJob) => retryJob(failedJob.id)}
-                />
-              ))}
-              {conversationLoading && (
-                <div className="flex items-center gap-3 text-sm text-slate-500" role="status">
-                  <span className="grid size-9 place-items-center rounded-xl bg-slate-200">
-                    <History aria-hidden="true" className="size-4 animate-pulse" />
-                  </span>
-                  Chargement de la conversation…
-                </div>
-              )}
-              {enqueueing && (
-                <div className="flex items-center gap-3 text-sm text-slate-500">
-                  <span className="grid size-9 place-items-center rounded-xl bg-forest-600 text-white">
-                    <Bot aria-hidden="true" className="size-4" />
-                  </span>
-                  <div className="rounded-2xl border border-slate-200 bg-white px-4 py-3 shadow-soft">
-                    <p>Enregistrement de la demande…</p>
-                  </div>
-                </div>
-              )}
-              <div ref={endRef} />
-            </div>
+            <ConversationTranscript
+              activeJobs={activeJobs}
+              conversationLoading={conversationLoading}
+              endRef={endRef}
+              enqueueing={enqueueing}
+              messages={messages}
+              onCancelJob={cancelJob}
+              onFeedback={saveFeedback}
+              onRetryJob={retryJob}
+            />
 
             <ChatComposer
               allowDeepResearch={deepResearchAvailable && interactionMode !== "conversation"}
@@ -478,6 +449,7 @@ export function ChatbotPage() {
               figureAnalysisAvailable={figureAnalysisAvailable}
               figureAnalysisEstimate={figureAnalysisEstimate}
               interactionMode={interactionMode}
+              answerEffort={deepResearch ? "deep" : answerEffort}
               onDraftChange={setDraft}
               onDeepResearchChange={(enabled) => {
                 setDeepResearch(enabled);
@@ -499,6 +471,7 @@ export function ChatbotPage() {
                   setFigureAnalysis(false);
                 }
               }}
+              onAnswerEffortChange={setAnswerEffort}
               onSubmit={(event) => void ask(event)}
               showSuggestions={messages.length === 1}
             />

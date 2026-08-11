@@ -72,6 +72,33 @@ class OpenAlexClient(OfficialBibliographicClient):
             return []
         return [self._record(item) for item in raw_results if isinstance(item, dict)]
 
+    def lookup_ids(self, identifiers: list[str]) -> list[BibliographicRecord]:
+        """Resolve up to 100 bare OpenAlex work identifiers in one filtered request."""
+
+        unique_ids = list(
+            dict.fromkeys(
+                identifier.strip().upper()
+                for identifier in identifiers
+                if identifier.strip().upper().startswith("W") and identifier.strip()[1:].isdigit()
+            )
+        )
+        if not unique_ids:
+            return []
+        if len(unique_ids) > 100:
+            raise ValueError("OpenAlex ID lookup accepts at most 100 identifiers")
+        payload = self._get_json(
+            f"{self.config.openalex_base_url}/works",
+            params={
+                "filter": f"openalex_id:{'|'.join(unique_ids)}",
+                "per_page": len(unique_ids),
+                "api_key": self.api_key(),
+            },
+        )
+        raw_results = payload.get("results")
+        if not isinstance(raw_results, list):
+            return []
+        return [self._record(item) for item in raw_results if isinstance(item, dict)]
+
     def _record(self, item: dict[str, Any]) -> BibliographicRecord:
         authors: list[str] = []
         for authorship in item.get("authorships") or []:
@@ -93,6 +120,8 @@ class OpenAlexClient(OfficialBibliographicClient):
             authors=list(dict.fromkeys(author for author in authors if author)),
             abstract=_abstract(item.get("abstract_inverted_index")),
             journal=clean_text(source.get("display_name")),
+            work_type=clean_text(item.get("type")),
+            publisher=clean_text(source.get("host_organization_name")),
             publication_year=integer_or_none(item.get("publication_year")),
             doi=normalize_doi(item.get("doi")),
             citation_count=integer_or_none(item.get("cited_by_count")),

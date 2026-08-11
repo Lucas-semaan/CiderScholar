@@ -19,7 +19,7 @@ from app.config import Settings
 from app.database.sqlite import Database
 from app.updates.base import BibliographicApiDeferred
 from app.updates.doi_exclusions import DoiExclusionRegistry
-from app.updates.models import BibliographicRecord, clean_text
+from app.updates.models import BibliographicRecord, clean_text, normalize_doi
 from app.updates.openalex import OpenAlexClient
 from app.updates.service import CLIENTS
 
@@ -759,10 +759,10 @@ class BibliographicHarvestStore:
                     """
                     INSERT INTO bibliographic_records (
                         id, canonical_key, doi, title, abstract, authors,
-                        journal, publication_year, citation_count, url,
+                        journal, work_type, publisher, publication_year, citation_count, url,
                         content_hash, embedding_status, relevance_status,
                         relevance_score, relevance_reason, relevance_theme
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         record_id,
@@ -772,6 +772,8 @@ class BibliographicHarvestStore:
                         values["abstract"],
                         values["authors"],
                         values["journal"],
+                        values["work_type"],
+                        values["publisher"],
                         values["publication_year"],
                         values["citation_count"],
                         values["url"],
@@ -793,7 +795,8 @@ class BibliographicHarvestStore:
                     """
                     UPDATE bibliographic_records
                     SET doi = ?, title = ?, abstract = ?, authors = ?, journal = ?,
-                        publication_year = ?, citation_count = ?, url = ?,
+                        work_type = ?, publisher = ?, publication_year = ?,
+                        citation_count = ?, url = ?,
                         content_hash = ?, embedding_status = ?,
                         updated_at = CURRENT_TIMESTAMP
                     WHERE id = ?
@@ -804,6 +807,8 @@ class BibliographicHarvestStore:
                         values["abstract"],
                         values["authors"],
                         values["journal"],
+                        values["work_type"],
+                        values["publisher"],
                         values["publication_year"],
                         values["citation_count"],
                         values["url"],
@@ -943,6 +948,8 @@ class BibliographicHarvestStore:
             "abstract": record.abstract,
             "authors": json.dumps(record.authors, ensure_ascii=False),
             "journal": record.journal,
+            "work_type": record.work_type,
+            "publisher": record.publisher,
             "publication_year": record.publication_year,
             "citation_count": record.citation_count,
             "url": record.url,
@@ -989,6 +996,8 @@ class BibliographicHarvestStore:
             "abstract": abstract,
             "authors": json.dumps(authors, ensure_ascii=False),
             "journal": existing.get("journal") or record.journal,
+            "work_type": existing.get("work_type") or record.work_type,
+            "publisher": existing.get("publisher") or record.publisher,
             "publication_year": (existing.get("publication_year") or record.publication_year),
             "citation_count": max(citation_counts) if citation_counts else None,
             "url": existing.get("url") or record.url,
@@ -1073,6 +1082,8 @@ class BibliographicHarvestStore:
                 abstract=(str(duplicate["abstract"]) if duplicate["abstract"] else None),
                 authors=[str(author) for author in authors],
                 journal=(str(duplicate["journal"]) if duplicate["journal"] else None),
+                work_type=(str(duplicate["work_type"]) if duplicate["work_type"] else None),
+                publisher=(str(duplicate["publisher"]) if duplicate["publisher"] else None),
                 publication_year=duplicate["publication_year"],
                 doi=None,
                 citation_count=duplicate["citation_count"],
@@ -1087,7 +1098,7 @@ class BibliographicHarvestStore:
         connection.execute(
             """
             UPDATE bibliographic_records
-            SET title = ?, abstract = ?, authors = ?, journal = ?,
+            SET title = ?, abstract = ?, authors = ?, journal = ?, work_type = ?, publisher = ?,
                 publication_year = ?, citation_count = ?, url = ?,
                 content_hash = ?, embedding_status = ?, manual_decision = ?,
                 manual_reviewed_at = ?, updated_at = CURRENT_TIMESTAMP
@@ -1098,6 +1109,8 @@ class BibliographicHarvestStore:
                 merged_values["abstract"],
                 merged_values["authors"],
                 merged_values["journal"],
+                merged_values["work_type"],
+                merged_values["publisher"],
                 merged_values["publication_year"],
                 merged_values["citation_count"],
                 merged_values["url"],
@@ -1896,51 +1909,32 @@ class BibliographicHarvestStore:
                 )
             )
 
-    def pending_abstracts(self, *, limit: int = 1000) -> list[Any]:
-        with closing(self.database.connect()) as connection:
-            return list(
-                connection.execute(
-                    """
-                    SELECT id, title, abstract
-                    FROM bibliographic_records
-                    WHERE abstract IS NOT NULL
-                      AND relevance_status = 'accepted'
-                      AND embedding_status IN ('pending', 'failed')
-                    ORDER BY updated_at, id
-                    LIMIT ?
-                    """,
-                    (limit,),
-                )
-            )
+    def pending_abstracts(
+        self,
+        *,
+        limit: int = 1000,
+        retry_failed: bool = True,
+    ) -> list[Any]:
+        """Return only scientifically eligible abstracts awaiting vectorization."""
+
+        statuses = {"pending"}
+        if retry_failed:
+            statuses.add("failed")
+        rows = self._eligible_abstract_rows()
+        return [row for row in rows if str(row["embedding_status"]) in statuses][:limit]
 
     def reset_abstract_embedding_statuses(self) -> int:
-        """Requeue every accepted abstract before an explicit index reconstruction."""
+        """Requeue only eligible abstract-only records for an explicit rebuild."""
 
-        with closing(self.database.connect()) as connection, connection:
-            cursor = connection.execute(
-                """
-                UPDATE bibliographic_records
-                SET embedding_status = 'pending', updated_at = CURRENT_TIMESTAMP
-                WHERE abstract IS NOT NULL
-                  AND trim(abstract) != ''
-                  AND relevance_status = 'accepted'
-                  AND embedding_status != 'pending'
-                """
-            )
-            return int(cursor.rowcount)
+        eligible_ids = self.eligible_record_ids()
+        return self._set_embedding_status(eligible_ids, "pending", exclude_current=True)
 
     def update_embedding_status(self, record_ids: list[str], status: str) -> None:
         if not record_ids:
             return
-        if status not in {"pending", "indexed", "failed"}:
+        if status not in {"not_applicable", "pending", "indexed", "failed"}:
             raise ValueError("unsupported bibliographic embedding status")
-        placeholders = ",".join("?" for _ in record_ids)
-        with closing(self.database.connect()) as connection, connection:
-            connection.execute(
-                "UPDATE bibliographic_records SET embedding_status = ? "
-                f"WHERE id IN ({placeholders})",
-                (status, *record_ids),
-            )
+        self._set_embedding_status(record_ids, status)
 
     def records_by_ids(self, record_ids: list[str]) -> dict[str, Any]:
         unique_ids = list(dict.fromkeys(record_ids))
@@ -1963,26 +1957,112 @@ class BibliographicHarvestStore:
             return {str(row["id"]): row for row in rows}
 
     def ineligible_record_ids(self) -> list[str]:
+        eligible = set(self.eligible_record_ids())
         with closing(self.database.connect()) as connection:
-            rows = connection.execute(
-                """
-                SELECT id FROM bibliographic_records
-                WHERE relevance_status != 'accepted' OR abstract IS NULL
-                """
-            )
-            return [str(row["id"]) for row in rows]
+            return [
+                str(row["id"])
+                for row in connection.execute("SELECT id FROM bibliographic_records")
+                if str(row["id"]) not in eligible
+            ]
 
     def eligible_record_ids(self) -> list[str]:
+        return [str(row["id"]) for row in self._eligible_abstract_rows()]
+
+    def eligible_abstract_embedding_statuses(self) -> dict[str, str]:
+        """Return the vector lifecycle state of each eligible abstract-only record."""
+
+        return {
+            str(row["id"]): str(row["embedding_status"]) for row in self._eligible_abstract_rows()
+        }
+
+    def synchronize_abstract_index_eligibility(self) -> tuple[int, int]:
+        """Make vector statuses reflect DOI-valid abstract-only eligibility.
+
+        A valid abstract is not eligible once a full article with the same
+        normalized DOI exists.  Keeping that state in SQLite makes the
+        Qdrant collection reconstructible and prevents stale points from
+        being treated as usable evidence after a later full-text import.
+        """
+
+        eligible_ids = self.eligible_record_ids()
         with closing(self.database.connect()) as connection:
-            rows = connection.execute(
-                """
-                SELECT id FROM bibliographic_records
-                WHERE relevance_status = 'accepted'
-                  AND abstract IS NOT NULL
-                  AND trim(abstract) != ''
-                """
+            all_ids = [
+                str(row["id"]) for row in connection.execute("SELECT id FROM bibliographic_records")
+            ]
+        ineligible_ids = sorted(set(all_ids) - set(eligible_ids))
+        marked_not_applicable = self._set_embedding_status(
+            ineligible_ids,
+            "not_applicable",
+            exclude_current=True,
+        )
+        requeued = self._set_embedding_status(
+            eligible_ids,
+            "pending",
+            only_current="not_applicable",
+        )
+        return marked_not_applicable, requeued
+
+    def _eligible_abstract_rows(self) -> list[Any]:
+        """Apply the DOI/full-text eligibility contract from authoritative SQLite."""
+
+        with closing(self.database.connect()) as connection:
+            records = list(
+                connection.execute(
+                    """
+                    SELECT id, title, abstract, doi, embedding_status, updated_at
+                    FROM bibliographic_records
+                    WHERE relevance_status = 'accepted'
+                      AND abstract IS NOT NULL
+                      AND trim(abstract) != ''
+                    ORDER BY updated_at, id
+                    """
+                )
             )
-            return [str(row["id"]) for row in rows]
+            article_dois = {
+                doi
+                for row in connection.execute("SELECT doi FROM articles")
+                if (doi := _verified_normalized_doi(row["doi"])) is not None
+            }
+        return [
+            row
+            for row in records
+            if (doi := _verified_normalized_doi(row["doi"])) is not None and doi not in article_dois
+        ]
+
+    def _set_embedding_status(
+        self,
+        record_ids: list[str],
+        status: str,
+        *,
+        exclude_current: bool = False,
+        only_current: str | None = None,
+    ) -> int:
+        if not record_ids:
+            return 0
+        placeholders = ",".join("?" for _ in record_ids)
+        predicate = ""
+        parameters: list[object] = [status, *record_ids]
+        if exclude_current:
+            predicate = " AND embedding_status != ?"
+            parameters.append(status)
+        if only_current is not None:
+            predicate = " AND embedding_status = ?"
+            parameters.append(only_current)
+        with closing(self.database.connect()) as connection, connection:
+            cursor = connection.execute(
+                "UPDATE bibliographic_records SET embedding_status = ?, "
+                "updated_at = CURRENT_TIMESTAMP "
+                f"WHERE id IN ({placeholders}){predicate}",
+                parameters,
+            )
+            return int(cursor.rowcount)
+
+
+def _verified_normalized_doi(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip().casefold()
+    return normalized if normalize_doi(normalized) == normalized else None
 
 
 class CiderPilotHarvester:

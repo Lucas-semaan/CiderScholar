@@ -11,6 +11,11 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.deep_research.models import ContextualSummaryResult
 from app.jobs.contracts import DeepResearchPayload
+from app.llm.response_language import (
+    output_language_name,
+    question_language,
+    validate_output_language,
+)
 
 MAX_RESEARCH_ITERATIONS = 2
 
@@ -140,7 +145,9 @@ _ASSESSMENT_SYSTEM_PROMPT = (
     "Évalue si les résumés de preuves fournis suffisent à répondre factuellement à la question. "
     "S'ils ne suffisent pas, décris une seule lacune précise et propose une seule requête "
     "de recherche qui vise uniquement cette lacune. N'ajoute aucun fait, auteur, DOI ou "
-    "résultat. Réponds avec l'objet JSON demandé."
+    "résultat. gap_description est visible par l'utilisateur : rédige-le exclusivement dans la "
+    "langue de sa question et traduis le contenu des résumés si nécessaire. Réponds avec l'objet "
+    "JSON demandé."
 )
 
 
@@ -155,6 +162,7 @@ class ArgoResearchGapAssessor:
         question: str,
         evidence: tuple[ContextualSummaryResult, ...],
     ) -> MissingInformationAssessment | None:
+        output_language = question_language(question)
         evidence_payload = [
             {
                 "summary": item.summary,
@@ -167,11 +175,21 @@ class ArgoResearchGapAssessor:
         ]
         response = self.client.chat(
             [
-                {"role": "system", "content": _ASSESSMENT_SYSTEM_PROMPT},
+                {
+                    "role": "system",
+                    "content": (
+                        f"{_ASSESSMENT_SYSTEM_PROMPT} La langue de sortie obligatoire est "
+                        f"{output_language_name(output_language)} ; aucun mélange n'est accepté."
+                    ),
+                },
                 {
                     "role": "user",
                     "content": json.dumps(
-                        {"question": question, "accepted_evidence": evidence_payload},
+                        {
+                            "question": question,
+                            "output_language": output_language,
+                            "accepted_evidence": evidence_payload,
+                        },
                         ensure_ascii=False,
                     ),
                 },
@@ -181,8 +199,11 @@ class ArgoResearchGapAssessor:
             max_output_tokens=512,
         )
         try:
-            return MissingInformationAssessment.model_validate_json(response.content)
-        except (ValueError, TypeError):
+            assessment = MissingInformationAssessment.model_validate_json(response.content)
+            if assessment.gap_description:
+                validate_output_language(question, [assessment.gap_description])
+            return assessment
+        except (RuntimeError, ValueError, TypeError):
             return None
 
 

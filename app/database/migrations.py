@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 
-CURRENT_SCHEMA_VERSION = 29
+CURRENT_SCHEMA_VERSION = 31
 
 MIGRATIONS: dict[int, str] = {
     2: """
@@ -902,6 +902,13 @@ MIGRATIONS: dict[int, str] = {
             ON native_full_text_assets(state, source, format);
     """,
     29: "",
+    30: """
+        ALTER TABLE bibliographic_records ADD COLUMN work_type TEXT;
+        ALTER TABLE bibliographic_records ADD COLUMN publisher TEXT;
+        ALTER TABLE articles ADD COLUMN work_type TEXT;
+        ALTER TABLE articles ADD COLUMN publisher TEXT;
+    """,
+    31: "",
 }
 
 
@@ -947,9 +954,21 @@ def ensure_current(connection: sqlite3.Connection) -> None:
             from app.database.chat_progress_migration import add_chat_progress_steps
 
             add_chat_progress_steps(connection)
+        elif target_version == 31:
+            _ensure_bibliographic_type_columns(connection)
         else:
             connection.executescript(migration)
         connection.execute("INSERT INTO schema_version(version) VALUES (?)", (target_version,))
+
+
+def _ensure_bibliographic_type_columns(connection: sqlite3.Connection) -> None:
+    """Repair databases that observed an earlier, partial version 30 migration."""
+
+    for table in ("bibliographic_records", "articles"):
+        columns = {str(row[1]) for row in connection.execute(f"PRAGMA table_info({table})")}
+        for column in ("work_type", "publisher"):
+            if column not in columns:
+                connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} TEXT")
 
 
 def _assert_unique_dois(connection: sqlite3.Connection) -> None:

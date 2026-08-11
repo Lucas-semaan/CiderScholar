@@ -54,6 +54,7 @@ class ElsevierClient(OfficialBibliographicClient):
             authors=[creator] if creator else [],
             abstract=clean_text(item.get("dc:description")),
             journal=clean_text(item.get("prism:publicationName")),
+            work_type=clean_text(item.get("subtypeDescription") or item.get("subtype")),
             publication_year=_year(item.get("prism:coverDate")),
             doi=normalize_doi(item.get("prism:doi")) or normalize_doi(url),
             citation_count=integer_or_none(item.get("citedby-count")),

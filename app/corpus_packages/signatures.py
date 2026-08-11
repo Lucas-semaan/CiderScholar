@@ -144,23 +144,24 @@ def verify_corpus_package_signatures(
             or sha256_file(source) != artifact.sha256
         ):
             raise PackageSignatureError(f"signed artifact mismatch: {artifact.relative_path}")
-        result = subprocess.run(
-            [
-                _ssh_keygen(),
-                "-Y",
-                "verify",
-                "-f",
-                str(allowed),
-                "-I",
-                manifest.signer_identity,
-                "-n",
-                manifest.namespace,
-                "-s",
-                str(signature),
-            ],
-            input=source.read_bytes(),
-            capture_output=True,
-        )
+        with source.open("rb") as stream:
+            result = subprocess.run(
+                [
+                    _ssh_keygen(),
+                    "-Y",
+                    "verify",
+                    "-f",
+                    str(allowed),
+                    "-I",
+                    manifest.signer_identity,
+                    "-n",
+                    manifest.namespace,
+                    "-s",
+                    str(signature),
+                ],
+                stdin=stream,
+                capture_output=True,
+            )
         if result.returncode != 0:
             raise PackageSignatureError(
                 f"OpenSSH signature verification failed: {artifact.relative_path}"

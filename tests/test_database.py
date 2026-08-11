@@ -4,7 +4,7 @@ import sqlite3
 from contextlib import closing
 from datetime import UTC, datetime, timedelta
 
-from app.database.migrations import CURRENT_SCHEMA_VERSION
+from app.database.migrations import CURRENT_SCHEMA_VERSION, ensure_current
 from app.database.sqlite import Database
 
 
@@ -17,6 +17,8 @@ def _article() -> dict[str, object]:
         "abstract": "A local test abstract.",
         "authors": ["Ada Test"],
         "journal": "Synthetic Results",
+        "work_type": "journal-article",
+        "publisher": "Synthetic Press",
         "publication_year": 2025,
         "language": "en",
         "pdf_path": "data/pdf/example.pdf",
@@ -68,7 +70,14 @@ def test_schema_creates_required_tables_and_fts(settings) -> None:
         bibliographic_columns = {
             row[1] for row in connection.execute("PRAGMA table_info(bibliographic_records)")
         }
-        assert {"manual_decision", "manual_reviewed_at"} <= bibliographic_columns
+        article_columns = {row[1] for row in connection.execute("PRAGMA table_info(articles)")}
+        assert {
+            "manual_decision",
+            "manual_reviewed_at",
+            "work_type",
+            "publisher",
+        } <= bibliographic_columns
+        assert {"work_type", "publisher"} <= article_columns
         unique_indexes = {
             row[0]
             for row in connection.execute(
@@ -82,6 +91,34 @@ def test_schema_creates_required_tables_and_fts(settings) -> None:
             "ux_articles_doi_nocase",
             "ux_bibliographic_records_doi_nocase",
         } <= unique_indexes
+
+
+def test_schema_repairs_partial_version_30_type_columns() -> None:
+    with closing(sqlite3.connect(":memory:")) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE schema_version (version INTEGER PRIMARY KEY);
+            INSERT INTO schema_version(version) VALUES (30);
+            CREATE TABLE bibliographic_records (
+                id TEXT PRIMARY KEY,
+                work_type TEXT,
+                publisher TEXT
+            );
+            CREATE TABLE articles (id TEXT PRIMARY KEY);
+            """
+        )
+
+        ensure_current(connection)
+
+        article_columns = {row[1] for row in connection.execute("PRAGMA table_info(articles)")}
+        bibliographic_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(bibliographic_records)")
+        }
+        version = connection.execute("SELECT MAX(version) FROM schema_version").fetchone()[0]
+
+    assert {"work_type", "publisher"} <= article_columns
+    assert {"work_type", "publisher"} <= bibliographic_columns
+    assert version == 31
 
 
 def test_argo_request_events_store_only_quota_metadata(settings) -> None:

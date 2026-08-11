@@ -32,6 +32,7 @@ from app.deep_research.iteration import (
     ResearchGapAssessor,
     ResearchLoopStore,
 )
+from app.deep_research.numeric import DeepResearchNumericVerificationStage
 from app.deep_research.rendering import SQLiteDeepResearchRenderer
 from app.deep_research.retrieval import (
     DeepResearchFragmentHit,
@@ -99,6 +100,7 @@ class DeepResearchPreparationOperations:
     claim_extraction: AtomicClaimExtractionStage
     claim_verification: SemanticClaimVerificationStage
     epistemic_assessment: EpistemicAssessmentStage
+    numeric_verification: DeepResearchNumericVerificationStage
     claim_admission: ClaimAdmissionStage
     abstention: DeepResearchAbstentionStage
     renderer: SQLiteDeepResearchRenderer
@@ -288,12 +290,15 @@ class DeepResearchPreparationOperations:
         claims = self.claim_extraction.load(payload)
         verifications = self.claim_verification.verify(payload, claims)
         epistemic = self.epistemic_assessment.assess(payload, claims, verifications)
+        numeric = self.numeric_verification.verify(payload, claims)
         admission = self.claim_admission.decide(
             payload,
             claims,
             verifications,
             epistemic,
+            numeric,
         )
+        self.numeric_verification.assert_admission_safe(admission, numeric)
         self.abstention.decide(payload, loop, admission)
         allowed_scopes = {CorpusScope.COMMON}
         for record in loop.iterations:
@@ -310,6 +315,8 @@ class DeepResearchPreparationOperations:
         signature, cached = self._resolve_cache(payload)
         if cached is not None:
             return cached.answer_markdown
+        claims = self.claim_extraction.load(payload)
+        numeric = self.numeric_verification.load(payload, claims)
         loop = self.research_loop.load_or_create(payload)
         if loop.stop_reason is None:
             raise RuntimeError("deep-research search loop has no stop decision")
@@ -324,8 +331,8 @@ class DeepResearchPreparationOperations:
                 raise RuntimeError("deep-research abstention text is missing")
             answer_markdown = readiness.abstention_markdown
         else:
-            claims = self.claim_extraction.load(payload)
             admission = self.claim_admission.load(payload)
+            self.numeric_verification.assert_admission_safe(admission, numeric)
             answer_markdown = self.renderer.render(
                 payload,
                 claims,
@@ -362,6 +369,7 @@ class DeepResearchPreparationOperations:
 
     def _uncached_response_details(self, payload: DeepResearchPayload) -> dict[str, object]:
         claims = self.claim_extraction.load(payload)
+        numeric = self.numeric_verification.load(payload, claims)
         admission = self.claim_admission.load(payload)
         readiness = self.abstention.load(payload)
         rendered = self.renderer.load(payload) if readiness.outcome == "answerable" else None
@@ -370,6 +378,7 @@ class DeepResearchPreparationOperations:
                 payload,
                 claims,
             ),
+            "numeric_verification": self.numeric_verification.public_details(numeric),
             "claim_admission": [
                 {
                     "claim_id": item.claim_id,
@@ -475,6 +484,7 @@ def build_deep_research_operations(
             checkpoint_root,
         ),
         epistemic_assessment=EpistemicAssessmentStage(checkpoint_root),
+        numeric_verification=DeepResearchNumericVerificationStage(checkpoint_root),
         claim_admission=ClaimAdmissionStage(checkpoint_root),
         abstention=DeepResearchAbstentionStage(checkpoint_root),
         renderer=SQLiteDeepResearchRenderer(settings, checkpoint_root),

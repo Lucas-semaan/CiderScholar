@@ -4,11 +4,41 @@ import httpx
 
 from app.config import Settings
 from app.updates.clarivate import ClarivateClient
+from app.updates.crossref import CrossrefClient
 from app.updates.elsevier import ElsevierClient
 from app.updates.europe_pmc import EuropePmcClient
 from app.updates.models import BibliographicRecord
 from app.updates.openalex import OpenAlexClient
 from app.updates.service import BibliographicDiscoveryService
+
+
+def test_crossref_skips_invalid_candidate_without_losing_valid_results(settings) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "message": {
+                    "items": [
+                        {
+                            "DOI": "10.1000/invalid-year",
+                            "title": ["Invalid historical candidate"],
+                            "issued": {"date-parts": [[1400]]},
+                        },
+                        {
+                            "DOI": "10.1000/valid",
+                            "title": ["Valid cider candidate"],
+                            "issued": {"date-parts": [[2020]]},
+                            "type": "journal-article",
+                        },
+                    ]
+                }
+            },
+        )
+
+    with CrossrefClient(settings, transport=httpx.MockTransport(handler)) as client:
+        records = client.search("cider", 5)
+
+    assert [record.doi for record in records] == ["10.1000/valid"]
 
 
 def test_openalex_search_uses_migrated_key_and_maps_pages(settings, monkeypatch) -> None:
@@ -36,8 +66,12 @@ def test_openalex_search_uses_migrated_key_and_maps_pages(settings, monkeypatch)
                         "authorships": [{"author": {"display_name": "Ada Test"}}],
                         "primary_location": {
                             "landing_page_url": "https://example.test/work",
-                            "source": {"display_name": "Test Journal"},
+                            "source": {
+                                "display_name": "Test Journal",
+                                "host_organization_name": "Test Publisher",
+                            },
                         },
+                        "type": "article",
                     }
                 ]
             },
@@ -51,6 +85,8 @@ def test_openalex_search_uses_migrated_key_and_maps_pages(settings, monkeypatch)
     assert records[0].authors == ["Ada Test"]
     assert records[0].abstract == "Local evidence"
     assert records[0].journal == "Test Journal"
+    assert records[0].work_type == "article"
+    assert records[0].publisher == "Test Publisher"
 
 
 def test_openalex_batches_doi_lookups_in_one_filtered_request(settings, monkeypatch) -> None:
@@ -79,6 +115,33 @@ def test_openalex_batches_doi_lookups_in_one_filtered_request(settings, monkeypa
     assert len(records) == 1
     assert records[0].doi == "10.1000/a"
     assert records[0].abstract == "Cider nitrogen"
+
+
+def test_openalex_batches_work_id_lookups_in_one_filtered_request(settings, monkeypatch) -> None:
+    monkeypatch.setenv("OPENALEX_KEY", "openalex-test-key")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.params["filter"] == "openalex_id:W123|W456"
+        assert request.url.params["per_page"] == "2"
+        return httpx.Response(
+            200,
+            json={
+                "results": [
+                    {
+                        "id": "https://openalex.org/W123",
+                        "title": "A cider thesis",
+                        "type": "dissertation",
+                        "publication_year": 2020,
+                    }
+                ]
+            },
+        )
+
+    with OpenAlexClient(settings, transport=httpx.MockTransport(handler)) as client:
+        records = client.lookup_ids(["w123", "W456", "W123", "invalid"])
+
+    assert records[0].source_id == "W123"
+    assert records[0].work_type == "dissertation"
 
 
 def test_europe_pmc_maps_core_metadata_without_a_key(settings) -> None:

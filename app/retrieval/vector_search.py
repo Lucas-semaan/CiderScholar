@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import logging
+import threading
+from collections import OrderedDict
 from collections.abc import Sequence
+from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
@@ -13,13 +16,64 @@ from qdrant_client import QdrantClient, models
 from app.config import Settings
 from app.corpora import CorpusScope
 from app.database.sqlite import Database
+from app.desktop.model_integrity import ModelIntegrityError
 from app.ingestion.embeddings import (
     EmbeddedChunkBatch,
     EmbeddingBackend,
+    SentenceTransformerBackend,
 )
 from app.resource_lock import ResourceFileLock, corpus_resource_lock_path
+from app.retrieval.index_manifest import (
+    assert_index_generation_mutable,
+    assert_index_generation_ready,
+)
 
 LOGGER = logging.getLogger(__name__)
+_QUERY_VECTOR_CACHE_LIMIT = 128
+_QUERY_VECTOR_CACHE: OrderedDict[tuple[str, str], Any] = OrderedDict()
+_QUERY_VECTOR_CACHE_LOCK = threading.Lock()
+_LEGACY_MANIFEST_WARNINGS: set[tuple[str, str]] = set()
+_LEGACY_MANIFEST_WARNINGS_LOCK = threading.Lock()
+
+
+def clear_query_vector_cache() -> None:
+    """Clear the bounded process-local cache, primarily for deterministic tests."""
+
+    with _QUERY_VECTOR_CACHE_LOCK:
+        _QUERY_VECTOR_CACHE.clear()
+
+
+def _cached_query_vector(model_name: str, query: str) -> Any | None:
+    cache_key = (model_name, sha256(query.strip().encode("utf-8")).hexdigest())
+    with _QUERY_VECTOR_CACHE_LOCK:
+        vector = _QUERY_VECTOR_CACHE.get(cache_key)
+        if vector is not None:
+            _QUERY_VECTOR_CACHE.move_to_end(cache_key)
+        return vector
+
+
+def _remember_query_vector(model_name: str, query: str, vector: Any) -> None:
+    cache_key = (model_name, sha256(query.strip().encode("utf-8")).hexdigest())
+    stored = vector.copy() if hasattr(vector, "copy") else list(vector)
+    with _QUERY_VECTOR_CACHE_LOCK:
+        _QUERY_VECTOR_CACHE[cache_key] = stored
+        _QUERY_VECTOR_CACHE.move_to_end(cache_key)
+        while len(_QUERY_VECTOR_CACHE) > _QUERY_VECTOR_CACHE_LIMIT:
+            _QUERY_VECTOR_CACHE.popitem(last=False)
+
+
+def _warn_legacy_index_once(index: QdrantLocalIndex) -> None:
+    key = (str(index.path), index.collection_name)
+    with _LEGACY_MANIFEST_WARNINGS_LOCK:
+        if key in _LEGACY_MANIFEST_WARNINGS:
+            return
+        _LEGACY_MANIFEST_WARNINGS.add(key)
+    LOGGER.warning(
+        "Using legacy_unverified vector index collection=%s path=%s; run --recreate to adopt "
+        "a versioned generation manifest",
+        index.collection_name,
+        index.path,
+    )
 
 
 class VectorIndexConfigurationError(RuntimeError):
@@ -181,6 +235,7 @@ class QdrantLocalIndex:
         }
         if sizes != {len(batch.chunk_ids)} or not batch.chunk_ids:
             raise ValueError("inconsistent or empty embedded chunk batch")
+        assert_index_generation_mutable(self)
         self.ensure_collection(batch.vector_dimension)
 
         points: list[models.PointStruct] = []
@@ -217,7 +272,10 @@ class QdrantLocalIndex:
         article_ids: Sequence[str] | None = None,
         sections: Sequence[str] | None = None,
         score_threshold: float | None = None,
+        _manifest_validated: bool = False,
     ) -> list[ScoredChunkReference]:
+        if not _manifest_validated:
+            assert_index_generation_ready(self)
         vector = _float_vector(query_vector)
         search_limit = self.settings.qdrant.default_search_limit if limit is None else limit
         if search_limit <= 0:
@@ -294,6 +352,7 @@ class QdrantLocalIndex:
             return 0
         if any(chunk_id <= 0 for chunk_id in unique_ids):
             raise ValueError("Qdrant chunk identifiers must be positive")
+        assert_index_generation_mutable(self)
         self.client.delete(
             collection_name=self.collection_name,
             points_selector=models.PointIdsList(points=unique_ids),
@@ -304,7 +363,33 @@ class QdrantLocalIndex:
     def delete_collection(self) -> bool:
         if not self.collection_exists():
             return False
-        return bool(self.client.delete_collection(self.collection_name))
+        assert_index_generation_mutable(self)
+        client = self.client
+        local_client = getattr(client, "_client", None)
+        collection_path: Path | None = None
+        path_factory = getattr(local_client, "_collection_path", None)
+        if callable(path_factory):
+            raw_path = path_factory(self.collection_name)
+            collection_path = Path(raw_path) if raw_path is not None else None
+
+        # qdrant-client local mode removes the collection directory without
+        # closing its SQLite handle first.  Windows then leaves the directory
+        # in place silently, and a later create_collection reopens stale
+        # points.  Close only the selected local collection before delegating
+        # to the client; remote clients do not expose this mapping.
+        collections = getattr(local_client, "collections", None)
+        if isinstance(collections, dict):
+            collection = collections.get(self.collection_name)
+            close_collection = getattr(collection, "close", None)
+            if callable(close_collection):
+                close_collection()
+
+        deleted = bool(client.delete_collection(self.collection_name))
+        if deleted and collection_path is not None and collection_path.exists():
+            raise VectorIndexConfigurationError(
+                f"Qdrant collection directory still exists after deletion: {collection_path}"
+            )
+        return deleted
 
 
 class VectorSearchService:
@@ -315,10 +400,15 @@ class VectorSearchService:
         database: Database,
         backend: EmbeddingBackend,
         index: QdrantLocalIndex,
+        *,
+        close_backend: bool = True,
     ) -> None:
         self.database = database
         self.backend = backend
         self.index = index
+        self.close_backend = close_backend
+        self.query_cache_hits = 0
+        self.query_cache_misses = 0
 
     def search(
         self,
@@ -328,9 +418,39 @@ class VectorSearchService:
         article_ids: Sequence[str] | None = None,
         sections: Sequence[str] | None = None,
     ) -> list[VectorSearchResult]:
-        vectors = self.backend.encode_queries([query])
+        model_name = str(getattr(self.backend, "model_name", "unknown"))
+        if model_name != self.index.model_name:
+            raise VectorIndexConfigurationError(
+                f"embedding backend model is {model_name!r}, expected {self.index.model_name!r}"
+            )
+        manifest = assert_index_generation_ready(self.index)
+        if manifest is None:
+            _warn_legacy_index_once(self.index)
+        else:
+            if not isinstance(self.backend, SentenceTransformerBackend):
+                raise VectorIndexConfigurationError(
+                    "managed index requires the verified local embedding backend"
+                )
+            try:
+                self.backend.verify_model_integrity(required=True)
+            except ModelIntegrityError as exc:
+                raise VectorIndexConfigurationError(
+                    "managed index local embedding model failed integrity verification"
+                ) from exc
+        query_vector = _cached_query_vector(model_name, query)
+        if query_vector is None:
+            vectors = self.backend.encode_queries([query])
+            query_vector = vectors[0]
+            _remember_query_vector(model_name, query, query_vector)
+            self.query_cache_misses += 1
+        else:
+            self.query_cache_hits += 1
         references = self.index.search(
-            vectors[0], limit=limit, article_ids=article_ids, sections=sections
+            query_vector,
+            limit=limit,
+            article_ids=article_ids,
+            sections=sections,
+            _manifest_validated=True,
         )
         chunks = self.database.chunks_by_ids([reference.chunk_id for reference in references])
         results: list[VectorSearchResult] = []
@@ -358,5 +478,8 @@ class VectorSearchService:
         return results
 
     def close(self) -> None:
-        self.backend.close()
-        self.index.close()
+        try:
+            if self.close_backend:
+                self.backend.close()
+        finally:
+            self.index.close()

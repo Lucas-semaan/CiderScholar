@@ -178,6 +178,101 @@ def test_evidence_rag_uses_only_indirect_evidence_with_explicit_scope() -> None:
     assert "## Références" in result.answer_markdown
 
 
+def test_evidence_rag_recovers_empty_answerable_as_documentary_abstention() -> None:
+    passage = ChatEvidencePassage(
+        evidence_id="common:adjacent:abstract",
+        text=(
+            "The study describes filtration performance but does not compare the two "
+            "clarification agents asked about."
+        ),
+    )
+    record = ChatEvidenceRecord(
+        record_id="common:adjacent",
+        origin="local_rag",
+        evidence_level="abstract",
+        scope="common",
+        title="Adjacent clarification process",
+        evidence_grade="A",
+        passages=[passage],
+    )
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def chat(self, messages, *, json_schema, max_output_tokens, temperature=None):
+            self.calls += 1
+            assert temperature == (None if self.calls == 1 else 0.1)
+            assert max_output_tokens == 4096
+            assert json_schema["properties"]["status"]["enum"] == [
+                "answerable",
+                "insufficient",
+            ]
+            assert json_schema["properties"]["statements"]["minItems"] == 0
+            assert "status=insufficient" in messages[0]["content"]
+            if self.calls == 1:
+                return _response(
+                    json.dumps(
+                        {
+                            "status": "answerable",
+                            "response_format": "prose",
+                            "definition": "Comparaison de deux agents de clarification.",
+                            "statements": [],
+                            "limitations": [],
+                            "insufficiency_message": None,
+                        },
+                        ensure_ascii=False,
+                    )
+                )
+            assert "utilise status=insufficient" in messages[-1]["content"]
+            return _response(
+                json.dumps(
+                    {
+                        "status": "insufficient",
+                        "response_format": "prose",
+                        "definition": "Comparaison de deux agents de clarification.",
+                        "statements": [],
+                        "limitations": [
+                            "Le document porte sur un procédé adjacent sans comparaison directe."
+                        ],
+                        "insufficiency_message": (
+                            "Les preuves récupérées ne permettent pas de comparer directement "
+                            "les deux agents demandés."
+                        ),
+                    },
+                    ensure_ascii=False,
+                )
+            )
+
+    client = FakeClient()
+    result = CiderEvidenceRagService(client).answer(
+        "Quel agent de clarification est le plus efficace ?",
+        [record],
+    )
+
+    assert client.calls == 2
+    assert result.answer.status == "insufficient"
+    assert result.generation_status == "abstained"
+    assert result.answer.statements == []
+    assert result.cited_evidence_ids == []
+    assert result.source_record_ids == []
+    assert result.model == "chat-gpt-oss-20b"
+    assert "ne permettent pas de comparer directement" in result.answer_markdown
+    assert "Aucune référence n'est citée." in result.answer_markdown
+    assert "Adjacent clarification process" not in result.answer_markdown
+    assert result.generation_traces[0].model_dump() == {
+        "schema_version": 1,
+        "phase": "evidence",
+        "outcome": "abstained",
+        "request_count": 2,
+        "validation_retries": 1,
+        "length_retries": 0,
+        "correction_temperature": 0.1,
+        "prompt_tokens": 100,
+        "completion_tokens": 40,
+    }
+
+
 def test_pilot_rag_constrains_ids_and_renders_abstract_citations() -> None:
     record = _record("11111111-1111-1111-1111-111111111111", "10.1000/cider")
 
@@ -189,6 +284,7 @@ def test_pilot_rag_constrains_ids_and_renders_abstract_citations() -> None:
                 "const": "prose",
             }
             assert "abstracts" in messages[1]["content"]
+            assert json.loads(messages[1]["content"])["output_language"] == "fr"
             assert json.loads(messages[1]["content"])["conversation_history"] == [
                 {"role": "user", "content": "Parlons des fermentations."}
             ]
@@ -237,6 +333,74 @@ def test_pilot_rag_constrains_ids_and_renders_abstract_citations() -> None:
     assert "https://doi.org/10.1000/cider" in result.answer_markdown
     assert "ne remplace pas le texte intégral" in result.answer_markdown
     assert result.prompt_tokens == 50
+
+
+def test_evidence_rag_translates_every_generated_field_to_question_language() -> None:
+    passage = ChatEvidencePassage(
+        evidence_id="common:language:abstract",
+        text="The study observed aroma changes during wood aging.",
+    )
+    record = ChatEvidenceRecord(
+        record_id="common:language",
+        origin="local_rag",
+        evidence_level="abstract",
+        scope="common",
+        title="Aroma changes during wood aging",
+        evidence_grade="A",
+        passages=[passage],
+    )
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def chat(self, messages, **options):
+            self.calls += 1
+            payload = json.loads(messages[1]["content"])
+            assert payload["output_language"] == "fr"
+            assert "traduis son contenu scientifique" in messages[0]["content"]
+            if self.calls == 1:
+                assert options.get("temperature") is None
+                definition = "The study shows aging effects."
+            else:
+                assert options["temperature"] == 0.1
+                assert "Traduis intégralement chaque champ rédactionnel" in messages[-1]["content"]
+                definition = "Le vieillissement sous bois est le procédé étudié."
+            return _response(
+                json.dumps(
+                    {
+                        "status": "answerable",
+                        "response_format": "prose",
+                        "definition": definition,
+                        "statements": [
+                            {
+                                "statement": (
+                                    "L'étude observe une modification des arômes pendant le "
+                                    "vieillissement sous bois."
+                                ),
+                                "evidence_ids": ["common:language:abstract"],
+                                "section": "synthetic_answer",
+                                "mechanism": None,
+                            }
+                        ],
+                        "limitations": [
+                            "Les preuves disponibles reposent uniquement sur un abstract."
+                        ],
+                        "insufficiency_message": None,
+                    },
+                    ensure_ascii=False,
+                )
+            )
+
+    client = FakeClient()
+    result = CiderEvidenceRagService(client).answer(
+        "Quels effets le vieillissement sous bois produit-il ?",
+        [record],
+    )
+
+    assert client.calls == 2
+    assert result.answer.definition == "Le vieillissement sous bois est le procédé étudié."
+    assert "The study shows" not in result.answer_markdown
 
 
 def test_evidence_rag_uses_full_text_passages_and_renders_exact_pages() -> None:
@@ -431,7 +595,8 @@ def test_faceted_evidence_rag_keeps_cited_drafts_and_assembles_them() -> None:
                 assert len(payload["facet_drafts"]) == 3
                 assert "A=direct, B=indirect" in messages[0]["content"]
                 assert "N'utilise jamais C ou D comme preuve" in messages[0]["content"]
-                assert "un tableau statements vide est invalide" in messages[0]["content"]
+                assert "status=insufficient" in messages[0]["content"]
+                assert "status=answerable avec statements vide" in messages[0]["content"]
                 cited = enum[0]
             return _response(
                 json.dumps(
@@ -460,6 +625,124 @@ def test_faceted_evidence_rag_keeps_cited_drafts_and_assembles_them() -> None:
     assert result.facet_drafts[1].cited_evidence_ids == ["common:article-2:chunk:1"]
     assert result.prompt_tokens == 200
     assert result.completion_tokens == 80
+    assert [trace.phase for trace in result.generation_traces] == [
+        "facet_draft",
+        "facet_draft",
+        "facet_draft",
+        "final_assembly",
+    ]
+    assert all(trace.request_count == 1 for trace in result.generation_traces)
+    assert all(trace.correction_temperature is None for trace in result.generation_traces)
+
+
+def test_faceted_final_assembly_failure_returns_cited_partial_drafts() -> None:
+    records = []
+    for index in range(1, 4):
+        passage = ChatEvidencePassage(
+            evidence_id=f"common:article-{index}:chunk:1",
+            text=f"The documented observation for facet {index} was 3.03.",
+        )
+        records.append(
+            ChatEvidenceRecord(
+                record_id=f"common:article-{index}",
+                origin="local_rag",
+                evidence_level="abstract",
+                scope="common",
+                title=f"Study {index}",
+                evidence_grade="A",
+                passages=[passage],
+            )
+        )
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def chat(self, _messages, **_options):
+            self.calls += 1
+            cited = f"common:article-{min(self.calls, 3)}:chunk:1"
+            statement = (
+                "L'étude documente une observation."
+                if self.calls <= 3
+                else "L'étude documente une observation de 4,04."
+            )
+            return _response(
+                json.dumps(
+                    {
+                        "response_format": "prose",
+                        "statements": [{"statement": statement, "evidence_ids": [cited]}],
+                        "limitations": [],
+                    },
+                    ensure_ascii=False,
+                )
+            )
+
+    client = FakeClient()
+    result = CiderEvidenceRagService(client).answer_faceted(
+        "Quel est l'impact de l'élevage en barrique sur les arômes et la structure ?", records
+    )
+
+    assert client.calls == 5
+    assert result.generation_status == "partial_generated"
+    assert result.cited_evidence_ids == [
+        "common:article-1:chunk:1",
+        "common:article-2:chunk:1",
+        "common:article-3:chunk:1",
+    ]
+    assert "ne couvrent qu'une partie" in result.answer_markdown
+    assert result.prompt_tokens == 250
+    assert result.completion_tokens == 100
+    failed = result.generation_traces[-1]
+    assert failed.phase == "final_assembly"
+    assert failed.outcome == "failed"
+    assert failed.request_count == 2
+    assert failed.validation_retries == 1
+    assert failed.correction_temperature == 0.1
+
+
+def test_evidence_rag_salvages_only_valid_statement_after_repeated_failure() -> None:
+    passage = ChatEvidencePassage(
+        evidence_id="common:article-1:chunk:1",
+        text="The observed value was 3.03.",
+    )
+    record = ChatEvidenceRecord(
+        record_id="common:article-1",
+        origin="local_rag",
+        evidence_level="abstract",
+        scope="common",
+        title="Grounded study",
+        evidence_grade="A",
+        passages=[passage],
+    )
+
+    class FakeClient:
+        def chat(self, _messages, **_options):
+            return _response(
+                json.dumps(
+                    {
+                        "response_format": "prose",
+                        "statements": [
+                            {
+                                "statement": "La valeur observée était de 3,03.",
+                                "evidence_ids": [passage.evidence_id],
+                            },
+                            {
+                                "statement": "Une autre valeur était de 4,04.",
+                                "evidence_ids": [passage.evidence_id],
+                            },
+                        ],
+                        "limitations": [],
+                    },
+                    ensure_ascii=False,
+                )
+            )
+
+    result = CiderEvidenceRagService(FakeClient()).answer("Quel est l'effet ?", [record])
+
+    assert result.generation_status == "partial_generated"
+    assert [item.statement for item in result.answer.statements] == [
+        "La valeur observée était de 3,03."
+    ]
 
 
 def test_faceted_answer_salvage_discards_only_an_unsupported_numeric_statement() -> None:
@@ -873,9 +1156,11 @@ def test_pilot_rag_retries_an_unsupported_normative_claim() -> None:
     class FakeClient:
         def __init__(self) -> None:
             self.calls = 0
+            self.temperatures: list[float | None] = []
 
         def chat(self, _messages, **_options):
             self.calls += 1
+            self.temperatures.append(_options.get("temperature"))
             statement = (
                 "Le méthanol doit rester sous 200 mg/L pour respecter les normes."
                 if self.calls == 1
@@ -895,8 +1180,23 @@ def test_pilot_rag_retries_an_unsupported_normative_claim() -> None:
     result = CiderAbstractRagService(client).answer("Question", [record])
 
     assert client.calls == 2
+    assert client.temperatures == [None, 0.1]
     assert "Dans cette expérience" in result.answer_markdown
     assert result.prompt_tokens == 100
+    assert result.generation_traces[0].validation_retries == 1
+    assert result.generation_traces[0].correction_temperature == 0.1
+
+
+@pytest.mark.parametrize("temperature", [-0.01, 0.201, 1.0])
+def test_scientific_correction_temperature_is_bounded(temperature: float) -> None:
+    class FakeClient:
+        def chat(self, _messages, **_options):
+            raise AssertionError("invalid configuration must fail before generation")
+
+    with pytest.raises(ValueError, match="correction temperature"):
+        CiderAbstractRagService(FakeClient(), correction_temperature=temperature)
+    with pytest.raises(ValueError, match="correction temperature"):
+        CiderEvidenceRagService(FakeClient(), correction_temperature=temperature)
 
 
 @pytest.mark.parametrize(

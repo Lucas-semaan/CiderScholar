@@ -33,6 +33,9 @@ async def submit_pdf(
     file: Annotated[UploadFile, File()],
     transmit_pdf_confirmed: Annotated[Literal[True], Form()],
     scientific_comment: Annotated[str | None, Form(max_length=1500)] = None,
+    title: Annotated[str | None, Form(max_length=500)] = None,
+    doi: Annotated[str | None, Form(max_length=300)] = None,
+    abstract: Annotated[str | None, Form(max_length=4000)] = None,
 ) -> SuggestionSubmissionResult:
     payload = await file.read(settings.suggestions.maximum_pdf_bytes + 1)
     return submit_pdf_suggestion(
@@ -41,4 +44,7 @@ async def submit_pdf(
         payload=payload,
         scientific_comment=scientific_comment,
         transmit_pdf_confirmed=transmit_pdf_confirmed,
+        title=title,
+        doi=doi,
+        abstract=abstract,
     )

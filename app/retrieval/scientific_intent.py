@@ -117,6 +117,14 @@ def _evidence_grade(
     outcome_direct = not outcome_required or outcome_score > 0
     if matrix_direct and process_direct and outcome_direct:
         return "A"
+    # A result obtained with another process is contextual evidence, not a
+    # transferable process-level result. This distinction is essential for
+    # questions that name a treatment such as fining: membrane filtration or
+    # electroflotation may target the same outcome without documenting fining.
+    if process_required and not process_direct:
+        if matrix_tier == "distant" or outcome_score > 0:
+            return "C"
+        return "D"
     if matrix_applicable and (process_direct or outcome_direct):
         return "B"
     if matrix_tier == "distant" or process_score > 0 or outcome_score > 0:
@@ -205,6 +213,100 @@ STORAGE_PROCESS_EN = (
     "storage time",
     "shelf life",
     "storage duration",
+)
+
+FINING_PROCESS_FR = (
+    "collage",
+    "agent de collage",
+    "agents de collage",
+    "colle vegetale",
+    "colles vegetales",
+    "colle animale",
+    "colles animales",
+)
+FINING_PROCESS_EN = (
+    "fining",
+    "fining agent",
+    "fining agents",
+    "juice fining",
+    "cider fining",
+    "protein fining",
+)
+FINING_COMPARISON_MARKERS = (
+    "comparaison",
+    "comparer",
+    "compare",
+    "comparison",
+    "versus",
+    "vs",
+    "difference",
+    "differences",
+)
+PLANT_FINING_TERMS = (
+    "vegetal",
+    "vegetale",
+    "vegetales",
+    "colle vegetale",
+    "colles vegetales",
+    "proteine vegetale",
+    "proteines vegetales",
+    "plant protein",
+    "plant proteins",
+    "plant based protein",
+    "plant based proteins",
+    "vegetable protein",
+    "vegetable proteins",
+)
+ANIMAL_FINING_TERMS = (
+    "animal",
+    "animale",
+    "animales",
+    "colle animale",
+    "colles animales",
+    "proteine animale",
+    "proteines animales",
+    "gelatine",
+    "animal protein",
+    "animal proteins",
+    "gelatin",
+    "isinglass",
+    "casein",
+)
+APPLE_JUICE_FALSE_FRIENDS = (
+    "jus de pomme de cajou",
+    "cashew apple juice",
+    "cashew apple",
+)
+CLARIFICATION_TERMS = (
+    "clarification",
+    "clarifying",
+    "clarified",
+)
+PLANT_PROTEIN_FINING_MATERIALS = (
+    "proteine vegetale",
+    "proteines vegetales",
+    "proteine de pois",
+    "proteine de pomme de terre",
+    "plant protein",
+    "plant proteins",
+    "vegetable protein",
+    "vegetable proteins",
+    "pea protein",
+    "potato protein",
+)
+ANIMAL_PROTEIN_FINING_MATERIALS = (
+    "proteine animale",
+    "proteines animales",
+    "gelatine",
+    "animal protein",
+    "animal proteins",
+    "gelatin",
+    "casein",
+    "isinglass",
+)
+PROTEIN_FINING_MATERIALS = (
+    *PLANT_PROTEIN_FINING_MATERIALS,
+    *ANIMAL_PROTEIN_FINING_MATERIALS,
 )
 
 AROMA_FACET = ScientificFacet(
@@ -309,6 +411,52 @@ PROTEIN_STABILITY_FACET = ScientificFacet(
         "colloidal stability",
     ],
 )
+FINING_EFFECTS_FACET = ScientificFacet(
+    key="fining_effects",
+    label="Intérêt et effets du collage",
+    terms_fr=[
+        "effet du collage",
+        "efficacite du collage",
+        "clarte",
+        "turbidite",
+        "trouble",
+        "stabilite colloidale",
+        "elimination des polyphenols",
+        "qualite sensorielle",
+    ],
+    terms_en=[
+        "fining effect",
+        "fining efficacy",
+        "clarity",
+        "turbidity",
+        "haze",
+        "colloidal stability",
+        "phenolic removal",
+        "sensory quality",
+    ],
+)
+FINING_AGENTS_COMPARISON_FACET = ScientificFacet(
+    key="fining_agents_comparison",
+    label="Comparaison des colles végétales et animales",
+    terms_fr=[
+        "colle vegetale",
+        "colles vegetales",
+        "colle animale",
+        "colles animales",
+        "proteines vegetales",
+        "gelatine",
+        "comparaison des colles",
+    ],
+    terms_en=[
+        "plant fining agents",
+        "animal fining agents",
+        "plant proteins",
+        "animal proteins",
+        "gelatin",
+        "alternative fining agents",
+        "fining agent comparison",
+    ],
+)
 
 
 def analyze_scientific_intent(question: str) -> ScientificIntent:
@@ -322,6 +470,7 @@ def analyze_scientific_intent(question: str) -> ScientificIntent:
     primary: list[str] = []
     close: list[str] = []
     distant: list[str] = []
+    excluded: list[str] = []
     if _contains_any(normalized, CALVADOS_PRIMARY):
         primary = list(CALVADOS_PRIMARY)
         close = list(CALVADOS_CLOSE)
@@ -338,6 +487,7 @@ def analyze_scientific_intent(question: str) -> ScientificIntent:
         primary = ["jus de pomme", "apple juice"]
         close = ["apple must", "apple concentrate"]
         distant = ["model apple juice", "model solution"]
+        excluded = list(APPLE_JUICE_FALSE_FRIENDS)
 
     process_fr: list[str] = []
     process_en: list[str] = []
@@ -350,6 +500,12 @@ def analyze_scientific_intent(question: str) -> ScientificIntent:
     ):
         process_fr = list(STORAGE_PROCESS_FR)
         process_en = list(STORAGE_PROCESS_EN)
+    elif _contains_any(normalized, FINING_PROCESS_FR) or _contains_any(
+        normalized,
+        FINING_PROCESS_EN,
+    ):
+        process_fr = list(FINING_PROCESS_FR)
+        process_en = list(FINING_PROCESS_EN)
 
     facets: list[ScientificFacet] = []
     if _contains_any(normalized, AROMA_FACET.terms):
@@ -358,6 +514,18 @@ def analyze_scientific_intent(question: str) -> ScientificIntent:
         facets.append(STRUCTURE_FACET)
     if _contains_any(normalized, PROTEIN_STABILITY_FACET.terms):
         facets.append(PROTEIN_STABILITY_FACET)
+    fining_requested = bool(process_fr) and "fining" in process_en
+    if fining_requested:
+        facets.append(FINING_EFFECTS_FACET)
+        if "apple juice" in primary:
+            close = list(dict.fromkeys([*close, "cider", "apple cider", "wine"]))
+    if (
+        fining_requested
+        and _contains_any(normalized, FINING_COMPARISON_MARKERS)
+        and _contains_any(normalized, PLANT_FINING_TERMS)
+        and _contains_any(normalized, ANIMAL_FINING_TERMS)
+    ):
+        facets.append(FINING_AGENTS_COMPARISON_FACET)
     if (
         process_fr
         and STRUCTURE_FACET not in facets
@@ -374,6 +542,7 @@ def analyze_scientific_intent(question: str) -> ScientificIntent:
         matrix_distant=distant,
         process_terms_fr=process_fr,
         process_terms_en=process_en,
+        excluded_terms=excluded,
         facets=list({facet.key: facet for facet in facets}.values()),
     )
 
@@ -463,8 +632,21 @@ def score_scientific_text(
         matrix_score = 0.0
         matrix_tier = "none"
 
+    explicit_process_match = _contains_any(searchable, intent.process_terms)
+    protein_fining_title_match = _contains_any(title, CLARIFICATION_TERMS) and _contains_any(
+        title, PROTEIN_FINING_MATERIALS
+    )
+    comparative_protein_fining_text_match = (
+        _contains_any(text, CLARIFICATION_TERMS)
+        and _contains_any(text, PLANT_PROTEIN_FINING_MATERIALS)
+        and _contains_any(text, ANIMAL_PROTEIN_FINING_MATERIALS)
+        and _contains_any(text, FINING_COMPARISON_MARKERS)
+    )
+    protein_fining_match = "fining" in intent.process_terms and (
+        protein_fining_title_match or comparative_protein_fining_text_match
+    )
     if intent.process_terms:
-        process_score = 1.0 if _contains_any(searchable, intent.process_terms) else 0.0
+        process_score = 1.0 if explicit_process_match or protein_fining_match else 0.0
     else:
         process_score = 1.0
 
@@ -476,7 +658,11 @@ def score_scientific_text(
         matrix_score >= 0.8 and process_score > 0 and (not intent.facets or outcome_score > 0)
     )
     title_matrix = float(title_has_primary or title_has_close or title_has_distant)
-    title_process = float(not intent.process_terms or _contains_any(title, intent.process_terms))
+    title_process = float(
+        not intent.process_terms
+        or _contains_any(title, intent.process_terms)
+        or ("fining" in intent.process_terms and protein_fining_title_match)
+    )
     title_outcomes = (
         sum(_contains_any(title, facet.terms) for facet in intent.facets) / len(intent.facets)
         if intent.facets

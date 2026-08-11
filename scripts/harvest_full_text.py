@@ -52,7 +52,7 @@ def main(argv: list[str] | None = None) -> int:
     arguments = build_parser().parse_args(argv)
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
-    settings = load_settings(arguments.config)
+    settings = settings_for_corpus(load_settings(arguments.config), CorpusScope.COMMON)
     AdminBibliographicKeyVault(
         settings,
         load_local_profile(),
@@ -63,9 +63,8 @@ def main(argv: list[str] | None = None) -> int:
     settings.paths.create()
     database = Database(settings.paths.database_path)
     database.initialize()
-    rag_settings = settings_for_corpus(settings, CorpusScope.COMMON)
-    rag_database = Database(rag_settings.paths.database_path)
-    rag_database.initialize()
+    rag_settings = settings
+    rag_database = database
     audit, harvest = FullTextHarvestService(
         settings,
         database,

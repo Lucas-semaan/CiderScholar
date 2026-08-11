@@ -13,7 +13,7 @@ from app.config import Settings
 from app.corpora import CorpusScope, settings_for_corpus
 from app.corpus_packages.distribution import create_distribution_layout, validate_distribution_root
 from app.database.sqlite import Database
-from app.services.workflows import ingest_paths
+from app.services.workflows import ingest_and_index_paths
 from app.suggestions.evaluation import decision_is_accepted
 from app.suggestions.models import PdfSuggestionSource, SuggestionPackage, UrlSuggestionSource
 from app.suggestions.packaging import load_prepared_package, package_hash
@@ -125,7 +125,12 @@ def _import_pdf(
         temporary.replace(target)
     finally:
         temporary.unlink(missing_ok=True)
-    report = ingest_paths(settings, common, [target])[0]
+    reports, _indexing = ingest_and_index_paths(
+        settings,
+        common,
+        [target],
+    )
+    report = reports[0]
     return report.status in {"chunks_ready", "duplicate"}
 
 
@@ -152,6 +157,26 @@ def import_shared_suggestions(settings: Settings) -> SuggestionImportReport:
             continue
         keys = _package_keys(package)
         if keys & seen:
+            source = package.source
+            pdf_key = f"pdf:{source.sha256}" if isinstance(source, PdfSuggestionSource) else None
+            existing_pdf = common.article_by_sha256(source.sha256) if pdf_key in seen else None
+            pending_pdf_index = bool(
+                existing_pdf is not None
+                and common.chunks_for_embedding(
+                    limit=1,
+                    retry_failed=True,
+                    article_ids=[str(existing_pdf["id"])],
+                )
+            )
+            if isinstance(source, PdfSuggestionSource) and pending_pdf_index:
+                try:
+                    resumed = _import_pdf(corpus_settings, common, directory, package)
+                except Exception as exc:
+                    resumed = False
+                    errors.append(f"{directory.name}: {type(exc).__name__}")
+                if not resumed:
+                    errors.append(f"{directory.name}: indexing_resume_incomplete")
+                    continue
             counters["duplicates"] += 1
             _archive_package(directory, paths.archive, "duplicate")
             continue
@@ -173,6 +198,8 @@ def import_shared_suggestions(settings: Settings) -> SuggestionImportReport:
             seen.update(keys)
             _archive_package(directory, paths.archive, "imported")
         else:
-            counters["rejected"] += 1
-            _archive_package(directory, paths.archive, "rejected")
+            # SQLite has already recorded resumable chunks when vector indexing
+            # fails.  Keep the package in the inbox so the same acceptance can
+            # be retried; it must never be reported as an indexed acceptance.
+            errors.append(f"{directory.name}: ingestion_or_indexing_incomplete")
     return SuggestionImportReport(**counters, errors=errors[:100])

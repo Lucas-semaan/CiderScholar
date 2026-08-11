@@ -1,3 +1,25 @@
+# CiderScholar 0.2.9
+
+- Réduit la mémoire de construction, de signature et de publication en traitant les archives de
+  corpus et les installateurs Windows en flux plutôt qu'en lectures intégrales.
+- Centralise les migrations de compatibilité du niveau d'effort de réponse et les libellés de
+  progression, avec des tests de non-régression partagés.
+- Supprime les composants frontend sans consommateur, extrait le fil de conversation et conserve
+  des contrats TypeScript publics stables.
+- Intègre l'audit de préparation de la démonstration sans modifier les règles de preuve, les
+  données scientifiques ni les données utilisateur persistées.
+
+# CiderScholar 0.2.8
+
+- Ajoute une intensité de réponse adaptée à la demande, avec conservation explicite du choix
+  dans les travaux durables et l'interface du chatbot.
+- Renforce la vérification des affirmations numériques, la traçabilité de la génération et les
+  replis scientifiques lorsque les preuves disponibles sont insuffisantes.
+- Lie les index vectoriels à un manifeste de génération afin de détecter les index obsolètes ou
+  incompatibles avant la recherche.
+- Intègre les corrections locales du retrieval, du classement, du Deep Research, de la sauvegarde
+  du corpus et de leur couverture de tests depuis la 0.2.7.
+
 # CiderScholar 0.2.7
 
 - Rend les campagnes d'évaluation P0/P1/P2 séquentielles et auditables : une conversation

@@ -32,6 +32,15 @@ def test_chat_job_submission_is_strict_and_requires_client_uuid() -> None:
     assert request.use_external_sources is False
     assert request.mode == "quick"
     assert request.interaction_mode == "auto"
+    assert request.answer_effort.value == "balanced"
+
+    legacy_request = ChatJobSubmitRequest(
+        message="Question scientifique ?",
+        client_request_id=uuid4(),
+        answer_intensity="deep",
+    )
+    assert legacy_request.answer_effort.value == "deep"
+    assert "answer_intensity" not in legacy_request.model_dump(mode="json")
 
     with pytest.raises(ValidationError):
         ChatJobSubmitRequest(message="Question", client_request_id="not-a-uuid")
@@ -46,6 +55,13 @@ def test_chat_job_submission_is_strict_and_requires_client_uuid() -> None:
             message="Question",
             client_request_id=request_id,
             interaction_mode="unsupported",
+        )
+    with pytest.raises(ValidationError):
+        ChatJobSubmitRequest(
+            message="Question",
+            client_request_id=request_id,
+            answer_effort="balanced",
+            answer_intensity="deep",
         )
 
 

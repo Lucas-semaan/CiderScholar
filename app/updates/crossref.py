@@ -42,7 +42,15 @@ class CrossrefClient(OfficialBibliographicClient):
         items = message.get("items") if isinstance(message, dict) else None
         if not isinstance(items, list):
             return []
-        return [self._record(item) for item in items if isinstance(item, dict)]
+        records: list[BibliographicRecord] = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            try:
+                records.append(self._record(item))
+            except ValueError:
+                continue
+        return records
 
     def _user_agent(self) -> str:
         if self.config.crossref_email:
@@ -71,6 +79,8 @@ class CrossrefClient(OfficialBibliographicClient):
             authors=list(dict.fromkeys(authors)),
             abstract=clean_text(item.get("abstract")),
             journal=_first_text(item.get("container-title")),
+            work_type=clean_text(item.get("type")),
+            publisher=clean_text(item.get("publisher")),
             publication_year=_year(item),
             doi=normalize_doi(item.get("DOI")),
             citation_count=integer_or_none(item.get("is-referenced-by-count")),

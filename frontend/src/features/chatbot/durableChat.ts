@@ -4,11 +4,13 @@ import type {
   ChatJobSubmitResponse,
   DurableJob,
   PersistedUserMessage,
+  AnswerEffort,
 } from "@/types/api";
 
 import type { ChatMessage } from "./chatSession";
 
 export type ChatInteractionMode = "auto" | "research" | "conversation";
+export type { AnswerEffort } from "@/types/api";
 
 export interface PendingChatSubmission {
   message: string;
@@ -16,6 +18,7 @@ export interface PendingChatSubmission {
   analyzeFigures: boolean;
   mode: "quick" | "deep_research";
   interactionMode: ChatInteractionMode;
+  answerEffort: AnswerEffort;
   clientRequestId: string;
 }
 
@@ -40,6 +43,7 @@ export function createPendingChatSubmission(
   deepResearch = false,
   interactionMode: ChatInteractionMode = "auto",
   analyzeFigures = false,
+  answerEffort: AnswerEffort = "balanced",
 ): PendingChatSubmission {
   return {
     message,
@@ -47,6 +51,7 @@ export function createPendingChatSubmission(
     analyzeFigures,
     mode: deepResearch ? "deep_research" : "quick",
     interactionMode: deepResearch ? "research" : interactionMode,
+    answerEffort: deepResearch ? "deep" : answerEffort,
     clientRequestId,
   };
 }
@@ -63,6 +68,7 @@ export function enqueuePendingChat(
     analyze_figures: submission.analyzeFigures,
     mode: submission.mode,
     interaction_mode: submission.interactionMode,
+    answer_effort: submission.answerEffort,
   });
 }
 

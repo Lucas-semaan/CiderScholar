@@ -54,14 +54,29 @@ def _heading(line: str) -> str | None:
 
 
 def _split_long_sentence(text: str, max_tokens: int) -> Iterable[str]:
-    tokens = text.split()
-    if estimate_tokens(text) <= max_tokens:
+    matches = list(TOKEN_PATTERN.finditer(text))
+    if len(matches) <= max_tokens:
         yield text
         return
-    # Cutting is unavoidable only for a single sentence larger than max_tokens.
-    approximate_words = max(1, int(max_tokens * 0.72))
-    for start in range(0, len(tokens), approximate_words):
-        yield " ".join(tokens[start : start + approximate_words])
+
+    # Cutting is unavoidable only for a single sentence larger than max_tokens. Use the same
+    # token definition for the limit and the split: word-based approximations can exceed the
+    # configured bound on equations, references, or punctuation-heavy table text.
+    start = 0
+    while start < len(matches):
+        end = min(start + max_tokens, len(matches))
+        if end < len(matches):
+            # Prefer a real whitespace boundary in the latter half of the window. If a compact
+            # expression has none, the hard token boundary is safer than emitting an oversized
+            # chunk; both resulting parts remain exact substrings of the normalized page text.
+            earliest_natural_boundary = start + max(1, max_tokens // 2)
+            for boundary in range(end, earliest_natural_boundary - 1, -1):
+                gap = text[matches[boundary - 1].end() : matches[boundary].start()]
+                if any(character.isspace() for character in gap):
+                    end = boundary
+                    break
+        yield text[matches[start].start() : matches[end - 1].end()].strip()
+        start = end
 
 
 class ScientificChunker:
@@ -144,7 +159,7 @@ class ScientificChunker:
                 tail: list[_Unit] = []
                 tail_tokens = 0
                 for unit in reversed(current):
-                    if tail and tail_tokens + unit.tokens > self.overlap_tokens:
+                    if tail_tokens + unit.tokens > self.overlap_tokens:
                         break
                     tail.insert(0, unit)
                     tail_tokens += unit.tokens
@@ -164,6 +179,9 @@ class ScientificChunker:
                 flush(keep_overlap=False)
             elif current and token_count + unit.tokens > self.max_tokens:
                 flush(keep_overlap=True)
+                if current and token_count + unit.tokens > self.max_tokens:
+                    current = []
+                    token_count = 0
 
             current.append(unit)
             token_count += unit.tokens

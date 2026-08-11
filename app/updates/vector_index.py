@@ -44,8 +44,25 @@ class BibliographicIndexReport(BaseModel):
     records_indexed: int = Field(ge=0)
     records_failed: int = Field(ge=0)
     records_pruned: int = Field(default=0, ge=0)
+    eligible_records: int = Field(default=0, ge=0)
+    records_marked_not_applicable: int = Field(default=0, ge=0)
+    records_requeued: int = Field(default=0, ge=0)
     batches_completed: int = Field(ge=0)
     duration_seconds: float = Field(ge=0.0)
+    error_type: str | None = None
+    error_message: str | None = None
+
+
+class BibliographicIndexVerification(BaseModel):
+    """Exact, model-free consistency check for the abstract-only index."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    collection_name: str
+    eligible_record_count: int = Field(ge=0)
+    indexed_record_count: int = Field(ge=0)
+    qdrant_point_count: int = Field(ge=0)
+    verified: bool = True
 
 
 class BibliographicHybridResult(BaseModel):
@@ -71,6 +88,9 @@ class BibliographicHybridResponse(BaseModel):
 
     query: str
     results: list[BibliographicHybridResult]
+    lexical_candidate_count: int = Field(default=0, ge=0)
+    dense_candidate_count: int = Field(default=0, ge=0)
+    rrf_unique_candidate_count: int = Field(default=0, ge=0)
     duration_seconds: float = Field(ge=0.0)
 
 
@@ -198,6 +218,42 @@ class BibliographicVectorIndex:
                 break
         return record_ids
 
+    def record_payloads(self) -> dict[str, dict[str, object]]:
+        """Read only routing payloads, never abstracts or vectors, for verification."""
+
+        if not self.index.collection_exists():
+            return {}
+        payloads: dict[str, dict[str, object]] = {}
+        offset: int | str | None = None
+        while True:
+            points, offset = self.index.client.scroll(
+                collection_name=self.collection_name,
+                scroll_filter=models.Filter(
+                    must=[
+                        models.FieldCondition(
+                            key="kind",
+                            match=models.MatchValue(value="bibliographic_abstract"),
+                        )
+                    ]
+                ),
+                limit=256,
+                offset=offset,
+                with_payload=True,
+                with_vectors=False,
+            )
+            for point in points:
+                payload = point.payload or {}
+                record_id = payload.get("record_id")
+                if (
+                    not isinstance(record_id, str)
+                    or str(point.id) != record_id
+                    or record_id in payloads
+                ):
+                    raise RuntimeError("invalid bibliographic Qdrant payload")
+                payloads[record_id] = dict(payload)
+            if offset is None:
+                return payloads
+
     def delete(self, record_ids: Sequence[str]) -> int:
         if not record_ids or not self.index.collection_exists():
             return 0
@@ -229,25 +285,34 @@ def index_bibliographic_abstracts(
     *,
     close_backend: bool = True,
     recreate: bool = False,
+    retry_failed: bool = True,
+    raise_on_error: bool = True,
 ) -> BibliographicIndexReport:
     started = perf_counter()
     indexed = 0
     failed = 0
     pruned = 0
     batches = 0
+    marked_not_applicable = 0
+    requeued = 0
+    error_type: str | None = None
+    error_message: str | None = None
     index = BibliographicVectorIndex(settings)
     try:
+        # Hold the common Qdrant resource lock before changing any SQLite
+        # lifecycle state, so a reader or another writer cannot observe a
+        # mixed abstract generation.
+        _ = index.index.client
+        marked_not_applicable, requeued = store.synchronize_abstract_index_eligibility()
         if recreate:
             index.delete_collection()
             store.reset_abstract_embedding_statuses()
         eligible_ids = set(store.eligible_record_ids())
-        prunable_ids = set(store.ineligible_record_ids())
-        prunable_ids.update(set(index.record_ids()) - eligible_ids)
+        prunable_ids = set(index.record_ids()) - eligible_ids
         pruned = index.delete(sorted(prunable_ids))
-        rows = store.pending_abstracts(limit=5000)
         batch_size = settings.embeddings.batch_size
-        for start in range(0, len(rows), batch_size):
-            batch = rows[start : start + batch_size]
+        while rows := store.pending_abstracts(limit=5000, retry_failed=retry_failed):
+            batch = rows[:batch_size]
             record_ids = [str(row["id"]) for row in batch]
             texts = [f"{row['title']}\n{str(row['abstract'])[:12000]}" for row in batch]
             try:
@@ -260,10 +325,14 @@ def index_bibliographic_abstracts(
                 store.update_embedding_status(record_ids, "indexed")
                 indexed += len(record_ids)
                 batches += 1
-            except Exception:
+            except Exception as exc:
                 store.update_embedding_status(record_ids, "failed")
                 failed += len(record_ids)
-                raise
+                error_type = type(exc).__name__
+                error_message = str(exc)[:1000]
+                if raise_on_error:
+                    raise
+                break
     finally:
         index.close()
         if close_backend:
@@ -273,9 +342,63 @@ def index_bibliographic_abstracts(
         records_indexed=indexed,
         records_failed=failed,
         records_pruned=pruned,
+        eligible_records=len(store.eligible_record_ids()),
+        records_marked_not_applicable=marked_not_applicable,
+        records_requeued=requeued,
         batches_completed=batches,
         duration_seconds=perf_counter() - started,
+        error_type=error_type,
+        error_message=error_message,
     )
+
+
+def verify_bibliographic_abstract_index(
+    settings: Settings,
+    store: BibliographicHarvestStore,
+) -> BibliographicIndexVerification:
+    """Verify IDs, routing payloads and SQLite states without loading E5."""
+
+    index = BibliographicVectorIndex(settings)
+    try:
+        _ = index.index.client
+        expected_ids = set(store.eligible_record_ids())
+        payloads = index.record_payloads()
+        actual_ids = set(payloads)
+        total_points = (
+            int(index.index.client.count(collection_name=index.collection_name, exact=True).count)
+            if index.index.collection_exists()
+            else 0
+        )
+        if total_points != len(actual_ids):
+            raise RuntimeError("bibliographic collection contains a non-abstract point")
+        if actual_ids != expected_ids:
+            raise RuntimeError(
+                "bibliographic Qdrant point ids do not match eligible SQLite records"
+            )
+        for record_id, payload in payloads.items():
+            if (
+                payload.get("kind") != "bibliographic_abstract"
+                or payload.get("record_id") != record_id
+                or payload.get("model_name") != settings.embeddings.model_name
+            ):
+                raise RuntimeError(
+                    "bibliographic Qdrant payload does not match SQLite routing data"
+                )
+        non_indexed = {
+            record_id: status
+            for record_id, status in store.eligible_abstract_embedding_statuses().items()
+            if status != "indexed"
+        }
+        if non_indexed:
+            raise RuntimeError("eligible bibliographic records are not all marked indexed")
+        return BibliographicIndexVerification(
+            collection_name=index.collection_name,
+            eligible_record_count=len(expected_ids),
+            indexed_record_count=len(actual_ids),
+            qdrant_point_count=total_points,
+        )
+    finally:
+        index.close()
 
 
 class BibliographicHybridSearchService:
@@ -377,6 +500,9 @@ class BibliographicHybridSearchService:
         return BibliographicHybridResponse(
             query=query.strip(),
             results=results,
+            lexical_candidate_count=len(lexical_rows),
+            dense_candidate_count=len(vector_rows),
+            rrf_unique_candidate_count=len(scores),
             duration_seconds=perf_counter() - started,
         )
 

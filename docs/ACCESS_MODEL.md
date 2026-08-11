@@ -32,9 +32,9 @@ Statut : accepté pour le pilote.
 - un utilisateur peut proposer un DOI, une URL, un PDF, une référence manuelle et un commentaire ;
 - la pertinence cidricole est évaluée immédiatement avec sa propre clé ARGO après les contrôles locaux ;
 - une suggestion retenue est déposée dans l’espace SharePoint d’entrée ;
-- aucun suivi de statut ou écran de modération n’est requis pour le pilote ;
 - la machine administrateur importe les suggestions admissibles lors de la maintenance hebdomadaire ;
-- les PDF proposés peuvent être transmis à l’administrateur et intégrés si leurs droits le permettent.
+- les PDF proposés peuvent être transmis à l’administrateur et intégrés si leurs droits le permettent ;
+- tout PDF effectivement intégré est automatiquement indexé dans la même opération ciblée.
 
 ## Administration
 

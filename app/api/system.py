@@ -10,7 +10,6 @@ from fastapi import APIRouter, Depends, Request
 
 from app.api.dependencies import (
     get_common_corpus_database,
-    get_database,
     get_settings,
 )
 from app.api.schemas import ConfirmedDesktopAction, RuntimeSettingsRequest, SystemDiagnostics
@@ -43,10 +42,9 @@ def diagnostics(
 @router.get("/overview")
 def overview(
     settings: Annotated[Settings, Depends(get_settings)],
-    database: Annotated[Database, Depends(get_database)],
     common_database: Annotated[Database, Depends(get_common_corpus_database)],
 ) -> dict[str, Any]:
-    queries = database.list_query_summaries(limit=1000)
+    queries = common_database.list_query_summaries(limit=1000)
     bibliography = document_library_summary(common_database)["statistics"]
     return {
         "corpus": _corpus_statistics(common_database),

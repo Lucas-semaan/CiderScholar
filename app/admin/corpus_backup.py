@@ -35,7 +35,11 @@ def create_maintenance_backup(
 ) -> MaintenanceBackup:
     """Build an openable package before mutation and copy it to the protected drive."""
 
-    output = settings.paths.data_dir / "admin" / "maintenance" / str(maintenance_id) / "backup"
+    # A corpus version includes a long content hash.  Keep the internal build
+    # root deliberately short so Windows path APIs can still inspect the
+    # resulting manifest when the configured data directory is itself nested.
+    # The returned version directory remains the sole rollback authority.
+    output = settings.paths.data_dir / ".b" / maintenance_id.hex[:16]
     built = build_corpus_package(settings, output_root=output)
     version_directory = Path(built.version_directory)
     protected = archive_published_package(
@@ -65,8 +69,11 @@ def rollback_maintenance_backup(
     archive_path = version / manifest.archive.filename
     if hashlib.sha256(archive_path.read_bytes()).hexdigest() != backup.archive_sha256:
         raise CorpusInstallError("Le hash de la sauvegarde de rollback est invalide.")
-    root = settings.paths.data_dir / "admin" / "maintenance" / str(maintenance_id)
-    extracted = root / f"rollback-{uuid.uuid4().hex}"
+    # Keep the extraction path short for the same Windows path-budget reason as
+    # the immutable package build above.  UUIDs retain collision resistance;
+    # neither directory name is part of the verified backup contract.
+    root = settings.paths.data_dir / ".r" / maintenance_id.hex[:16]
+    extracted = root / f"x-{uuid.uuid4().hex[:16]}"
     extracted.mkdir(parents=True)
     try:
         expected = {artifact.relative_path: artifact for artifact in manifest.artifacts}

@@ -9,6 +9,7 @@ from uuid import UUID, uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from app.chat_effort import AnswerEffort, migrate_legacy_answer_effort
 from app.jobs.contracts import JobPublic, JobState, JobStep, JobType
 from app.memory_profiles import MemoryProfileName
 from app.suggestions.models import (
@@ -79,6 +80,7 @@ class ChatJobSubmitRequest(ApiModel):
     analyze_figures: bool = False
     mode: Literal["quick", "deep_research"] = "quick"
     interaction_mode: Literal["auto", "research", "conversation"] = "auto"
+    answer_effort: AnswerEffort = AnswerEffort.BALANCED
     evaluation_run_id: str | None = Field(
         default=None,
         pattern=r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,79}$",
@@ -88,6 +90,13 @@ class ChatJobSubmitRequest(ApiModel):
         pattern=r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,79}$",
     )
     evaluation_profile: Literal["p0", "p1", "p2"] | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_legacy_answer_intensity(cls, values: object) -> object:
+        """Accept the previous wire field during the UI rollout, but never both."""
+
+        return migrate_legacy_answer_effort(values)
 
     @field_validator("message")
     @classmethod

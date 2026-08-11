@@ -3,9 +3,9 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
 import type { DurableJob } from "@/types/api";
+import { formatJobDuration } from "@/lib/time";
 
 import { JobStatusCard } from "./JobStatusCard";
-import { formatJobDuration } from "./jobStatus";
 
 const job: DurableJob = {
   id: "job-1",

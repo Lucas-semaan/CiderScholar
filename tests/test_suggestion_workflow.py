@@ -48,7 +48,7 @@ def test_accepted_doi_is_packaged_atomically_with_minimal_receipt(settings, tmp_
     )
 
     assert result.state == "accepted"
-    assert "pas encore dans le RAG commun" in result.message
+    assert result.message == "Suggestion acceptée et transmise."
     destination = (
         configured.distribution.synchronized_root
         / "suggestions"

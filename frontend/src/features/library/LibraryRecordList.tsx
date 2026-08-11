@@ -8,7 +8,12 @@ import { formatNumber } from "@/lib/cn";
 import { statusTone } from "@/lib/status";
 import type { LibraryRecord } from "@/types/api";
 
-import { authorPreview, libraryStatusLabels } from "./libraryPresentation";
+import {
+  authorPreview,
+  libraryStatusLabels,
+  publicationSource,
+  themeLabel,
+} from "./libraryPresentation";
 
 interface LibraryRecordListProps {
   records: LibraryRecord[];
@@ -94,6 +99,7 @@ function LibraryRecordRow({
   onSelect: (id: string) => void;
 }) {
   const authors = authorPreview(record.authors);
+  const source = publicationSource(record);
   return (
     <button
       aria-label={`Consulter le document : ${record.title}`}
@@ -110,7 +116,8 @@ function LibraryRecordRow({
         <div className="min-w-0">
           <p className="font-semibold leading-6 text-slate-900">{record.title}</p>
           <p className="mt-1 text-xs text-slate-500">
-            {record.journal ?? "Journal inconnu"} · {record.publication_year ?? "année inconnue"}
+            {source.value ?? `${source.label} inconnue`} ·{" "}
+            {record.publication_year ?? "année inconnue"}
           </p>
           {authors && (
             <p className="mt-1 line-clamp-2 text-xs leading-5 text-slate-500">
@@ -137,7 +144,11 @@ function LibraryRecordRow({
       </div>
       <div className="mt-3 flex flex-wrap items-center gap-2 text-xs text-slate-500">
         {record.doi && <span className="font-mono">{record.doi}</span>}
-        {record.relevance_theme && <Badge>{record.relevance_theme}</Badge>}
+        {(record.themes ?? (record.relevance_theme ? [record.relevance_theme] : []))
+          .slice(0, 3)
+          .map((theme) => (
+            <Badge key={theme}>{themeLabel(theme)}</Badge>
+          ))}
         <span>{record.abstract ? "Abstract disponible" : "Sans abstract"}</span>
         {record.document_type === "full_text" && (
           <span>

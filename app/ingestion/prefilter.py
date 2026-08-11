@@ -11,23 +11,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from app.ingestion.deduplication import normalize_title, sha256_file
+from app.ingestion.deduplication import is_specific_title, normalize_title, sha256_file
 from app.ingestion.metadata import extract_metadata
 from app.ingestion.pdf_extractor import PageText, sorted_page_text
-
-MIN_TITLE_CHARACTERS = 40
-MIN_TITLE_WORDS = 5
-GENERIC_TITLES = {
-    "accepted manuscript",
-    "article",
-    "document",
-    "full text",
-    "main document",
-    "microsoft word document",
-    "publication",
-    "research article",
-    "untitled",
-}
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,7 +58,7 @@ class ExistingCorpusMatcher:
         self.by_title: dict[str, list[KnownArticle]] = defaultdict(list)
         for article in articles:
             title_key = normalize_title(article.title)
-            if _is_specific_title(title_key):
+            if is_specific_title(title_key):
                 self.by_title[title_key].append(article)
 
     @classmethod
@@ -146,7 +132,7 @@ class ExistingCorpusMatcher:
         title_candidate: ExistingDocumentMatch | None = None
         for title in title_candidates:
             title_key = normalize_title(title)
-            if not _is_specific_title(title_key):
+            if not is_specific_title(title_key):
                 continue
             matches = self.by_title.get(title_key, [])
             compatible = [
@@ -213,14 +199,6 @@ def _path_key(path: str | Path) -> str:
     elif raw_path.startswith("\\\\?\\"):
         raw_path = raw_path[4:]
     return os.path.normcase(os.path.normpath(os.path.abspath(raw_path)))
-
-
-def _is_specific_title(title_key: str) -> bool:
-    return (
-        len(title_key) >= MIN_TITLE_CHARACTERS
-        and len(title_key.split()) >= MIN_TITLE_WORDS
-        and title_key not in GENERIC_TITLES
-    )
 
 
 def _unique_titles(values: list[str]) -> list[str]:

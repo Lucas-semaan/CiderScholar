@@ -6,7 +6,6 @@ import {
   FlaskConical,
   HeartPulse,
   Menu,
-  MessageSquareWarning,
   Settings,
   X,
 } from "lucide-react";
@@ -23,7 +22,6 @@ const navigation = [
   { to: "/bibliotheque", label: "Base documentaire", icon: BookOpenText },
   { to: "/syntheses", label: "Synthèses", icon: FlaskConical },
   { to: "/diagnostic", label: "Diagnostic", icon: HeartPulse },
-  { to: "/retours-pilote", label: "Retours pilote", icon: MessageSquareWarning },
   { to: "/parametres", label: "Paramètres", icon: Settings },
 ];
 

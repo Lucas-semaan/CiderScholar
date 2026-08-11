@@ -6,6 +6,7 @@ import pytest
 
 from app.database.sqlite import Database
 from app.ingestion.embeddings import EmbeddedChunkBatch
+from app.memory import MemoryLimitError
 from app.retrieval.hybrid_search import (
     HybridSearchService,
     RankedList,
@@ -30,6 +31,11 @@ class FixedQueryBackend:
 
     def close(self) -> None:
         self.closed = True
+
+
+class LowMemoryGuard:
+    def check(self, operation: str) -> None:
+        raise MemoryLimitError(f"synthetic low-memory condition during {operation}")
 
 
 def _seed_hybrid_database(database: Database) -> list[int]:
@@ -231,3 +237,38 @@ def test_hybrid_query_variants_are_deduplicated_and_bounded(settings) -> None:
             hybrid.search("  ")
     finally:
         hybrid.close()
+
+
+def test_hybrid_search_keeps_full_text_lexical_results_when_vectors_exceed_memory(
+    settings,
+) -> None:
+    database = Database(settings.paths.database_path)
+    database.initialize()
+    _seed_hybrid_database(database)
+    backend = FixedQueryBackend()
+    index = QdrantLocalIndex(
+        settings,
+        model_name=backend.model_name,
+        collection_name="low_memory_hybrid",
+    )
+    hybrid = HybridSearchService(
+        settings,
+        database,
+        LexicalSearchService(settings, database),
+        VectorSearchService(database, backend, index),
+    )
+    hybrid.memory = LowMemoryGuard()
+
+    response = hybrid.search(
+        "temperature fermentation",
+        query_variants=["aroma concentration"],
+        limit=3,
+    )
+
+    assert {result.article_id for result in response.results} == {"article-a"}
+    assert all(result.lexical_rank is not None for result in response.results)
+    assert all(result.vector_rank is None for result in response.results)
+    assert response.lexical_candidates == 3
+    assert response.vector_candidates == 0
+    assert response.vector_search_degraded is True
+    assert backend.closed is True

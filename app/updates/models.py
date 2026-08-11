@@ -40,6 +40,8 @@ class BibliographicRecord(BaseModel):
     authors: list[str] = Field(default_factory=list)
     abstract: str | None = None
     journal: str | None = None
+    work_type: str | None = Field(default=None, max_length=100)
+    publisher: str | None = Field(default=None, max_length=500)
     publication_year: int | None = Field(default=None, ge=1600, le=2200)
     doi: str | None = None
     citation_count: int | None = Field(default=None, ge=0)

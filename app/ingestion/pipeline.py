@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import sqlite3
 import tempfile
 import uuid
 from datetime import UTC, datetime
@@ -16,7 +17,12 @@ from pydantic import BaseModel, ConfigDict, Field
 from app.config import Settings
 from app.database.sqlite import Database
 from app.ingestion.chunker import ScientificChunker
-from app.ingestion.deduplication import sha256_file
+from app.ingestion.deduplication import (
+    is_specific_title,
+    normalize_title,
+    normalized_document_sha256,
+    sha256_file,
+)
 from app.ingestion.metadata import extract_metadata
 from app.ingestion.pdf_extractor import (
     ExtractedDocument,
@@ -35,6 +41,7 @@ class IngestionReport(BaseModel):
     sha256: str | None = None
     article_id: str | None = None
     status: Literal["chunks_ready", "duplicate", "ocr_required", "failed"]
+    duplicate_reason: Literal["sha256", "doi", "normalized_text"] | None = None
     page_count: int = Field(default=0, ge=0)
     chunk_count: int = Field(default=0, ge=0)
     element_count: int = Field(default=0, ge=0)
@@ -55,6 +62,8 @@ class PdfCatalogMetadata(BaseModel):
     abstract: str | None = Field(default=None, max_length=50000)
     authors: list[str] = Field(default_factory=list, max_length=500)
     journal: str | None = Field(default=None, max_length=500)
+    work_type: str | None = Field(default=None, max_length=100)
+    publisher: str | None = Field(default=None, max_length=500)
     publication_year: int | None = Field(default=None, ge=1600, le=2200)
     language: str | None = Field(default=None, max_length=20)
     source: str = Field(min_length=1, max_length=200)
@@ -115,6 +124,44 @@ class IngestionPipeline:
             Path(temp_name).unlink(missing_ok=True)
             raise
 
+    def _article_with_same_normalized_text(
+        self,
+        document: ExtractedDocument,
+        *,
+        title: str,
+        publication_year: int | None,
+    ) -> sqlite3.Row | None:
+        """Confirm a title candidate only when every normalized page is identical."""
+
+        title_key = normalize_title(title)
+        if not is_specific_title(title_key):
+            return None
+        document_fingerprint = normalized_document_sha256(page.text for page in document.pages)
+        for candidate in self.database.article_identity_candidates():
+            if normalize_title(str(candidate["title"])) != title_key:
+                continue
+            candidate_year = candidate["publication_year"]
+            if (
+                publication_year is not None
+                and candidate_year is not None
+                and int(candidate_year) != publication_year
+            ):
+                continue
+            candidate_path = Path(str(candidate["pdf_path"])).resolve()
+            candidate_document = self._load_cache(str(candidate["sha256"]), candidate_path)
+            if candidate_document is None:
+                if not candidate_path.is_file():
+                    continue
+                candidate_document = self.extractor.extract(candidate_path)
+            if candidate_document.requires_ocr:
+                continue
+            candidate_fingerprint = normalized_document_sha256(
+                page.text for page in candidate_document.pages
+            )
+            if candidate_fingerprint == document_fingerprint:
+                return candidate
+        return None
+
     def ingest_file(
         self,
         pdf_path: str | Path,
@@ -143,12 +190,19 @@ class IngestionPipeline:
             sha256 = precomputed_sha256 or sha256_file(path)
             existing = self.database.article_by_sha256(sha256)
             if existing is not None and self.database.chunk_count(existing["id"]) > 0:
+                self.database.upsert_ingestion_job(
+                    pdf_path=str(path),
+                    sha256=sha256,
+                    state="chunks_ready",
+                    article_id=existing["id"],
+                )
                 return self._report(
                     started,
                     path,
                     sha256=sha256,
                     article_id=existing["id"],
                     status="duplicate",
+                    duplicate_reason="sha256",
                     chunk_count=self.database.chunk_count(existing["id"]),
                     element_count=self.database.document_element_count(existing["id"]),
                 )
@@ -204,6 +258,8 @@ class IngestionPipeline:
                         "abstract": catalog_metadata.abstract or metadata.abstract,
                         "authors": catalog_metadata.authors or metadata.authors,
                         "journal": catalog_metadata.journal or metadata.journal,
+                        "work_type": catalog_metadata.work_type or metadata.work_type,
+                        "publisher": catalog_metadata.publisher or metadata.publisher,
                         "publication_year": (
                             catalog_metadata.publication_year or metadata.publication_year
                         ),
@@ -232,12 +288,40 @@ class IngestionPipeline:
                         sha256=sha256,
                         article_id=existing_doi["id"],
                         status="duplicate",
+                        duplicate_reason="doi",
                         page_count=page_count,
                         chunk_count=existing_chunk_count,
                         element_count=self.database.document_element_count(existing_doi["id"]),
                         ocr_uncertain_page_count=uncertain_ocr_pages,
                         resumed_from_cache=resumed,
                     )
+            existing_content = self._article_with_same_normalized_text(
+                document,
+                title=metadata.title,
+                publication_year=metadata.publication_year,
+            )
+            if existing_content is not None:
+                existing_article_id = str(existing_content["id"])
+                existing_chunk_count = self.database.chunk_count(existing_article_id)
+                self.database.upsert_ingestion_job(
+                    pdf_path=str(path),
+                    sha256=sha256,
+                    state="chunks_ready",
+                    article_id=existing_article_id,
+                )
+                return self._report(
+                    started,
+                    path,
+                    sha256=sha256,
+                    article_id=existing_article_id,
+                    status="duplicate",
+                    duplicate_reason="normalized_text",
+                    page_count=page_count,
+                    chunk_count=existing_chunk_count,
+                    element_count=self.database.document_element_count(existing_article_id),
+                    ocr_uncertain_page_count=uncertain_ocr_pages,
+                    resumed_from_cache=resumed,
+                )
             self.database.upsert_ingestion_job(pdf_path=str(path), sha256=sha256, state="chunking")
             chunks = self.chunker.chunk(document.pages)
             if not chunks:
@@ -320,6 +404,7 @@ class IngestionPipeline:
         path: Path,
         *,
         status: Literal["chunks_ready", "duplicate", "ocr_required", "failed"],
+        duplicate_reason: Literal["sha256", "doi", "normalized_text"] | None = None,
         sha256: str | None = None,
         article_id: str | None = None,
         page_count: int = 0,
@@ -335,6 +420,7 @@ class IngestionPipeline:
             sha256=sha256,
             article_id=article_id,
             status=status,
+            duplicate_reason=duplicate_reason,
             page_count=page_count,
             chunk_count=chunk_count,
             element_count=element_count,

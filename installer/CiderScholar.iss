@@ -48,7 +48,12 @@ Name: "{localappdata}\CiderScholar\UserData\data\runtime"
 Name: "{localappdata}\CiderScholar\UserData\data\logs"
 
 [InstallDelete]
-Type: filesandordirs; Name: "{app}\frontend\dist"
+Type: filesandordirs; Name: "{app}\app"
+Type: filesandordirs; Name: "{app}\frontend"
+Type: filesandordirs; Name: "{app}\runtime"
+Type: filesandordirs; Name: "{app}\scripts"
+Type: files; Name: "{app}\LICENSE"
+Type: files; Name: "{app}\requirements-runtime.txt"
 
 [Files]
 Source: "{#SourceRoot}\application\*"; DestDir: "{app}"; Flags: ignoreversion comparetimestamp recursesubdirs createallsubdirs
@@ -89,7 +94,7 @@ begin
   if CurStep = ssPostInstall then
   begin
     if not Exec(ExpandConstant('{app}\runtime\python.exe'),
-      '-m scripts.verify_desktop_install --config "' +
+      '-B -m scripts.verify_desktop_install --config "' +
       ExpandConstant('{localappdata}\CiderScholar\UserData\config.yaml') + '"',
       ExpandConstant('{app}'), SW_HIDE, ewWaitUntilTerminated, ResultCode) or (ResultCode <> 0) then
       RaiseException('Le runtime ou un modèle local installé n''a pas passé la vérification d''intégrité.');

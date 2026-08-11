@@ -262,8 +262,8 @@ def test_hierarchical_synthesis_renders_only_sqlite_citations(settings) -> None:
 
     assert execution.llm_calls == 3
     assert execution.result.cited_evidence_ids == evidence_ids
-    assert "[Corpus commun · article-1, p. 2]" in execution.result.answer_markdown
-    assert "[Corpus commun · article-2, p. 5]" in execution.result.answer_markdown
+    assert "[Common corpus · article-1, p. 2]" in execution.result.answer_markdown
+    assert "[Common corpus · article-2, p. 5]" in execution.result.answer_markdown
     assert "One study reported a 25% change." in execution.result.answer_markdown
     assert "10.1000/sqlite-1" in execution.result.answer_markdown
     assert len(execution.result.bibliography) == 2
@@ -305,7 +305,7 @@ def test_synthesis_preserves_common_origin_in_citations_and_bibliography(setting
         .result
     )
 
-    assert "[Corpus commun · article-1, p. 2]" in result.answer_markdown
+    assert "[Common corpus · article-1, p. 2]" in result.answer_markdown
     assert result.bibliography[0].scope is CorpusScope.COMMON
 
 

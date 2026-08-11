@@ -11,6 +11,7 @@ from app.models.synthesis import BibliographyEntry
 from app.services.workflows import (
     apply_runtime_overrides,
     bibliography_to_bibtex,
+    ingest_and_index_paths,
     ingest_paths,
     pdf_paths,
     save_uploaded_pdf,
@@ -48,6 +49,55 @@ def test_pdf_folder_discovery_is_explicit_and_recursive(settings) -> None:
         "two.pdf",
         "one.pdf",
     ]
+
+
+def test_ingest_and_index_paths_resumes_only_resolved_articles(settings, tmp_path) -> None:
+    fresh = tmp_path / "fresh.pdf"
+    duplicate = tmp_path / "duplicate.pdf"
+    database = Mock()
+    database.chunks_for_embedding.side_effect = [[Mock()], []]
+    reports = [
+        IngestionReport(
+            pdf_path=str(fresh), article_id="fresh", status="chunks_ready", duration_seconds=0.0
+        ),
+        IngestionReport(
+            pdf_path=str(duplicate), article_id="old", status="duplicate", duration_seconds=0.0
+        ),
+    ]
+    indexed = Mock()
+    with (
+        patch("app.services.workflows.ingest_paths", return_value=reports),
+        patch("app.services.workflows.index_pending_chunks", return_value=indexed) as index,
+    ):
+        actual_reports, actual_indexed = ingest_and_index_paths(
+            settings, database, [fresh, duplicate]
+        )
+
+    assert actual_reports == reports
+    assert actual_indexed is indexed
+    index.assert_called_once_with(
+        settings, database, article_ids=["fresh", "old"], retry_failed=True
+    )
+
+
+def test_ingest_and_index_paths_never_reports_an_incomplete_index_as_success(
+    settings, tmp_path
+) -> None:
+    pdf = tmp_path / "fresh.pdf"
+    database = Mock()
+    database.chunks_for_embedding.side_effect = [[Mock()], [Mock()]]
+    reports = [
+        IngestionReport(
+            pdf_path=str(pdf), article_id="fresh", status="chunks_ready", duration_seconds=0.0
+        )
+    ]
+
+    with (
+        patch("app.services.workflows.ingest_paths", return_value=reports),
+        patch("app.services.workflows.index_pending_chunks", return_value=Mock()),
+        pytest.raises(RuntimeError, match="indexation automatique reste incomplète"),
+    ):
+        ingest_and_index_paths(settings, database, [pdf])
 
 
 def test_ingest_paths_runs_explicit_ocr_fallback(settings, tmp_path) -> None:

@@ -33,7 +33,11 @@ def test_release_matrix_and_inno_contract_require_no_runtime_toolchain() -> None
     assert r"\models\*" in script
     assert r"\common-corpus\*" in script
     assert "ShouldInstallBundledCommonCorpus" in script
-    assert 'Type: filesandordirs; Name: "{app}\\frontend\\dist"' in script
+    assert "-B -m scripts.verify_desktop_install" in script
+    for replaceable_directory in ("app", "frontend", "runtime", "scripts"):
+        assert f'Type: filesandordirs; Name: "{{app}}\\{replaceable_directory}"' in script
+    assert 'Type: files; Name: "{app}\\LICENSE"' in script
+    assert 'Type: files; Name: "{app}\\requirements-runtime.txt"' in script
     assert r"\common\database\science_rag.sqlite3')) and" in script
     assert r"\common\qdrant\collection'));" in script
     assert (
@@ -136,7 +140,7 @@ def test_uninstall_backup_contains_corpus_and_durable_data_but_no_secret(
         assert all("secret" not in name for name in names)
 
 
-def test_hashed_application_release_publishes_latest_last(tmp_path: Path) -> None:
+def test_hashed_application_release_publishes_latest_last(tmp_path: Path, monkeypatch) -> None:
     release = tmp_path / "release"
     release.mkdir()
     installer = release / "CiderScholar-0.2.0-windows-x64.exe"
@@ -159,7 +163,18 @@ def test_hashed_application_release_publishes_latest_last(tmp_path: Path) -> Non
     synchronized.mkdir()
 
     latest = publish_application_release(release, synchronized)
+    original_read_bytes = Path.read_bytes
 
+    def reject_installer_bulk_read(path: Path) -> bytes:
+        if path.suffix.casefold() == ".exe":
+            raise AssertionError("published installers must be compared as streams")
+        return original_read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", reject_installer_bulk_read)
+    republished = publish_application_release(release, synchronized)
+    monkeypatch.undo()
+
+    assert republished == latest
     assert json.loads(latest.read_text(encoding="utf-8"))["sha256"] == digest
     assert (latest.parent / installer.name).read_bytes() == b"installer"
     assert not any(path.name.startswith(".publish-") for path in latest.parent.iterdir())

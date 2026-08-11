@@ -10,11 +10,12 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.config import Settings
-from app.corpora import CorpusScope, corpus_paths, corpus_scope_label
+from app.corpora import CorpusScope, corpus_paths
 from app.database.sqlite import Database
 from app.deep_research.admission import ClaimAdmissionCheckpoint, ClaimAdmissionStage
 from app.deep_research.claims import AtomicClaimCheckpoint
 from app.jobs.contracts import DeepResearchPayload
+from app.llm.response_language import question_language, validate_output_language
 
 
 class DeepResearchCitation(BaseModel):
@@ -107,6 +108,8 @@ class SQLiteDeepResearchRenderer:
         admitted = ClaimAdmissionStage.admitted_claims(claims, admission)
         if not admitted:
             raise ValueError("an answer cannot be rendered without admitted claims")
+        validate_output_language(payload.message, [claim.statement for claim in admitted])
+        language = question_language(payload.message)
         citations: list[DeepResearchCitation] = []
         bibliography: dict[
             tuple[CorpusScope, str],
@@ -180,7 +183,9 @@ class SQLiteDeepResearchRenderer:
                         doi=str(row["doi"]) if row["doi"] else None,
                     )
                 )
-            rendered_citations = " ".join(self._render_citation(item) for item in claim_citations)
+            rendered_citations = " ".join(
+                self._render_citation(item, language) for item in claim_citations
+            )
             lines.append(f"- {claim.statement} {rendered_citations}")
         ordered_bibliography = sorted(
             bibliography.values(),
@@ -191,11 +196,16 @@ class SQLiteDeepResearchRenderer:
             ),
         )
         references = "\n".join(
-            f"- {self._render_bibliography(item)}" for item in ordered_bibliography
+            f"- {self._render_bibliography(item, language)}" for item in ordered_bibliography
         )
+        results_heading = "Résultats étayés" if language == "fr" else "Supported findings"
+        references_heading = "Références" if language == "fr" else "References"
         rendered = DeepResearchRenderedAnswer(
             answer_markdown=(
-                "## Résultats étayés\n\n" + "\n".join(lines) + "\n\n## Références\n\n" + references
+                f"## {results_heading}\n\n"
+                + "\n".join(lines)
+                + f"\n\n## {references_heading}\n\n"
+                + references
             ),
             citations=citations,
             bibliography=ordered_bibliography,
@@ -207,23 +217,36 @@ class SQLiteDeepResearchRenderer:
         return rendered
 
     @staticmethod
-    def _render_citation(citation: DeepResearchCitation) -> str:
+    def _render_citation(
+        citation: DeepResearchCitation,
+        language: Literal["fr", "en"] = "fr",
+    ) -> str:
         pages = (
             f"p. {citation.page_start}"
             if citation.page_start == citation.page_end
             else f"pp. {citation.page_start}–{citation.page_end}"
         )
+        scope = "Corpus commun" if language == "fr" else "Common corpus"
         if citation.evidence_kind == "figure":
-            return (
-                f"[{corpus_scope_label(citation.scope)} · {citation.article_id}, "
-                f"{citation.figure_label}, {pages} · analyse visuelle locale validée]"
+            visual_note = (
+                "analyse visuelle locale validée"
+                if language == "fr"
+                else "validated local visual analysis"
             )
-        return f"[{corpus_scope_label(citation.scope)} · {citation.article_id}, {pages}]"
+            return (
+                f"[{scope} · {citation.article_id}, "
+                f"{citation.figure_label}, {pages} · {visual_note}]"
+            )
+        return f"[{scope} · {citation.article_id}, {pages}]"
 
     @staticmethod
-    def _render_bibliography(entry: DeepResearchBibliographyEntry) -> str:
-        authors = ", ".join(entry.authors) if entry.authors else "Auteur non renseigné"
+    def _render_bibliography(
+        entry: DeepResearchBibliographyEntry,
+        language: Literal["fr", "en"] = "fr",
+    ) -> str:
+        missing_author = "Auteur non renseigné" if language == "fr" else "Author not provided"
+        authors = ", ".join(entry.authors) if entry.authors else missing_author
         year = f" ({entry.publication_year})." if entry.publication_year else "."
         journal = f" *{entry.journal}*." if entry.journal else ""
-        doi = f" DOI : {entry.doi}." if entry.doi else ""
+        doi = f" DOI{(' :' if language == 'fr' else ':')} {entry.doi}." if entry.doi else ""
         return f"{authors}{year} {entry.title}.{journal}{doi}"

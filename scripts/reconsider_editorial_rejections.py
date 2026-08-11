@@ -10,6 +10,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from app.config import load_settings
+from app.corpora import CorpusScope, settings_for_corpus
 from app.database.sqlite import Database
 from app.services.corpus_migration import (
     BIBLIOGRAPHIC_COLUMNS,
@@ -62,7 +63,7 @@ def main() -> int:
                 )
             )
 
-    settings = load_settings()
+    settings = settings_for_corpus(load_settings(), CorpusScope.COMMON)
     database = Database(settings.paths.database_path)
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     decisions = [

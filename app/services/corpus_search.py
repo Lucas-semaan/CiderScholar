@@ -61,6 +61,11 @@ def rank_question_across_corpora(
         selected_article_count=len(merged),
         excluded_article_ids=list(excluded_article_ids or ()),
         hybrid_candidate_count=sum(item.hybrid_candidate_count for item in responses),
+        query_variant_count=sum(item.query_variant_count for item in responses),
+        lexical_candidate_count=sum(item.lexical_candidate_count for item in responses),
+        dense_candidate_count=sum(item.dense_candidate_count for item in responses),
+        rrf_unique_candidate_count=sum(item.rrf_unique_candidate_count for item in responses),
+        vector_search_degraded=any(item.vector_search_degraded for item in responses),
         articles=merged,
         duration_seconds=perf_counter() - started,
     )

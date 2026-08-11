@@ -231,6 +231,8 @@ class PublisherCollectionService:
                 abstract=str(record["abstract"]) if record["abstract"] else None,
                 authors=_authors(record["authors"]),
                 journal=str(record["journal"]) if record["journal"] else None,
+                work_type=str(record["work_type"]) if record["work_type"] else None,
+                publisher=str(record["publisher"]) if record["publisher"] else None,
                 publication_year=(
                     int(record["publication_year"]) if record["publication_year"] else None
                 ),

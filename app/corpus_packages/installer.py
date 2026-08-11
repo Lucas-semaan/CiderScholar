@@ -15,7 +15,7 @@ from pydantic import BaseModel, ConfigDict
 from qdrant_client import QdrantClient
 
 from app.config import Settings
-from app.corpus_packages.hashing import sha256_bytes, sha256_file
+from app.corpus_packages.hashing import sha256_file
 from app.corpus_packages.models import CorpusManifest
 from app.corpus_packages.signatures import (
     PackageSignatureError,
@@ -28,6 +28,13 @@ from app.corpus_packages.updates import (
     read_latest_manifest,
 )
 from app.database.migrations import CURRENT_SCHEMA_VERSION
+from app.file_integrity import sha256_stream
+from app.retrieval.index_manifest import (
+    INDEX_MANIFEST_DIRECTORY,
+    IndexGenerationManifestError,
+    assert_packaged_index_generation_mapping,
+    validate_packaged_index_generation,
+)
 
 
 class CorpusInstallError(RuntimeError):
@@ -169,10 +176,12 @@ def verify_staged_package(
             if len(names) != len(set(names)) or set(names) != set(expected):
                 raise CorpusInstallError("staged archive artifact list mismatch")
             for name, artifact in expected.items():
-                payload = archive.read(name)
-                if len(payload) != artifact.size_bytes:
+                member = archive.getinfo(name)
+                if member.file_size != artifact.size_bytes:
                     raise CorpusInstallError(f"staged artifact size mismatch: {name}")
-                if sha256_bytes(payload) != artifact.sha256:
+                with archive.open(member) as stream:
+                    digest = sha256_stream(stream)
+                if digest != artifact.sha256:
                     raise CorpusInstallError(f"staged artifact hash mismatch: {name}")
     except (OSError, ValueError, zipfile.BadZipFile, CorpusInstallError) as exc:
         _remove_staging(settings, staged)
@@ -261,6 +270,29 @@ def _validate_staged_qdrant(
             raise CorpusInstallError(
                 f"staged Qdrant count mismatch: expected={expected_vectors}, actual={vectors}"
             )
+        generation_path = qdrant_root / INDEX_MANIFEST_DIRECTORY / f"{collection}.json"
+        if generation_path.is_file():
+            indexed_chunks = int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM chunks WHERE embedding_status = 'indexed'"
+                ).fetchone()[0]
+            )
+            try:
+                generation = validate_packaged_index_generation(
+                    generation_path,
+                    collection_name=collection,
+                    qdrant_point_count=vectors,
+                    indexed_chunk_count=indexed_chunks,
+                    collection_info=client.get_collection(collection) if exists else None,
+                )
+                assert_packaged_index_generation_mapping(
+                    connection,
+                    client,
+                    collection_name=collection,
+                    model_name=generation.embedding_model_name,
+                )
+            except IndexGenerationManifestError as exc:
+                raise CorpusInstallError("staged index generation manifest is invalid") from exc
         if vectors:
             points, _ = client.scroll(
                 collection,

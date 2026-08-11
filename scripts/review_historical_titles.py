@@ -11,6 +11,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from app.config import load_settings
+from app.corpora import CorpusScope, settings_for_corpus
 from app.database.sqlite import Database
 from app.updates.doi_exclusions import DoiExclusionRegistry
 from app.updates.editorial_scope import classify_editorial_record
@@ -40,7 +41,7 @@ def backup_editorial_state(database: Database, destination: Path) -> tuple[Path,
 
 def main() -> int:
     arguments = _parser().parse_args()
-    settings = load_settings()
+    settings = settings_for_corpus(load_settings(), CorpusScope.COMMON)
     database = Database(settings.paths.database_path)
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     with closing(database.connect()) as connection:

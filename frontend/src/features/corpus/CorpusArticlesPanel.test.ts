@@ -12,6 +12,8 @@ function article(index: number): CorpusArticle {
     title: `Article ${index}`,
     doi: null,
     journal: "Journal",
+    work_type: "journal-article",
+    publisher: null,
     publication_year: 2026,
     language: "fr",
     validation_status: "accepted",

@@ -16,6 +16,15 @@ DocumentAvailability = Literal["all", "full_text", "abstract_only"]
 
 _ALLOWED_STATUSES = {"unreviewed", "accepted", "review", "rejected"}
 _STATUS_PRIORITY = {"accepted": 0, "review": 1, "unreviewed": 2, "rejected": 3}
+_MAX_DOCUMENT_THEMES = 3
+_CIDRE_THEME = "cidre"
+_CIDRE_PATTERN = re.compile(
+    r"\b(?:ciders?|cidres?|cidricoles?|cidriculture|cidreries?|cidrification|sidras?)\b"
+)
+_CIDRE_FTS_QUERY = (
+    "cider OR ciders OR cidre OR cidres OR cidricole OR cidricoles OR "
+    "cidriculture OR cidrerie OR cidreries OR cidrification OR sidra OR sidras"
+)
 
 
 def _fold(value: object) -> str:
@@ -60,6 +69,21 @@ def _chunk_matches_by_term(
             )
             matches[folded] = {str(row[0]) for row in rows}
     return matches
+
+
+def _cidre_article_ids(database: Database) -> set[str]:
+    """Return full articles whose indexed text explicitly mentions cider."""
+
+    with closing(database.connect()) as connection:
+        rows = connection.execute(
+            """
+            SELECT DISTINCT article_id
+            FROM chunks_fts
+            WHERE chunks_fts MATCH ?
+            """,
+            (_CIDRE_FTS_QUERY,),
+        )
+        return {str(row[0]) for row in rows}
 
 
 def _json_authors(value: object) -> str:
@@ -169,6 +193,8 @@ def _article_document(article: dict[str, Any]) -> dict[str, Any]:
         "abstract": article.get("abstract"),
         "authors": _json_authors(article.get("authors")),
         "journal": article.get("journal"),
+        "work_type": article.get("work_type"),
+        "publisher": article.get("publisher"),
         "publication_year": article.get("publication_year"),
         "citation_count": None,
         "url": f"https://doi.org/{doi}" if doi else None,
@@ -264,6 +290,8 @@ def _metadata_haystack(document: dict[str, Any]) -> str:
                 "abstract",
                 "authors",
                 "journal",
+                "work_type",
+                "publisher",
                 "publication_year",
                 "citation_count",
                 "doi",
@@ -274,6 +302,19 @@ def _metadata_haystack(document: dict[str, Any]) -> str:
             )
         )
     )
+
+
+def _document_themes(document: dict[str, Any], cidre_article_ids: set[str]) -> list[str]:
+    """Return the primary theme plus bounded transversal documentary tags."""
+
+    themes: list[str] = []
+    if document.get("relevance_theme"):
+        themes.append(str(document["relevance_theme"]))
+    cidre_metadata = _fold(f"{document.get('title') or ''} {document.get('abstract') or ''}")
+    article_id = str(document.get("article_id") or "")
+    if _CIDRE_PATTERN.search(cidre_metadata) or article_id in cidre_article_ids:
+        themes.append(_CIDRE_THEME)
+    return list(dict.fromkeys(themes))[:_MAX_DOCUMENT_THEMES]
 
 
 def browse_document_library(
@@ -302,8 +343,10 @@ def browse_document_library(
 
     terms = _query_terms(query)
     chunk_matches = _chunk_matches_by_term(database, terms)
+    cidre_article_ids = _cidre_article_ids(database)
     selected: list[dict[str, Any]] = []
     for document in _documents(database):
+        document["themes"] = _document_themes(document, cidre_article_ids)
         article_id = document.get("article_id")
         haystack = _metadata_haystack(document)
         if any(
@@ -314,7 +357,7 @@ def browse_document_library(
             continue
         if selected_statuses and document["relevance_status"] not in selected_statuses:
             continue
-        if theme and _fold(document.get("relevance_theme")) != _fold(theme):
+        if theme and _fold(theme) not in {_fold(item) for item in document["themes"]}:
             continue
         if source and _fold(source) not in {_fold(item) for item in _sources(document["sources"])}:
             continue
@@ -348,6 +391,9 @@ def browse_document_library(
 
 def document_library_summary(database: Database) -> dict[str, Any]:
     documents = _documents(database)
+    cidre_article_ids = _cidre_article_ids(database)
+    for document in documents:
+        document["themes"] = _document_themes(document, cidre_article_ids)
     full_texts = [document for document in documents if document["document_type"] == "full_text"]
     abstracts = [document for document in documents if document["document_type"] == "abstract_only"]
     indexed = [
@@ -357,7 +403,7 @@ def document_library_summary(database: Database) -> dict[str, Any]:
         or int(document.get("indexed_chunk_count") or 0) > 0
     ]
     themes = sorted(
-        {str(document["relevance_theme"]) for document in documents if document["relevance_theme"]},
+        {theme for document in documents for theme in document["themes"]} | {_CIDRE_THEME},
         key=_fold,
     )
     sources = sorted(

@@ -6,7 +6,7 @@ import pytest
 
 from app.database.sqlite import Database
 from app.retrieval.article_ranking import ArticleRankingService
-from app.retrieval.hybrid_search import HybridChunkResult
+from app.retrieval.hybrid_search import HybridChunkResult, HybridSearchResponse
 
 
 def _seed_article(
@@ -270,3 +270,53 @@ def test_exclusions_and_empty_candidates_are_reported(settings) -> None:
     assert empty.available_article_count == 0
     assert empty.selected_article_count == 0
     assert empty.articles == []
+
+
+def test_article_search_propagates_hybrid_pool_counters(settings) -> None:
+    database = Database(settings.paths.database_path)
+    database.initialize()
+    chunk_id = _seed_article(
+        database,
+        "article-1",
+        title="Fermentation kinetics",
+        abstract="Cider fermentation kinetics.",
+    )[0]
+    result = _hybrid(
+        chunk_id,
+        "article-1",
+        rank=1,
+        score=1.0,
+        text="Cider fermentation kinetics.",
+    )
+
+    class FakeHybrid:
+        @staticmethod
+        def search(*_args, **_kwargs) -> HybridSearchResponse:
+            return HybridSearchResponse(
+                original_query="fermentation",
+                queries=["fermentation", "cider kinetics"],
+                results=[result],
+                lexical_candidates=17,
+                vector_candidates=13,
+                unique_candidates=21,
+                lexical_weight=0.4,
+                vector_weight=0.6,
+                reserved_reranker_weight=0.0,
+                rrf_k=60,
+                duration_seconds=0.1,
+            )
+
+        @staticmethod
+        def close() -> None:
+            pass
+
+    response = ArticleRankingService(settings, database, FakeHybrid()).search(
+        "fermentation",
+        article_count=1,
+    )
+
+    assert response.query_variant_count == 2
+    assert response.lexical_candidate_count == 17
+    assert response.dense_candidate_count == 13
+    assert response.rrf_unique_candidate_count == 21
+    assert response.hybrid_candidate_count == 1

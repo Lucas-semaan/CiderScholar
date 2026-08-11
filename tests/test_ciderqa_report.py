@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import UTC, datetime, timedelta
 
@@ -16,9 +17,11 @@ from app.evaluation.ciderqa_report import (
     CiderQARunContext,
     SignedCiderQAReport,
     build_signed_ciderqa_report,
+    canonical_json,
     verify_ciderqa_report,
     write_ciderqa_report,
 )
+from app.models.chatbot import ChatbotRetrievalTrace, ChatbotTiming
 
 
 def _dataset_and_results() -> tuple[CiderQASplitDataset, list[CiderQAInferenceResult]]:
@@ -80,6 +83,24 @@ def _dataset_and_results() -> tuple[CiderQASplitDataset, list[CiderQAInferenceRe
                 ],
             )
         ],
+        retrieval_traces=[
+            ChatbotRetrievalTrace(
+                stage="full_text_search",
+                query_variant_count=3,
+                lexical_candidate_count=80,
+                dense_candidate_count=80,
+                rrf_unique_candidate_count=110,
+                fused_candidate_count=60,
+            )
+        ],
+        timings=[
+            ChatbotTiming(
+                stage="full_text_search",
+                duration_seconds=0.8,
+                process_rss_before_gb=1.0,
+                process_rss_after_gb=1.1,
+            )
+        ],
     )
     abstention = CiderQAInferenceResult(
         question_id=unanswerable.id,
@@ -136,6 +157,8 @@ def test_signed_report_records_reproducibility_and_detects_changes(tmp_path) -> 
     assert verify_ciderqa_report(report)
     assert report.context.parameters == {"top_k": 20, "threshold": 0.5}
     assert report.context.argo_requests_used == 0
+    assert report.results[0].retrieval_traces[0].rrf_unique_candidate_count == 110
+    assert report.results[0].timings[0].process_rss_after_gb == 1.1
     written = write_ciderqa_report(report, tmp_path / "report.json")
     reloaded = SignedCiderQAReport.model_validate_json(written.read_text(encoding="utf-8"))
     assert verify_ciderqa_report(reloaded)
@@ -144,6 +167,47 @@ def test_signed_report_records_reproducibility_and_detects_changes(tmp_path) -> 
     payload["context"]["corpus_sha256"] = "e" * 64
     changed = SignedCiderQAReport.model_validate(payload)
     assert not verify_ciderqa_report(changed)
+
+
+def test_signed_report_accepts_schema_v1_payload_before_additive_metrics() -> None:
+    dataset, results = _dataset_and_results()
+    report = build_signed_ciderqa_report(
+        dataset,
+        results,
+        _context(),
+        dataset_version="1.0.0",
+        dataset_sha256="d" * 64,
+        created_at=datetime(2026, 7, 22, 13, tzinfo=UTC),
+    )
+    legacy = report.model_dump(mode="json")
+    for retrieval_key in ("notice_retrieval", "article_retrieval", "fragment_retrieval"):
+        for field in ("recall_at_10", "recall_at_50", "ndcg_at_10", "ndcg_at_50"):
+            legacy["metrics"][retrieval_key].pop(field)
+    legacy["metrics"].pop("numeric_faithfulness")
+    legacy["metrics"].pop("numeric_assessment_coverage")
+    for case in legacy["metrics"]["cases"]:
+        for field in (
+            "notice_at_10",
+            "notice_at_50",
+            "article_at_10",
+            "article_at_50",
+            "fragment_at_10",
+            "fragment_at_50",
+            "numeric_faithfulness",
+            "numeric_assessment_coverage",
+        ):
+            case.pop(field)
+    for result in legacy["results"]:
+        result.pop("retrieval_traces")
+        result.pop("timings")
+        for claim in result["claims"]:
+            claim.pop("numeric_faithfulness")
+    unsigned = {key: value for key, value in legacy.items() if key != "report_sha256"}
+    legacy["report_sha256"] = hashlib.sha256(canonical_json(unsigned).encode("utf-8")).hexdigest()
+
+    reloaded = SignedCiderQAReport.model_validate(legacy)
+
+    assert verify_ciderqa_report(reloaded)
 
 
 def test_run_context_rejects_implicit_or_over_budget_argo_usage() -> None:
@@ -162,3 +226,6 @@ def test_result_file_has_no_hidden_fields() -> None:
 
     assert "expected_answer" not in serialized
     assert "reference_evidence" not in serialized
+    trace_payload = json.dumps(serialized["retrieval_traces"])
+    assert "Quel résultat" not in trace_payload
+    assert "article-1" not in trace_payload

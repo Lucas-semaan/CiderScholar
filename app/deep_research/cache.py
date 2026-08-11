@@ -17,9 +17,17 @@ from app.deep_research.claims import _SYSTEM_PROMPT as CLAIM_PROMPT
 from app.deep_research.contextual_summary import _SYSTEM_PROMPT as CONTEXTUAL_PROMPT
 from app.deep_research.iteration import _ASSESSMENT_SYSTEM_PROMPT as GAP_PROMPT
 from app.deep_research.verification import _SYSTEM_PROMPT as VERIFICATION_PROMPT
+from app.desktop.model_integrity import MODEL_MANIFEST
+from app.ingestion.embeddings import local_model_path
 
-_CACHE_SCHEMA_VERSION = 2
+_CACHE_SCHEMA_VERSION = 3
 _RENDERING_CONTRACT_VERSION = "sqlite-renderer-v1"
+_NUMERIC_VERIFICATION_CONTRACT = {
+    "algorithm_version": 1,
+    "checkpoint_schema_version": 1,
+    "admission_schema_version": 2,
+    "policy": "supported_or_not_applicable_only",
+}
 
 
 def _canonical_hash(value: Any) -> str:
@@ -68,15 +76,14 @@ def combined_corpus_fingerprint(settings: Settings) -> str:
 
 
 def _local_model_manifest(settings: Settings, model_name: str) -> str | None:
-    model_directory = settings.paths.models_dir / model_name.replace("/", "--")
-    manifest = model_directory / "manifest.json"
+    manifest = local_model_path(settings, model_name) / MODEL_MANIFEST
     return hashlib.sha256(manifest.read_bytes()).hexdigest() if manifest.is_file() else None
 
 
 class DeepResearchCacheSignature(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: Literal[2] = _CACHE_SCHEMA_VERSION
+    schema_version: Literal[3] = _CACHE_SCHEMA_VERSION
     question_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     common_corpus_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     models_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
@@ -118,7 +125,7 @@ class DeepResearchCacheSignature(BaseModel):
 class DeepResearchCacheEntry(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: Literal[2] = _CACHE_SCHEMA_VERSION
+    schema_version: Literal[3] = _CACHE_SCHEMA_VERSION
     signature: DeepResearchCacheSignature
     answer_markdown: str = Field(min_length=1)
     details: dict[str, object]
@@ -168,6 +175,7 @@ class DeepResearchResponseCache:
             "embeddings": self.settings.embeddings.model_dump(mode="json"),
             "reranker": self.settings.reranker.model_dump(mode="json"),
             "retrieval": self.settings.retrieval.model_dump(mode="json"),
+            "numeric_verification": _NUMERIC_VERIFICATION_CONTRACT,
         }
         return DeepResearchCacheSignature.build(
             question=" ".join(question.split()),

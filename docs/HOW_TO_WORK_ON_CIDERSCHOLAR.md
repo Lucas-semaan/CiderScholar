@@ -1,7 +1,7 @@
 # Comment travailler sur CiderScholar
 
 Statut : guide méthodologique accepté.
-Dernière consolidation : 6 août 2026.
+Dernière consolidation : 10 août 2026.
 
 Ce guide transforme les consignes méthodologiques dispersées dans les conversations CiderScholar en
 règles durables et vérifiables. Il complète `AGENTS.md`, le contrat rédactionnel du chatbot et les
@@ -76,11 +76,20 @@ resserrer les requêtes si la précision se dégrade.
 
 ### 2.3 Identité, déduplication et niveau de contenu
 
+- Les termes « bibliographie principale », « base documentaire » et « corpus commun » désignent la
+  même source d’autorité scientifique : la base SQLite du corpus sous `data/common/database`. Les
+  notices bibliographiques, abstracts, textes intégraux, chunks, preuves et états d’acquisition y
+  sont consolidés ; une base applicative ou un ancien chemin de migration ne reçoit jamais une
+  collection bibliographique scientifique parallèle.
 - Normaliser et vérifier le DOI avant insertion. Comparer le DOI à l’ensemble du corpus actif, pas à
   une seule table ou un seul ancien chemin.
 - À DOI normalisé identique, conserver une seule entrée documentaire et privilégier le texte intégral.
 - Deux DOI différents ne sont jamais fusionnés sur le seul titre. Sans DOI, SHA-256 et métadonnées
   contrôlées servent de replis prudents ; un titre proche n’est qu’un candidat à revue.
+- Deux conteneurs PDF de SHA-256 différents ne sont reconnus comme une même publication qu’après
+  confirmation par une empreinte exactement identique du texte intégral normalisé, page par page,
+  sur un candidat bibliographique suffisamment spécifique. Le titre ne déclenche jamais seul la
+  fusion.
 - Un abstract accepté, non vide et associé à un DOI valide reste consultable et recherchable avec le
   niveau `Abstract only` si aucun texte intégral n’est disponible.
 - Le niveau `Full article` désigne un contenu intégral réellement acquis et persisté. Il ne faut jamais
@@ -110,6 +119,15 @@ Pour chaque campagne :
 7. contrôler les comptes SQLite, FTS et index, puis produire un rapport `accepted/review/rejected`,
    `Full article/Abstract only`, erreurs et reprises possibles.
 
+Un PDF ajouté explicitement depuis l’interface est ingéré puis indexé automatiquement en ciblant
+uniquement les nouveaux articles ou les fragments en échec à reprendre. L’opération n’est présentée
+comme réussie que si l’indexation correspondante est complète ; un échec conserve les données
+persistées et un chemin de reprise, sans transformer un doublon déjà indexé en nouveau document.
+
+Un rapport d’import distingue toujours les fichiers effectivement ajoutés, déjà présents, à vérifier
+par OCR et en échec. Le nombre de fichiers sélectionnés ou copiés ne doit pas être présenté comme un
+nombre de nouveaux articles.
+
 Ne pas contourner un paywall, un CAPTCHA ou une restriction d’accès. Un contenu structuré n’est admis
 comme tel que si le fournisseur déclare explicitement son type ; ne pas inférer du XML ou un texte
 intégral depuis une URL ambiguë.
@@ -118,6 +136,60 @@ Pour des fichiers locaux, tenter d’abord l’extraction native. Déclencher l�
 exploitable n’est extrait, puis vérifier le résultat. Les fichiers illisibles ou corrompus sont signalés
 et exclus de l’index ; ils ne sont supprimés que sur demande explicite, avec une opération récupérable
 quand elle est possible.
+
+Une année future repérée automatiquement dans un fichier local n’est jamais acceptée comme année de
+publication sans métadonnée bibliographique validée. Elle est laissée vide ou envoyée en revue afin
+d’éviter de confondre un objectif, un numéro de page, un ISSN ou un autre identifiant avec une année.
+
+### 3.1 Enrichir les métadonnées du corpus existant
+
+Pour compléter DOI, auteurs, année, type et éditeur sans confondre publications et documents
+internes, exécuter d’abord l’enrichisseur sans `--apply`. Il charge automatiquement le dernier audit
+`local-non-article-audit-*` disponible ; un audit précis peut être imposé avec `--curation-audit`.
+
+```powershell
+.\.venv\Scripts\python.exe -m scripts.enrich_corpus_metadata `
+  --run-dir data\exports\metadata-enrichment\<campagne> `
+  --fallback-sources
+```
+
+Contrôler `accepted-updates.jsonl`, `review-candidates.json` et `report.json`. Les recherches par titre
+ne deviennent applicables qu’après accord entre fournisseurs ; les DOI déjà présents sont résolus par
+identifiant exact. Les entrées marquées `skip_external_lookup` restent hors recherches et mutations.
+Une entrée `validate_and_correct_year` peut remplacer l’année erronée uniquement si une source
+bibliographique validée fournit l’année corrigée. Après contrôle, relancer exactement le même dossier
+avec `--apply` ; le script crée alors une sauvegarde SQLite cohérente avant la transaction.
+
+Une métadonnée confirmée sur le site officiel d’un éditeur, d’une institution ou d’un dépôt peut être
+consignée dans `web-validations.jsonl` dans le dossier de campagne. Chaque ligne conserve au minimum
+`record_id`, `provider`, `source_url` HTTPS et `fields`. Ce fichier est relu avec les mêmes bornes DOI et
+année que les API ; une page de résultats générique ou un extrait non attribuable ne suffit pas.
+
+Un poster, un diaporama ou un supplément local n’hérite jamais automatiquement du DOI et du type de
+l’article parent sur la seule égalité du titre. Conserver le type de la manifestation locale et relier
+l’article parent séparément lorsque cette relation est établie.
+
+### 3.2 Découvrir des publications connexes à partir des DOI du corpus
+
+Les articles du corpus pertinents pour le sujet étudié et dotés d’un DOI validé peuvent servir de
+points de départ à une collecte bibliographique connexe. Interroger les API bibliographiques
+autorisées pour explorer notamment leurs références, les publications qui les citent et les relations
+ou recommandations déclarées par les fournisseurs. Une relation bibliographique ou algorithmique
+n’établit pas à elle seule la pertinence : chaque publication découverte repasse par le périmètre
+éditorial et la décision `accepted`, `review` ou `rejected`.
+
+Une campagne peut enchaîner ces collectes via API et suivre les nouveaux DOI pertinents, à condition
+de rester bornée en profondeur, volume et durée. Pour chaque candidat, conserver au minimum le DOI
+source, le type de relation, le fournisseur, le DOI candidat normalisé, la date de collecte et la
+décision motivée. Normaliser et dédupliquer avant tout téléchargement ou insertion, ne pas réexaminer
+silencieusement une décision manuelle, et rendre la campagne reprenable par pagination et points de
+contrôle.
+
+Respecter les conditions d’utilisation, quotas et limites de débit de chaque API ; borner les délais,
+réessais et erreurs, et séquencer les appels lorsque le fournisseur l’exige. Cette autorisation vise
+la collecte par API documentée : elle n’autorise ni contournement de paywall ou de contrôle d’accès,
+ni extraction HTML non permise. L’acquisition éventuelle du texte intégral reste soumise aux règles
+de provenance, de licence et de niveau de contenu de la section 3.
 
 ## 4. Rechercher et classer les preuves pour une question
 
@@ -184,6 +256,14 @@ Une question réellement multi-axes peut être décomposée en un à quatre axes
 propre requête et un quota équilibré de preuves. Les brouillons d’axes restent reliés aux preuves
 originales mais ne sont jamais eux-mêmes une preuve.
 
+Lorsqu’un fragment classé A ou B est retenu dans un texte intégral, analyser un contexte intra-article
+borné avant la synthèse : voisins du fragment, résultats, méthodes ou conditions et discussion ou
+limites complémentaires. Cette expansion reste plafonnée en nombre de chunks et en distance ; elle
+ne charge pas automatiquement tout le corpus ni un article sans lien avec la question. Les passages
+complémentaires conservent leur rôle (`anchor`, résultat, méthode/conditions, discussion/limite ou
+contexte) et leurs pages persistées. Leur provenance commune n’augmente jamais à elle seule leur
+pertinence scientifique.
+
 ## 5. Produire une réponse scientifique
 
 Appliquer `docs/CHATBOT_RESPONSE_CONTRACT.md`. Pour une synthèse longue, appliquer aussi
@@ -191,7 +271,12 @@ Appliquer `docs/CHATBOT_RESPONSE_CONTRACT.md`. Pour une synthèse longue, appliq
 
 Les règles consolidées les plus importantes sont :
 
-- répondre dans la langue de la question ;
+- produire exclusivement dans la langue de la question chaque élément rédactionnel visible :
+  définition, affirmation, libellé de mécanisme, limitation, message d’abstention, brouillon d’axe
+  et assemblage final. Si une preuve est rédigée dans une autre langue, ARGO traduit son contenu
+  scientifique au lieu de recopier sa formulation. Les extraits de preuve verbatim, titres,
+  auteurs, taxons, symboles et autres métadonnées bibliographiques restent dans leur forme originale ;
+  ils ne justifient jamais un mélange de langues dans la prose générée ;
 - définir les termes ambigus et délimiter matrice, procédé, conditions et résultats avant de
   synthétiser ;
 - répondre directement à chaque axe, puis présenter mécanismes, conditions, contradictions et
@@ -208,6 +293,18 @@ Les règles consolidées les plus importantes sont :
 La longueur suit la complexité et la couverture documentaire, pas un objectif de remplissage. Une
 introduction scientifique utile définit le périmètre et les distinctions nécessaires ; elle ne devient
 pas une généralité encyclopédique non sourcée.
+
+Le contrôle public d’effort (`concise`, `balanced`, `deep`) module conjointement la largeur bornée
+du retrieval, la fenêtre de preuves et la taille maximale de la synthèse. Il ne désactive jamais le
+filtre sémantique, la validation des citations et des nombres, les niveaux A–D ni l’abstention. Le mode
+approfondi développe seulement les axes réellement documentés ; le mode concis conserve les nuances
+nécessaires à la fidélité scientifique.
+
+Une exécution partielle conserve le contrat rédactionnel normal. Les affirmations déjà validées et
+citées peuvent former une réponse `partial_generated`, avec une limite localisée sur l’axe manquant.
+Si aucune affirmation n’est validée, produire une abstention ou un diagnostic structuré dans la même
+forme que la réponse attendue. Ne jamais remplacer la synthèse par une succession d’extraits ou de
+sources brutes.
 
 ## 6. Diagnostiquer et améliorer le système
 
@@ -231,6 +328,8 @@ Pour une boucle d’amélioration :
 
 - figer une baseline, les questions, les critères et un lot de contrôle ;
 - journaliser réponses brutes, sources, réglages, versions, coûts, latences et erreurs ;
+- mesurer séparément attente du verrou local, recherche abstracts, recherche texte intégral,
+  enrichment, filtre sémantique, couverture et génération, sans journaliser le contenu scientifique ;
 - modifier une seule famille de paramètres par cycle ;
 - rejouer le cas révélateur et au moins un contrôle indépendant ;
 - généraliser la correction, sans introduire dans le prompt la réponse particulière du benchmark ;
@@ -246,12 +345,16 @@ Les règles ci-dessus proviennent notamment des conversations suivantes :
 
 - **Clarifier la fusion des notices PDF** : base documentaire unique, DOI vérifié, `Full article` ou
   `Abstract only` ;
+- **Unifier bibliographie et corpus** : « bibliographie principale », « base documentaire » et
+  « corpus commun » sont un seul concept et une seule source d’autorité scientifique ;
 - **Planifier collecte bibliographique** : collecte de plusieurs milliers de notices, pertinence avant
   petit plafond arbitraire, acquisition full text puis repli abstract ;
 - **Analyser le workflow de collecte** : textes intégraux natifs autres que PDF, reprise, hash et
   généralisation aux fournisseurs ;
 - **Vérifier et indexer les articles** : DOI d’abord, admission manuelle motivée, sources légales et
   distinction notice/PDF ;
+- **Étendre la bibliographie depuis le corpus** : DOI validés comme points de départ, exploration des
+  relations via API et collecte connexe bornée, traçable et reprenable ;
 - **Élargir la recherche sur les jus de pomme** : élargissement progressif aux matrices proches et
   distinction occurrence/inoculation/inactivation ;
 - **Améliorer le retrieval RAG Calvados** : hiérarchie des matrices et classement par matrice, procédé
@@ -271,8 +374,12 @@ Avant de conclure une tâche concernée par ce guide, vérifier :
 - les consignes de méthode de la demande ont été reformulées et respectées ;
 - chaque admission/rejet important possède une raison inspectable ;
 - DOI, doublons, niveau de contenu et provenance ont été contrôlés ;
+- toute exploration de publications connexes conserve le DOI source, la relation, le fournisseur et
+  des bornes explicites de profondeur, volume et durée ;
 - les filières connexes n’ont pas été transformées en preuves directes sans justification ;
 - les états `accepted/review/rejected` et `Full article/Abstract only` sont rapportés séparément ;
 - les écritures importantes ont une sauvegarde et une stratégie de reprise ;
 - un changement de comportement possède un test de non-régression représentatif ;
+- chaque champ rédactionnel visible a été contrôlé séparément dans la langue de la question, y compris
+  les limitations, abstentions et brouillons multi-axes ;
 - toute nouvelle règle durable explicitement demandée a été ajoutée à ce fichier.

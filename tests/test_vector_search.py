@@ -10,6 +10,7 @@ from app.retrieval.vector_search import (
     QdrantLocalIndex,
     VectorIndexConfigurationError,
     VectorSearchService,
+    clear_query_vector_cache,
 )
 
 
@@ -18,6 +19,7 @@ class FakeBackend:
         self.model_name = "fake/multilingual"
         self.dimension = dimension
         self.closed = False
+        self.query_calls = 0
 
     def encode_documents(self, texts: Sequence[str]) -> list[list[float]]:
         return [
@@ -25,6 +27,7 @@ class FakeBackend:
         ]
 
     def encode_queries(self, texts: Sequence[str]) -> list[list[float]]:
+        self.query_calls += 1
         return [[1.0] + [0.0] * (self.dimension - 1) for _ in texts]
 
     def close(self) -> None:
@@ -198,3 +201,46 @@ def test_vector_search_hydrates_text_only_from_sqlite(settings) -> None:
         assert results[0].section == "Results"
     finally:
         index.close()
+
+
+def test_vector_search_rejects_a_backend_with_a_different_model(settings) -> None:
+    database = Database(settings.paths.database_path)
+    database.initialize()
+    backend = FakeBackend()
+    index = QdrantLocalIndex(settings, model_name="other/model", collection_name="model-mismatch")
+    try:
+        with pytest.raises(VectorIndexConfigurationError, match="embedding backend model"):
+            VectorSearchService(database, backend, index).search("local question")
+    finally:
+        index.close()
+
+
+def test_vector_search_reuses_query_vector_and_respects_backend_ownership(settings) -> None:
+    clear_query_vector_cache()
+    database = Database(settings.paths.database_path)
+    database.initialize()
+    chunk_ids = _seed_database(database, count=2)
+    backend = FakeBackend()
+    index = QdrantLocalIndex(settings, model_name=backend.model_name, collection_name="query_cache")
+    index.upsert(
+        EmbeddedChunkBatch(
+            chunk_ids=tuple(chunk_ids),
+            article_ids=("article-a", "article-a"),
+            sections=("Results", "Discussion"),
+            page_starts=(1, 2),
+            page_ends=(1, 2),
+            vectors=((1.0, 0.0), (0.0, 1.0)),
+            model_name=backend.model_name,
+            vector_dimension=2,
+        )
+    )
+    service = VectorSearchService(database, backend, index, close_backend=False)
+
+    assert service.search("same scientific query", limit=1)
+    assert service.search("same scientific query", limit=1)
+    assert backend.query_calls == 1
+    assert service.query_cache_misses == 1
+    assert service.query_cache_hits == 1
+
+    service.close()
+    assert backend.closed is False

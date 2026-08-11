@@ -11,6 +11,7 @@ import pytest
 from pydantic import ValidationError
 
 from app.corpora import LocalProfile
+from app.corpus_packages import builder as package_builder
 from app.corpus_packages import validation
 from app.corpus_packages.builder import CorpusPackageBuildReport, build_corpus_package
 from app.corpus_packages.distribution import (
@@ -58,6 +59,34 @@ def test_sha256_file_streams_large_payload_without_changing_digest(tmp_path) -> 
     source.write_bytes(payload)
 
     assert sha256_file(source) == hashlib.sha256(payload).hexdigest()
+
+
+def test_deterministic_zip_streams_artifacts_without_path_read_bytes(tmp_path, monkeypatch) -> None:
+    payload_root = tmp_path / "payload"
+    source = payload_root / "pdf" / "article.pdf"
+    source.parent.mkdir(parents=True)
+    source.write_bytes((b"%PDF-streamed" * 100_000) + b"\n")
+    artifact = ArtifactDigest(
+        relative_path="pdf/article.pdf",
+        size_bytes=source.stat().st_size,
+        sha256=sha256_file(source),
+        kind="metadata",
+    )
+
+    original_read_bytes = Path.read_bytes
+
+    def reject_bulk_artifact_read(path: Path) -> bytes:
+        if path == source:
+            raise AssertionError("corpus artifact must be streamed into the archive")
+        return original_read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", reject_bulk_artifact_read)
+    archive_path = tmp_path / "corpus.zip"
+
+    package_builder._write_deterministic_zip(archive_path, payload_root, [artifact])
+
+    with zipfile.ZipFile(archive_path) as archive:
+        assert hashlib.sha256(archive.read(artifact.relative_path)).hexdigest() == artifact.sha256
 
 
 def _publishable_version(root: Path) -> tuple[Path, CorpusManifest]:

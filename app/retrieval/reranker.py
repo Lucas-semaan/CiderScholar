@@ -154,9 +154,10 @@ class MultilingualReranker:
     def close(self) -> None:
         model = self._model
         self._model = None
-        if model is not None:
-            logger.info("Unloading CrossEncoder model: %s", self.model_name)
-            del model
+        if model is None:
+            return
+        logger.info("Unloading CrossEncoder model: %s", self.model_name)
+        del model
         gc.collect()
         try:
             import torch

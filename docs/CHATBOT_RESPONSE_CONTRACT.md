@@ -15,6 +15,19 @@ format reste une conversation sur les résultats. Une demande explicite de nouve
 ou d’une nouvelle recherche relance le RAG. Si aucune source réutilisable n’existe, le moteur revient
 à la recherche afin de ne jamais produire une affirmation scientifique sans preuve.
 
+## Effort de réponse
+
+Le champ `answer_effort` accepte `concise`, `balanced` et `deep`, avec `balanced` par défaut. Ce
+contrôle agit sur des plafonds cohérents de variantes de requête, d’articles, de passages, de contexte
+intra-article, de preuves et de tokens. Il règle le niveau de détail, pas le niveau de vérité : les
+contrôles de pertinence, de traçabilité, de nombres, de style et l’abstention restent identiques.
+
+- `concise` répond directement avec les affirmations indispensables et évite une seconde recherche
+  pour un axe seulement incomplet ;
+- `balanced` fournit la synthèse scientifique usuelle et bornée ;
+- `deep` élargit le contexte et développe les mécanismes, conditions, contradictions et limites quand
+  les preuves le permettent, sans remplir artificiellement la réponse.
+
 ## Posture
 
 Le chatbot est un agent scientifique froid, factuel et prudent. Il ne cherche pas à séduire,
@@ -32,7 +45,11 @@ Il doit signaler, lorsque les sources le permettent :
 
 ## Style
 
-- répondre dans la langue du dernier message utilisateur ;
+- produire exclusivement dans la langue du dernier message utilisateur chaque champ rédactionnel
+  visible : définition, affirmation, mécanisme, limitation, abstention, brouillon d’axe et assemblage
+  final. ARGO traduit le contenu scientifique des preuves rédigées dans une autre langue au lieu de
+  recopier leur formulation ; les extraits verbatim, titres et métadonnées bibliographiques restent
+  inchangés et ne comptent pas comme un mélange de langues dans la prose ;
 - utiliser des phrases simples et un vocabulaire scientifique précis ;
 - écrire en prose naturelle par défaut ;
 - utiliser des puces uniquement lorsqu’une liste est explicitement demandée ;
@@ -75,6 +92,52 @@ Ils facilitent l’audit, mais ne constituent jamais eux-mêmes une preuve scien
 Si le plan ARGO est indisponible ou invalide, un plan déterministe borné prend le relais et un
 avertissement est ajouté à la réponse.
 
+Si un fragment A ou B d’un texte intégral est retenu, le sélecteur peut rechercher dans le même
+article des passages complémentaires bornés : voisins, résultats, méthodes/conditions et
+discussion/limites. Chaque passage conserve sa page et son rôle contextuel. Cette expansion améliore
+la compréhension de l’article mais ne transforme pas un passage périphérique en preuve directe.
+
+## Trace de génération scientifique
+
+Chaque phase rapide persistée peut exposer une entrée `generation_traces` sans question, preuve ni
+texte généré. Elle enregistre uniquement la phase, l’issue, le nombre d’appels, les reprises de
+validation ou de longueur, les tokens et la température de correction effectivement utilisée.
+La température des corrections factuelles est configurée par
+`argo.scientific_correction_temperature`, bornée entre `0` et `0,2`, avec `0,1` par défaut ; la
+valeur historique `0,35` n’est plus forcée. Une campagne peut comparer `0` et `0,1`, mais aucune des
+deux valeurs ne doit être déclarée supérieure avant mesure sur le développement CiderQA.
+
+Les traces des phases échouées qui conduisent à une réponse facettée partielle sont conservées avec
+`outcome=failed`. Elles permettent d’attribuer appels et tokens à l’étage réel sans exposer le contenu
+scientifique ou les messages internes.
+
+## Trace des pools de retrieval et des ressources
+
+Chaque requête de recherche persiste une liste `retrieval_traces` strictement non textuelle. Elle
+compte les variantes de requête, candidats lexicaux et denses, l’union soumise à la fusion RRF, les
+candidats fusionnés, les entrées et sorties du reranker, puis les articles et passages effectivement
+transmis au modèle. Les retraits sont attribués à des codes stables tels que
+`duplicate_across_query_pools`, `not_selected_after_scientific_ranking`,
+`no_passage_selected` ou `semantic_or_scientific_grade_rejected`. La trace ne contient ni requête,
+ni identifiant d’article, ni titre, ni DOI, ni extrait.
+
+Les entrées `timings` conservent la durée et le nombre d’exécutions par étape, et ajoutent les tokens
+d’entrée/sortie ainsi que la RAM du processus et du système observée aux bornes de l’étape. Ces
+mesures avant/après ne constituent pas un pic mémoire échantillonné et ne doivent pas être présentées
+comme tel. Si la mesure locale de RAM est indisponible, les valeurs restent nulles sans interrompre
+la réponse scientifique.
+
+## Réponses partielles et abstentions
+
+Une synthèse dont certaines affirmations ou certains axes ont déjà passé les validations peut être
+rendue avec `generation_status=partial_generated`. Elle utilise le même renderer, les mêmes citations
+et la même structure que `generated`, puis décrit précisément ce qui n’a pas pu être établi.
+
+Si aucune affirmation n’est validable, `abstained` conserve la structure rédactionnelle attendue et
+n’invente aucune citation. Un problème technique sans synthèse prend le statut `diagnostic_only`,
+également sous forme structurée. Dans aucun de ces cas l’application n’affiche les candidats de
+retrieval ou une succession de sources comme s’il s’agissait de la réponse.
+
 ## Citations et références
 
 - appliquer APA 7e édition ;
@@ -108,10 +171,14 @@ les citations et la bibliographie.
 ## Critères de validation automatisables
 
 - le style attendu est calculé par l’application et non choisi par ARGO ;
+- la langue attendue est calculée depuis le dernier message utilisateur, jamais depuis l’historique
+  ni depuis une requête interne d’axe ; chaque champ rédactionnel est validé séparément et une
+  correction ARGO doit traduire tout champ rejeté avant rendu ;
 - une réponse en prose ne commence aucun paragraphe par un marqueur de liste ;
 - une réponse en liste n’est permise que sur demande explicite ;
 - les citations rendues correspondent aux identifiants de sources validés ;
-- chaque nombre généré existe dans au moins un passage ou abstract cité ;
+- chaque quantité générée correspond dans la preuve citée par sa valeur, son signe ou comparateur,
+  son unité, son intervalle ou incertitude et son contexte scientifique ;
 - chaque page affichée provient du chunk full-text effectivement fourni à ARGO ;
 - les références finales proviennent uniquement de SQLite ;
 - aucun emoji n’est présent ;

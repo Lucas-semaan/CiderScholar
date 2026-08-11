@@ -10,14 +10,19 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from app.deep_research.admission import ClaimAdmissionCheckpoint
 from app.deep_research.iteration import ResearchLoopCheckpoint
 from app.jobs.contracts import DeepResearchPayload
+from app.llm.response_language import question_language, validate_output_language
 
-_DEFAULT_GAP = "Aucune affirmation locale n’a franchi tous les contrôles sémantiques."
+
+def _default_gap(language: Literal["fr", "en"]) -> str:
+    if language == "fr":
+        return "Aucune affirmation locale n’a franchi tous les contrôles sémantiques."
+    return "No local claim passed all semantic checks."
 
 
 class DeepResearchReadinessCheckpoint(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: Literal[1] = 1
+    schema_version: Literal[2] = 2
     outcome: Literal["answerable", "abstain"]
     admitted_claim_count: int = Field(ge=0, le=20)
     gap_descriptions: list[str] = Field(default_factory=list, min_length=0, max_length=2)
@@ -44,7 +49,7 @@ class DeepResearchAbstentionStage:
             self.checkpoint_root
             / str(payload.conversation_id)
             / str(payload.client_request_id)
-            / "readiness.json"
+            / "readiness-v2.json"
         )
 
     def load(self, payload: DeepResearchPayload) -> DeepResearchReadinessCheckpoint:
@@ -69,19 +74,30 @@ class DeepResearchAbstentionStage:
                 admitted_claim_count=admitted_count,
             )
         else:
-            gaps = [
-                record.gap.description for record in loop.iterations if record.gap is not None
-            ] or [_DEFAULT_GAP]
+            language = question_language(payload.message)
+            gaps: list[str] = []
+            for record in loop.iterations:
+                if record.gap is None:
+                    continue
+                try:
+                    validate_output_language(payload.message, [record.gap.description])
+                except RuntimeError:
+                    continue
+                gaps.append(record.gap.description)
+            gaps = gaps or [_default_gap(language)]
             unique_gaps = list(dict.fromkeys(gaps))[:2]
             rendered = "\n".join(f"- {gap}" for gap in unique_gaps)
+            introduction = (
+                "Je ne peux pas répondre de façon étayée avec les preuves locales disponibles."
+                if language == "fr"
+                else "I cannot provide a grounded answer from the available local evidence."
+            )
+            heading = "Lacunes constatées" if language == "fr" else "Identified evidence gaps"
             checkpoint = DeepResearchReadinessCheckpoint(
                 outcome="abstain",
                 admitted_claim_count=0,
                 gap_descriptions=unique_gaps,
-                abstention_markdown=(
-                    "Je ne peux pas répondre de façon étayée avec les preuves locales "
-                    f"disponibles.\n\nLacunes constatées :\n{rendered}"
-                ),
+                abstention_markdown=f"{introduction}\n\n{heading}:\n{rendered}",
             )
         path.parent.mkdir(parents=True, exist_ok=True)
         temporary = path.with_suffix(".tmp")

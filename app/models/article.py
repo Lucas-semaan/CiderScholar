@@ -18,6 +18,8 @@ class ArticleMetadata(BaseModel):
     abstract: str | None = None
     authors: list[str] = Field(default_factory=list)
     journal: str | None = None
+    work_type: str | None = Field(default=None, max_length=100)
+    publisher: str | None = Field(default=None, max_length=500)
     publication_year: int | None = Field(default=None, ge=1600, le=2200)
     language: str | None = None
     pdf_path: Path

@@ -13,8 +13,6 @@ import type {
   MaintenanceSchedule,
   OnboardingStatus,
   Overview,
-  PilotDefect,
-  PilotDefectInput,
   PublisherAccessRun,
   PublisherAccessStatus,
   ReadinessReport,
@@ -178,6 +176,7 @@ export const api = {
         analyze_figures: boolean;
         mode: "quick" | "deep_research";
         interaction_mode: "auto" | "research" | "conversation";
+        answer_effort: "concise" | "balanced" | "deep";
         evaluation_run_id?: string;
         evaluation_question_id?: string;
         evaluation_profile?: "p0" | "p1" | "p2";
@@ -246,11 +245,23 @@ export const api = {
         source,
         scientific_comment: scientificComment || null,
       }),
-    submitPdf: (file: File, scientificComment: string, confirmed: boolean) => {
+    submitPdf: (
+      file: File,
+      scientificComment: string,
+      confirmed: boolean,
+      metadata: {
+        title?: string | undefined;
+        doi?: string | undefined;
+        abstract?: string | undefined;
+      },
+    ) => {
       const body = new FormData();
       body.append("file", file);
       body.append("scientific_comment", scientificComment);
       body.append("transmit_pdf_confirmed", String(confirmed));
+      if (metadata.title) body.append("title", metadata.title);
+      if (metadata.doi) body.append("doi", metadata.doi);
+      if (metadata.abstract) body.append("abstract", metadata.abstract);
       return request<SuggestionSubmissionResult>("/api/suggestions/pdf", {
         method: "POST",
         body,
@@ -306,10 +317,6 @@ export const api = {
     run: (runId: string) => request<PublisherAccessRun>(`/api/publisher-access/runs/${runId}`),
   },
   corpus: createCorpusApi("/api/corpus"),
-  pilotFeedback: {
-    list: () => request<PilotDefect[]>("/api/pilot-feedback"),
-    submit: (payload: PilotDefectInput) => post<PilotDefect>("/api/pilot-feedback", payload),
-  },
   library: {
     summary: () => request<LibrarySummary>("/api/library/summary"),
     records: (filters: LibraryRecordFilters) => {

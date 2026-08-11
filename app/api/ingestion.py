@@ -16,7 +16,7 @@ from app.database.sqlite import Database
 from app.services.workflows import (
     delete_article,
     index_pending_chunks,
-    ingest_paths,
+    ingest_and_index_paths,
     pdf_paths,
     reindex_article,
     save_uploaded_pdf,
@@ -81,7 +81,7 @@ def upload_pdfs(
                 stream=uploaded.file,
             )
         )
-    reports = ingest_paths(settings, database, paths)
+    reports, _indexing = ingest_and_index_paths(settings, database, paths)
     return {"reports": [report.model_dump(mode="json") for report in reports]}
 
 
@@ -92,7 +92,7 @@ def ingest_folder(
     database: Annotated[Database, Depends(get_common_corpus_database)],
 ) -> dict[str, Any]:
     paths = list(pdf_paths(payload.folder, recursive=payload.recursive))
-    reports = ingest_paths(settings, database, paths) if paths else []
+    reports, _indexing = ingest_and_index_paths(settings, database, paths) if paths else ([], None)
     return {
         "discovered_files": len(paths),
         "reports": [report.model_dump(mode="json") for report in reports],

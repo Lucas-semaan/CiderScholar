@@ -18,6 +18,7 @@ from urllib.parse import unquote, urljoin, urlsplit, urlunsplit
 import httpx
 
 from app.config import Settings, load_settings
+from app.corpora import CorpusScope, settings_for_corpus
 from app.database.sqlite import Database
 from app.ingestion.embeddings import SentenceTransformerBackend
 from app.ingestion.pipeline import IngestionPipeline, PdfCatalogMetadata
@@ -144,7 +145,7 @@ def main(argv: list[str] | None = None) -> int:
     if not 1 <= args.bibliography_pages <= 5:
         raise ValueError("bibliography pages must be between 1 and 5")
 
-    settings = load_settings(args.config)
+    settings = settings_for_corpus(load_settings(args.config), CorpusScope.COMMON)
     settings.paths.create()
     database = Database(settings.paths.database_path)
     database.initialize()

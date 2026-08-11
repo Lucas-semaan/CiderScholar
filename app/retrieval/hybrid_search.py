@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import unicodedata
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -12,9 +13,11 @@ from pydantic import BaseModel, ConfigDict, Field
 from app.config import Settings
 from app.corpora import CorpusScope
 from app.database.sqlite import Database
-from app.memory import MemoryGuard
+from app.memory import MemoryGuard, MemoryLimitError
 from app.retrieval.lexical_search import LexicalSearchService, QueryMode
 from app.retrieval.vector_search import VectorSearchService
+
+LOGGER = logging.getLogger(__name__)
 
 
 class HybridSearchIntegrityError(RuntimeError):
@@ -124,6 +127,7 @@ class HybridSearchResponse(BaseModel):
     results: list[HybridChunkResult]
     lexical_candidates: int = Field(ge=0)
     vector_candidates: int = Field(ge=0)
+    vector_search_degraded: bool = False
     unique_candidates: int = Field(ge=0)
     lexical_weight: float = Field(ge=0.0)
     vector_weight: float = Field(ge=0.0)
@@ -147,6 +151,28 @@ class HybridSearchService:
         self.lexical = lexical
         self.vector = vector
         self.memory = MemoryGuard(settings.memory)
+        self._vector_disabled_by_memory = False
+
+    def _disable_vector_after_memory_limit(
+        self,
+        *,
+        operation: str,
+        error: MemoryLimitError,
+    ) -> None:
+        """Release heavy vector resources while preserving lexical retrieval."""
+
+        if self._vector_disabled_by_memory:
+            return
+        self._vector_disabled_by_memory = True
+        LOGGER.warning(
+            "Hybrid search continuing without vectors operation=%s error_type=%s",
+            operation,
+            type(error).__name__,
+        )
+        try:
+            self.vector.close()
+        except Exception:
+            LOGGER.exception("Unable to release vector resources after memory limit")
 
     def _queries(self, original_query: str, query_variants: Sequence[str] | None) -> list[str]:
         original = original_query.strip()
@@ -228,14 +254,38 @@ class HybridSearchService:
                 )
                 matched_queries.setdefault(result.chunk_id, []).append(current_query)
 
-            self.memory.check("hybrid vector query")
-            vector_results = self.vector.search(
-                current_query,
-                limit=retrieval_limit,
-                article_ids=article_ids,
-                sections=sections,
-            )
-            self.memory.check("hybrid vector results")
+            if self._vector_disabled_by_memory:
+                continue
+            try:
+                self.memory.check("hybrid vector query")
+            except MemoryLimitError as exc:
+                self._disable_vector_after_memory_limit(
+                    operation="hybrid vector query",
+                    error=exc,
+                )
+                continue
+            try:
+                vector_results = self.vector.search(
+                    current_query,
+                    limit=retrieval_limit,
+                    article_ids=article_ids,
+                    sections=sections,
+                )
+            except MemoryLimitError as exc:
+                self._disable_vector_after_memory_limit(
+                    operation="hybrid vector search",
+                    error=exc,
+                )
+                continue
+            try:
+                self.memory.check("hybrid vector results")
+            except MemoryLimitError as exc:
+                # The bounded vector result set is already available. Keep it, but release
+                # the model and index before processing more query variants.
+                self._disable_vector_after_memory_limit(
+                    operation="hybrid vector results",
+                    error=exc,
+                )
             vector_candidates += len(vector_results)
             rankings.append(
                 RankedList(
@@ -297,6 +347,7 @@ class HybridSearchService:
             results=results,
             lexical_candidates=lexical_candidates,
             vector_candidates=vector_candidates,
+            vector_search_degraded=self._vector_disabled_by_memory,
             unique_candidates=len(set(lexical_ranks).union(vector_ranks)),
             lexical_weight=self.settings.retrieval.lexical_weight,
             vector_weight=self.settings.retrieval.vector_weight,

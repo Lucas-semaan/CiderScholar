@@ -1447,10 +1447,8 @@ mode Deep Research sur CiderQA et ne rend jamais l’exécution expérimentale a
   Dépendances : `PKG-035`, `ROL-002`. Fini lorsque : version et hash correspondent.
 - [ ] `ROL-005` Vérifier conversations et documents privés isolés.
   Dépendances : `COR-021`, `ROL-002`. Fini lorsque : aucun fichier privé n’apparaît sur l’autre poste.
-- [x] `ROL-006` Recueillir les défauts sans stocker le contenu des chats.
-  Réalisation : la page Retours pilote et son API locale acceptent strictement type, étape et
-  description volontaire ; SQLite ne possède aucun champ chat, question, réponse, travail ou document,
-  et tout champ JSON supplémentaire est rejeté. Les 11 tests backend ciblés, lint, types et build passent.
+- [ ] `ROL-006` Recueillir les défauts sans stocker le contenu des chats.
+  Statut : le canal intégré à l'application a été retiré ; le mode de collecte reste à redéfinir.
   Dépendances : `ROL-002` à `ROL-005`. Fini lorsque : seuls type, étape et description volontaire existent.
 - [ ] `ROL-007` Corriger les défauts bloquants du pilote à deux.
   Ordonnancement : le canal de collecte est prêt avant le pilote, mais aucun défaut réel des deux

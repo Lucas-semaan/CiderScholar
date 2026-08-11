@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping, Sequence
+from datetime import UTC, datetime
 from pathlib import Path
 
+from app.ingestion.deduplication import GENERIC_TITLES, normalize_title
 from app.ingestion.pdf_extractor import PageText
 from app.models.article import ArticleMetadata
 
@@ -50,7 +52,26 @@ def _extract_authors(raw: str | None) -> list[str]:
         return []
     normalized = raw.replace("\n", " ").strip()
     parts = re.split(r"\s*;\s*|\s+and\s+|\s+et\s+", normalized, flags=re.I)
-    return [part.strip() for part in parts if part.strip()]
+    authors: list[str] = []
+    seen: set[str] = set()
+    for part in parts:
+        author = " ".join(part.split()).strip()
+        identity = author.casefold()
+        if author and identity not in seen:
+            authors.append(author)
+            seen.add(identity)
+    return authors
+
+
+def _first_plausible_year(texts: Sequence[str], *, latest_year: int) -> int | None:
+    """Return a literal publication-year candidate, never a future number."""
+
+    for text in texts:
+        for match in YEAR_PATTERN.finditer(text or ""):
+            year = int(match.group(1))
+            if year <= latest_year:
+                return year
+    return None
 
 
 def _detect_language(text: str) -> str | None:
@@ -74,29 +95,37 @@ def extract_metadata(
     source_pages = pages[:scan_pages]
     source_text = "\n".join(page.text for page in source_pages)
     raw_title = (document_metadata.get("title") or "").strip()
-    title = raw_title or _first_meaningful_line(source_pages, pdf_path.stem)
+    title = (
+        raw_title
+        if raw_title and normalize_title(raw_title) not in GENERIC_TITLES
+        else _first_meaningful_line(source_pages, pdf_path.stem)
+    )
 
-    doi_sources = [
+    preferred_doi_sources = [
         document_metadata.get("doi", ""),
         document_metadata.get("subject", ""),
         document_metadata.get("keywords", ""),
-        source_text,
     ]
+    doi_sources = preferred_doi_sources + [
+        value
+        for value in document_metadata.values()
+        if isinstance(value, str) and value not in preferred_doi_sources
+    ]
+    doi_sources.append(source_text)
     doi = extract_doi(doi_sources)
 
     abstract_match = ABSTRACT_PATTERN.search(source_text)
     abstract = " ".join(abstract_match.group(1).split()) if abstract_match else None
 
-    year = None
-    for candidate in (
-        document_metadata.get("creationDate", ""),
-        document_metadata.get("modDate", ""),
-        source_text,
-    ):
-        match = YEAR_PATTERN.search(candidate)
-        if match:
-            year = int(match.group(1))
-            break
+    year = _first_plausible_year(
+        (
+            pdf_path.stem,
+            source_text,
+            document_metadata.get("creationDate", ""),
+            document_metadata.get("modDate", ""),
+        ),
+        latest_year=datetime.now(UTC).year,
+    )
 
     return ArticleMetadata(
         doi=doi,

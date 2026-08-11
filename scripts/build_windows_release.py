@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import shutil
 import subprocess
@@ -16,6 +15,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from app.desktop.model_integrity import verify_model_manifest
+from app.file_integrity import sha256_file
 from app.ingestion.embeddings import model_storage_name
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -25,27 +25,19 @@ class ReleaseBuildError(RuntimeError):
     """The installer payload cannot be proven complete and reproducible."""
 
 
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        while block := handle.read(1024 * 1024):
-            digest.update(block)
-    return digest.hexdigest()
-
-
 def _run(command: list[str], *, cwd: Path = PROJECT_ROOT) -> None:
     subprocess.run(command, cwd=cwd, check=True)  # noqa: S603
 
 
 def _download(url: str, destination: Path, expected_sha256: str) -> Path:
     destination.parent.mkdir(parents=True, exist_ok=True)
-    if destination.is_file() and _sha256(destination) == expected_sha256:
+    if destination.is_file() and sha256_file(destination) == expected_sha256:
         return destination
     temporary = destination.with_suffix(f"{destination.suffix}.part")
     try:
         with urllib.request.urlopen(url, timeout=120) as response, temporary.open("wb") as target:
             shutil.copyfileobj(response, target)
-        if _sha256(temporary) != expected_sha256:
+        if sha256_file(temporary) != expected_sha256:
             raise ReleaseBuildError("downloaded CPython archive hash mismatch")
         temporary.replace(destination)
     finally:
@@ -276,7 +268,7 @@ def _payload_manifest(staging: Path, versions: dict[str, object]) -> Path:
     files = {
         path.relative_to(staging).as_posix(): {
             "size_bytes": path.stat().st_size,
-            "sha256": _sha256(path),
+            "sha256": sha256_file(path),
         }
         for path in sorted(staging.rglob("*"))
         if path.is_file() and path.name != "payload-manifest.json"
@@ -309,7 +301,7 @@ def _verify_payload_manifest(staging: Path) -> None:
             path = staging / Path(name)
             if (
                 path.stat().st_size != int(expected["size_bytes"])
-                or _sha256(path) != expected["sha256"]
+                or sha256_file(path) != expected["sha256"]
             ):
                 raise ValueError(f"payload hash mismatch: {name}")
     except (OSError, KeyError, TypeError, ValueError) as exc:
@@ -358,7 +350,7 @@ def _compile_installer(staging: Path, output: Path, version: str, iscc: Path) ->
     installer = output / f"CiderScholar-{version}-windows-x64.exe"
     if not installer.is_file():
         raise ReleaseBuildError("Inno Setup did not create the expected installer")
-    digest = _sha256(installer)
+    digest = sha256_file(installer)
     installer.with_suffix(f"{installer.suffix}.sha256").write_text(
         f"{digest}  {installer.name}\n", encoding="ascii"
     )

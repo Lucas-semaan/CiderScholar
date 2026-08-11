@@ -12,6 +12,10 @@ from qdrant_client import models
 
 from app.config import Settings
 from app.database.sqlite import Database
+from app.retrieval.index_manifest import (
+    prepare_index_generation_mutation,
+    write_ready_index_generation_manifest,
+)
 from app.retrieval.vector_search import QdrantLocalIndex, VectorIndexConfigurationError
 
 
@@ -172,7 +176,9 @@ def transfer_legacy_vectors(settings: Settings) -> LegacyVectorMergeReport:
         ),
     )
     source_indexes = transferred = skipped = 0
+    index_manifest = None
     try:
+        index_manifest = prepare_index_generation_mutation(target_index)
         for source_database_path, source_index_path in sources:
             if source_database_path.resolve() == target_database.path.resolve():
                 continue
@@ -188,6 +194,13 @@ def transfer_legacy_vectors(settings: Settings) -> LegacyVectorMergeReport:
             skipped += current_skipped
         if transferred:
             target_database.refresh_fully_indexed_articles()
+        if index_manifest is not None:
+            write_ready_index_generation_manifest(
+                target_database,
+                target_index,
+                generation_id=index_manifest.generation_id,
+                created_at=index_manifest.created_at,
+            )
     finally:
         target_index.close()
     return LegacyVectorMergeReport(

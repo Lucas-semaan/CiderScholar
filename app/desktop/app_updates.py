@@ -2,17 +2,17 @@
 
 from __future__ import annotations
 
-import hashlib
 import re
 from datetime import datetime
 from enum import StrEnum
-from pathlib import Path, PurePath
+from pathlib import PurePath
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from app import __version__
 from app.config import Settings
+from app.file_integrity import sha256_file
 from app.jobs.repository import JobRepository
 
 
@@ -55,14 +55,6 @@ def _version_tuple(value: str) -> tuple[int, int, int]:
     return tuple(int(part) for part in match.groups())
 
 
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        while block := handle.read(1024 * 1024):
-            digest.update(block)
-    return digest.hexdigest()
-
-
 def _base_status(state: ApplicationUpdateState, message: str) -> ApplicationUpdateStatus:
     return ApplicationUpdateStatus(
         state=state,
@@ -97,7 +89,7 @@ def check_application_update(settings: Settings) -> ApplicationUpdateStatus:
         if (
             not installer.is_file()
             or installer.stat().st_size != manifest.size_bytes
-            or _sha256(installer) != manifest.sha256
+            or sha256_file(installer) != manifest.sha256
         ):
             raise ValueError("installer hash mismatch")
         _version_tuple(manifest.version)

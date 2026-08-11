@@ -18,11 +18,6 @@ const LibraryPage = lazy(() =>
     default: module.LibraryPage,
   })),
 );
-const PilotFeedbackPage = lazy(() =>
-  import("@/features/pilot-feedback/PilotFeedbackPage").then((module) => ({
-    default: module.PilotFeedbackPage,
-  })),
-);
 const SettingsPage = lazy(() =>
   import("@/features/settings/SettingsPage").then((module) => ({
     default: module.SettingsPage,
@@ -42,7 +37,6 @@ export function App() {
         <Route element={<LazyPage page={<DiagnosticPage />} />} path="diagnostic" />
         <Route element={<LegacyCorpusRedirect />} path="corpus" />
         <Route element={<LazyPage page={<LibraryPage />} />} path="bibliotheque" />
-        <Route element={<LazyPage page={<PilotFeedbackPage />} />} path="retours-pilote" />
         <Route element={<LazyPage page={<SynthesisPage />} />} path="syntheses" />
         <Route element={<LazyPage page={<SettingsPage />} />} path="parametres" />
         <Route element={<Navigate replace to="/" />} path="*" />

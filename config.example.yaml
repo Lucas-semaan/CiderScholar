@@ -81,6 +81,7 @@ argo:
   model: chat-gpt-oss-120b
   api_key_env: LOCAL_SCIENCE_RAG_ARGO_API_KEY
   temperature: 0.1
+  scientific_correction_temperature: 0.1
   max_input_characters: 64000
   max_output_tokens: 8192
   request_timeout_seconds: 300

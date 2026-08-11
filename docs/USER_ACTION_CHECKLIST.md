@@ -5,8 +5,8 @@ coller de clé ARGO, mot de passe, contenu de chat, PDF privé ou donnée scient
 
 ## 1. Distribution Windows et SharePoint
 
-- [ ] Publier dans `CiderScholar / installers` `CiderScholar-0.2.0-windows-x64.exe`, son `.sha256`
-  et `latest.json` (voir [`WINDOWS_BUILD_0.2.0.md`](WINDOWS_BUILD_0.2.0.md)).
+- [ ] Publier dans `CiderScholar / installers` `CiderScholar-0.2.9-windows-x64.exe`, son `.sha256`
+  et `latest.json` (voir [`WINDOWS_BUILD_0.2.9.md`](WINDOWS_BUILD_0.2.9.md)).
 - [ ] Copier le contenu prêt de [`SHAREPOINT_INSTALLATION.md`](SHAREPOINT_INSTALLATION.md) dans une
   page SharePoint courte.
 - [ ] Sur un profil Windows temporaire distinct, noter : version, SHA-256, heure, installation sans

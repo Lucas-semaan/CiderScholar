@@ -127,6 +127,7 @@ describe("API client", () => {
       analyze_figures: true,
       mode: "quick",
       interaction_mode: "auto",
+      answer_effort: "balanced",
     });
     await api.jobs.poll("job/id");
     await api.jobs.cancel("job/id");
@@ -148,6 +149,7 @@ describe("API client", () => {
           analyze_figures: true,
           mode: "quick",
           interaction_mode: "auto",
+          answer_effort: "balanced",
         }),
       }),
     );

@@ -10,7 +10,12 @@ from app.llm.argo_client import (
     ArgoScientificValidationError,
     ScientificValidationReason,
 )
-from app.models.chatbot import ChatbotFacetDraft, ChatEvidencePassage, ChatEvidenceRecord
+from app.models.chatbot import (
+    ChatbotFacetDraft,
+    ChatEvidencePassage,
+    ChatEvidenceRecord,
+    ScientificGenerationTrace,
+)
 from app.retrieval.coverage_assessment import (
     AxisCoverageAssessment,
     CoverageAssessmentResult,
@@ -31,6 +36,7 @@ from app.services.chatbot import (
     resolve_chat_interaction_mode,
 )
 from app.services.workflows import (
+    _ChatRetrievalTraceCollector,
     acquire_common_full_text_for_chat,
     answer_chatbot,
     search_common_corpus_abstracts,
@@ -337,6 +343,15 @@ def test_answer_chatbot_applies_the_multilingual_semantic_selection_before_synth
             ),
         }
     )
+    generation_trace = ScientificGenerationTrace(
+        phase="evidence",
+        outcome="generated",
+        request_count=1,
+        validation_retries=0,
+        length_retries=0,
+        prompt_tokens=2,
+        completion_tokens=1,
+    )
     noise = _local(2).model_copy(
         update={
             "title": "Patulin quantification by chromatography",
@@ -405,8 +420,8 @@ def test_answer_chatbot_applies_the_multilingual_semantic_selection_before_synth
         return semantic, coverage
 
     class FakeEvidenceService:
-        def __init__(self, _client):
-            pass
+        def __init__(self, _client, *, correction_temperature):
+            captured["correction_temperature"] = correction_temperature
 
         @staticmethod
         def _result(records, **options):
@@ -420,6 +435,7 @@ def test_answer_chatbot_applies_the_multilingual_semantic_selection_before_synth
                 prompt_tokens=2,
                 completion_tokens=1,
                 facet_drafts=[],
+                generation_traces=[generation_trace],
             )
 
         def answer(self, _question, records, **options):
@@ -457,9 +473,28 @@ def test_answer_chatbot_applies_the_multilingual_semantic_selection_before_synth
     )
 
     assert [record.record_id for record in captured["records"]] == [relevant.record_id]
+    assert captured["correction_temperature"] == 0.1
     assert captured["coverage_notes"] == []
     assert result.prompt_tokens == 20
     assert result.completion_tokens == 9
+    assert result.generation_traces == [generation_trace]
+    traces = {trace.stage: trace for trace in result.retrieval_traces}
+    assert traces["evidence_merge"].pre_rerank_candidate_count == 2
+    assert traces["semantic_filter"].rejection_counts == {
+        "semantic_or_scientific_grade_rejected": 1
+    }
+    assert traces["llm_context"].selected_article_count == 1
+    assert traces["llm_context"].selected_passage_count == 1
+    trace_payload = str([trace.model_dump() for trace in result.retrieval_traces])
+    assert relevant.record_id not in trace_payload
+    assert relevant.title not in trace_payload
+    generation_timing = next(
+        timing for timing in result.timings if timing.stage == "argo_generation"
+    )
+    assert generation_timing.prompt_tokens == 2
+    assert generation_timing.completion_tokens == 1
+    assert generation_timing.process_rss_before_gb == pytest.approx(0.25)
+    assert generation_timing.process_rss_after_gb == pytest.approx(0.25)
     assert [source.record_id for source in result.sources] == [relevant.record_id]
     assert progress_stages == [
         "planning",
@@ -675,7 +710,7 @@ def test_answer_chatbot_never_downgrades_planning_when_argo_quota_is_reached(
         )
 
 
-def test_answer_chatbot_returns_extracts_when_argo_synthesis_is_invalid(
+def test_answer_chatbot_returns_structured_diagnostic_when_argo_synthesis_is_invalid(
     settings,
     monkeypatch,
 ) -> None:
@@ -726,11 +761,12 @@ def test_answer_chatbot_returns_extracts_when_argo_synthesis_is_invalid(
         use_external_sources=False,
     )
 
-    assert result.generation_status == "extractive_fallback"
+    assert result.generation_status == "diagnostic_only"
     assert result.diagnostic_code == "unsupported_numeric_claim"
-    assert result.model == "deterministic-evidence-fallback"
-    assert [source.record_id for source in result.sources] == [candidate.record_id]
-    assert "passages les mieux classés" in result.answer_markdown
+    assert result.model == "deterministic-structured-fallback"
+    assert result.sources == []
+    assert "## Réponse synthétique" in result.answer_markdown
+    assert "passages les mieux classés" not in result.answer_markdown
 
 
 def test_answer_chatbot_returns_a_diagnostic_when_retrieval_is_empty(
@@ -772,7 +808,8 @@ def test_answer_chatbot_returns_a_diagnostic_when_retrieval_is_empty(
     assert result.generation_status == "diagnostic_only"
     assert result.diagnostic_code == "retrieval_no_qualified_evidence"
     assert result.sources == []
-    assert "anomalie de retrieval" in result.answer_markdown
+    assert "## Réponse synthétique" in result.answer_markdown
+    assert "## Limites des preuves" in result.answer_markdown
 
 
 def test_answer_chatbot_returns_a_diagnostic_when_local_retrieval_crashes(
@@ -819,7 +856,7 @@ def test_answer_chatbot_returns_a_diagnostic_when_local_retrieval_crashes(
     assert any("RuntimeError" in warning for warning in result.warnings)
 
 
-def test_answer_chatbot_exposes_retrieved_evidence_when_semantic_filter_selects_nothing(
+def test_answer_chatbot_abstains_without_exposing_candidates_when_semantic_filter_selects_nothing(
     settings,
     monkeypatch,
 ) -> None:
@@ -932,9 +969,11 @@ def test_answer_chatbot_exposes_retrieved_evidence_when_semantic_filter_selects_
         use_external_sources=False,
     )
 
-    assert result.generation_status == "extractive_fallback"
+    assert result.generation_status == "abstained"
     assert result.diagnostic_code == "semantic_filter_empty"
-    assert [source.record_id for source in result.sources] == [candidate.record_id]
+    assert result.sources == []
+    assert candidate.abstract not in result.answer_markdown
+    assert "## Limites des preuves" in result.answer_markdown
 
 
 def test_answer_chatbot_uses_faceted_drafts_for_multi_axis_research(
@@ -1117,13 +1156,25 @@ def test_chatbot_uses_the_default_common_corpus_for_an_exact_article_title(setti
         ],
     )
 
-    results = search_common_corpus_abstracts(settings, query=title, limit=5)
+    trace = _ChatRetrievalTraceCollector()
+    results = search_common_corpus_abstracts(
+        settings,
+        query=title,
+        limit=5,
+        retrieval_trace=trace,
+    )
     sources = chatbot_sources(results, [results[0].record_id])
 
     assert [result.record_id for result in results] == ["common:common-biogas"]
     assert results[0].title == title
     assert sources[0].scope.value == "common"
     assert sources[0].providers == ["corpus-base"]
+    abstract_trace = trace.models()[0]
+    assert abstract_trace.stage == "abstract_search"
+    assert abstract_trace.query_variant_count == 1
+    assert abstract_trace.lexical_candidate_count >= 1
+    assert abstract_trace.selected_article_count == 1
+    assert title not in str(abstract_trace.model_dump())
 
 
 def test_chatbot_retrieves_page_bound_full_text_even_without_an_abstract(settings) -> None:
@@ -1159,10 +1210,12 @@ def test_chatbot_retrieves_page_bound_full_text_even_without_an_abstract(setting
         ],
     )
 
+    trace = _ChatRetrievalTraceCollector()
     records = search_common_corpus_full_text_evidence(
         settings,
         query="yeast assimilable nitrogen fermentation kinetics",
         article_count=3,
+        retrieval_trace=trace,
     )
 
     assert [record.article_id for record in records] == ["full-text-only"]
@@ -1170,3 +1223,10 @@ def test_chatbot_retrieves_page_bound_full_text_even_without_an_abstract(setting
     assert records[0].passages[0].page_start == 6
     assert records[0].passages[0].page_end == 7
     assert records[0].passages[0].chunk_id is not None
+    traces = {item.stage: item for item in trace.models()}
+    assert traces["full_text_search"].query_variant_count >= 1
+    assert traces["full_text_search"].lexical_candidate_count >= 1
+    assert traces["full_text_search"].rrf_unique_candidate_count >= 1
+    assert traces["full_text_reranking"].pre_rerank_candidate_count == 1
+    assert traces["full_text_evidence_selection"].selected_article_count == 1
+    assert traces["full_text_evidence_selection"].selected_passage_count >= 1

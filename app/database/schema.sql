@@ -124,4 +124,3 @@ CREATE TABLE IF NOT EXISTS ingestion_jobs (
 );
 
 CREATE INDEX IF NOT EXISTS idx_ingestion_jobs_state ON ingestion_jobs(state);
-

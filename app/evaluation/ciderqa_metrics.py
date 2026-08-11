@@ -3,12 +3,18 @@
 from __future__ import annotations
 
 import random
+import re
 from collections.abc import Sequence
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.evaluation.ciderqa import CiderQAQuestion, CiderQASplitDataset
 from app.evaluation.metrics import RankingMetrics, ranking_metrics
+from app.models.chatbot import ChatbotRetrievalTrace, ChatbotTiming
+
+NUMERIC_TOKEN_PATTERN = re.compile(r"(?<!\w)[+-]?(?:\d+(?:[.,]\d+)?|[.,]\d+)(?!\w)")
+NumericFaithfulnessAssessment = Literal["not_assessed", "not_applicable", "faithful", "unfaithful"]
 
 
 class CiderQACitationAssessment(BaseModel):
@@ -26,6 +32,7 @@ class CiderQAClaimAssessment(BaseModel):
     factually_correct: bool
     expected_claim_indexes: list[int] = Field(default_factory=list, max_length=20)
     citations: list[CiderQACitationAssessment] = Field(default_factory=list, max_length=20)
+    numeric_faithfulness: NumericFaithfulnessAssessment = "not_assessed"
 
 
 class CiderQAInferenceResult(BaseModel):
@@ -38,6 +45,8 @@ class CiderQAInferenceResult(BaseModel):
     ranked_article_ids: list[str] = Field(default_factory=list, max_length=100)
     ranked_fragment_ids: list[str] = Field(default_factory=list, max_length=200)
     claims: list[CiderQAClaimAssessment] = Field(default_factory=list, max_length=50)
+    retrieval_traces: list[ChatbotRetrievalTrace] = Field(default_factory=list, max_length=40)
+    timings: list[ChatbotTiming] = Field(default_factory=list, max_length=40)
 
     @model_validator(mode="after")
     def answer_matches_claims(self) -> CiderQAInferenceResult:
@@ -63,6 +72,10 @@ class RetrievalEstimates(BaseModel):
     recall_at_20: MetricEstimate
     mean_reciprocal_rank: MetricEstimate
     ndcg_at_20: MetricEstimate
+    recall_at_10: MetricEstimate | None = None
+    recall_at_50: MetricEstimate | None = None
+    ndcg_at_10: MetricEstimate | None = None
+    ndcg_at_50: MetricEstimate | None = None
 
 
 class CiderQACaseMetrics(BaseModel):
@@ -74,12 +87,20 @@ class CiderQACaseMetrics(BaseModel):
     notice: RankingMetrics | None
     article: RankingMetrics | None
     fragment: RankingMetrics | None
+    notice_at_10: RankingMetrics | None = None
+    notice_at_50: RankingMetrics | None = None
+    article_at_10: RankingMetrics | None = None
+    article_at_50: RankingMetrics | None = None
+    fragment_at_10: RankingMetrics | None = None
+    fragment_at_50: RankingMetrics | None = None
     exactness: float | None = Field(default=None, ge=0.0, le=1.0)
     completeness: float | None = Field(default=None, ge=0.0, le=1.0)
     citation_precision: float | None = Field(default=None, ge=0.0, le=1.0)
     citation_recall: float | None = Field(default=None, ge=0.0, le=1.0)
     entailment_rate: float | None = Field(default=None, ge=0.0, le=1.0)
     page_accuracy: float | None = Field(default=None, ge=0.0, le=1.0)
+    numeric_faithfulness: float | None = Field(default=None, ge=0.0, le=1.0)
+    numeric_assessment_coverage: float | None = Field(default=None, ge=0.0, le=1.0)
     abstention_correct: bool
     insufficiency_score: float = Field(ge=0.0, le=1.0)
 
@@ -102,6 +123,8 @@ class CiderQAMetricsReport(BaseModel):
     false_refusal_rate: MetricEstimate
     insufficiency_brier_score: MetricEstimate
     cases: list[CiderQACaseMetrics]
+    numeric_faithfulness: MetricEstimate | None = None
+    numeric_assessment_coverage: MetricEstimate | None = None
 
 
 def bootstrap_estimate(
@@ -182,6 +205,17 @@ def _case_metrics(
     )
     citation_count = len(citations)
     claim_count = len(result.claims)
+    numeric_candidates = [
+        claim
+        for claim in result.claims
+        if NUMERIC_TOKEN_PATTERN.search(claim.text)
+        or claim.numeric_faithfulness in {"faithful", "unfaithful"}
+    ]
+    assessed_numeric_claims = [
+        claim
+        for claim in numeric_candidates
+        if claim.numeric_faithfulness in {"faithful", "unfaithful"}
+    ]
     return CiderQACaseMetrics(
         question_id=question.id,
         answerable=True,
@@ -189,6 +223,12 @@ def _case_metrics(
         notice=ranking_metrics(result.ranked_notice_ids, expected_notices, k=20),
         article=ranking_metrics(result.ranked_article_ids, expected_articles, k=20),
         fragment=ranking_metrics(result.ranked_fragment_ids, expected_fragments, k=20),
+        notice_at_10=ranking_metrics(result.ranked_notice_ids, expected_notices, k=10),
+        notice_at_50=ranking_metrics(result.ranked_notice_ids, expected_notices, k=50),
+        article_at_10=ranking_metrics(result.ranked_article_ids, expected_articles, k=10),
+        article_at_50=ranking_metrics(result.ranked_article_ids, expected_articles, k=50),
+        fragment_at_10=ranking_metrics(result.ranked_fragment_ids, expected_fragments, k=10),
+        fragment_at_50=ranking_metrics(result.ranked_fragment_ids, expected_fragments, k=50),
         exactness=(
             sum(claim.factually_correct for claim in result.claims) / claim_count
             if claim_count
@@ -199,6 +239,15 @@ def _case_metrics(
         citation_recall=len(cited_indexes) / len(expected_indexes),
         entailment_rate=entailed / citation_count if citation_count else 0.0,
         page_accuracy=exact_pages / citation_count if citation_count else 0.0,
+        numeric_faithfulness=(
+            sum(claim.numeric_faithfulness == "faithful" for claim in assessed_numeric_claims)
+            / len(assessed_numeric_claims)
+            if assessed_numeric_claims
+            else None
+        ),
+        numeric_assessment_coverage=(
+            len(assessed_numeric_claims) / len(numeric_candidates) if numeric_candidates else None
+        ),
         abstention_correct=abstention_correct,
         insufficiency_score=result.insufficiency_score,
     )
@@ -207,15 +256,28 @@ def _case_metrics(
 def _retrieval_estimates(cases: Sequence[CiderQACaseMetrics], field: str) -> RetrievalEstimates:
     rankings = [getattr(case, field) for case in cases]
     present = [value for value in rankings if value is not None]
+    rankings_at_10 = [getattr(case, f"{field}_at_10") for case in cases]
+    rankings_at_50 = [getattr(case, f"{field}_at_50") for case in cases]
+    present_at_10 = [value for value in rankings_at_10 if value is not None]
+    present_at_50 = [value for value in rankings_at_50 if value is not None]
     return RetrievalEstimates(
         recall_at_20=bootstrap_estimate([value.recall_at_k for value in present]),
         mean_reciprocal_rank=bootstrap_estimate([value.mean_reciprocal_rank for value in present]),
         ndcg_at_20=bootstrap_estimate([value.ndcg_at_k for value in present]),
+        recall_at_10=bootstrap_estimate([value.recall_at_k for value in present_at_10]),
+        recall_at_50=bootstrap_estimate([value.recall_at_k for value in present_at_50]),
+        ndcg_at_10=bootstrap_estimate([value.ndcg_at_k for value in present_at_10]),
+        ndcg_at_50=bootstrap_estimate([value.ndcg_at_k for value in present_at_50]),
     )
 
 
 def _present_values(cases: Sequence[CiderQACaseMetrics], field: str) -> list[float]:
     return [float(value) for case in cases if (value := getattr(case, field)) is not None]
+
+
+def _optional_estimate(cases: Sequence[CiderQACaseMetrics], field: str) -> MetricEstimate | None:
+    values = _present_values(cases, field)
+    return bootstrap_estimate(values) if values else None
 
 
 def evaluate_ciderqa_results(
@@ -250,4 +312,6 @@ def evaluate_ciderqa_results(
         false_refusal_rate=bootstrap_estimate([1.0 - value for value in specificity_values]),
         insufficiency_brier_score=bootstrap_estimate(brier_values),
         cases=cases,
+        numeric_faithfulness=_optional_estimate(cases, "numeric_faithfulness"),
+        numeric_assessment_coverage=_optional_estimate(cases, "numeric_assessment_coverage"),
     )

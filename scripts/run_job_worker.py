@@ -75,9 +75,11 @@ def build_worker(
             deep_operations,
         )
     if JobType.LONG_SYNTHESIS in requested_types:
+        scientific_database = Database(settings.paths.common_database_path)
+        scientific_database.initialize()
         handlers[JobType.LONG_SYNTHESIS] = LongSynthesisHandler(
             settings,
-            repository.database,
+            scientific_database,
         )
     if JobType.CORPUS_INGESTION in requested_types:
         corpus_settings = settings_for_corpus(settings, CorpusScope.COMMON)

@@ -13,6 +13,11 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from app.corpora import CorpusScope
 from app.deep_research.citations import CitationSourceFragment
 from app.jobs.contracts import DeepResearchPayload
+from app.llm.response_language import (
+    output_language_name,
+    question_language,
+    validate_output_language,
+)
 from app.models.synthesis import DOI_PATTERN, MODEL_CITATION_PATTERN
 
 MAX_ATOMIC_CLAIMS = 20
@@ -178,8 +183,11 @@ _SYSTEM_PROMPT = (
     "fournis. Une affirmation doit relever d'un seul rôle : résultat observé, interprétation ou "
     "recommandation. Une source evidence_kind=figure est une observation visuelle locale validée : "
     "elle ne soutient que les tendances explicitement écrites dans son extrait. Ne mélange jamais "
-    "ces rôles. Copie au moins un source_excerpt exactement, "
-    "sans le reformuler. N'ajoute aucun fait absent et réponds seulement avec l'objet JSON demandé."
+    "ces rôles. Le champ statement est un texte visible : rédige-le exclusivement dans la "
+    "langue de la question et traduis-y le contenu scientifique des sources si elles sont dans "
+    "une autre langue. Le champ source_excerpt reste au contraire une copie verbatim dans sa "
+    "langue originale. Copie au moins un source_excerpt exactement, sans le reformuler. N'ajoute "
+    "aucun fait absent et réponds seulement avec l'objet JSON demandé."
 )
 
 
@@ -230,14 +238,22 @@ class AtomicClaimExtractionStage:
         }
         claims: list[AtomicClaim] = []
         if self.client is not None and source_map:
+            output_language = question_language(payload.message)
             response = self.client.chat(
                 [
-                    {"role": "system", "content": _SYSTEM_PROMPT},
+                    {
+                        "role": "system",
+                        "content": (
+                            f"{_SYSTEM_PROMPT} Tous les statements doivent être intégralement en "
+                            f"{output_language_name(output_language)}, sans mélange de langues."
+                        ),
+                    },
                     {
                         "role": "user",
                         "content": json.dumps(
                             {
                                 "question": payload.message,
+                                "output_language": output_language,
                                 "sources": [
                                     {
                                         "source_key": key,
@@ -258,8 +274,12 @@ class AtomicClaimExtractionStage:
             )
             try:
                 drafts = _AtomicClaimDrafts.model_validate_json(response.content)
+                validate_output_language(
+                    payload.message,
+                    [draft.statement for draft in drafts.claims],
+                )
                 claims = self._materialize(drafts, source_map, allowed_excerpts)
-            except (TypeError, ValueError) as error:
+            except (RuntimeError, TypeError, ValueError) as error:
                 raise AtomicClaimExtractionError(
                     "atomic claims do not match the supplied local excerpts"
                 ) from error

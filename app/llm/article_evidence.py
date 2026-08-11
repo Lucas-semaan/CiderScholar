@@ -162,6 +162,7 @@ class SelectedPassage(BaseModel):
     text: str = Field(min_length=1)
     selection_score: float = Field(ge=0.0, le=1.0)
     selection_reasons: list[str]
+    context_role: str | None = None
 
     @model_validator(mode="after")
     def validate_pages(self) -> SelectedPassage:
@@ -217,6 +218,19 @@ def _is_methods(section: str | None) -> bool:
     return _normalized_text(section or "") == "materials and methods"
 
 
+def _context_role(section: str | None) -> str:
+    """Map article sections to the complementary evidence roles we seek."""
+
+    normalized = _normalized_text(section or "")
+    if normalized == "results":
+        return "result"
+    if normalized in {"materials and methods", "methods", "methodology"}:
+        return "method_or_conditions"
+    if normalized in {"discussion", "conclusion"}:
+        return "discussion_or_limit"
+    return "supporting_context"
+
+
 class EvidencePassageSelector:
     """Select a small, diverse set from one article without loading the corpus."""
 
@@ -232,6 +246,7 @@ class EvidencePassageSelector:
         query_terms: frozenset[str],
         ranked_position: int | None,
         methods_requested: bool,
+        context_anchor_distance: int | None = None,
     ) -> SelectedPassage:
         text = str(row["text"])
         section = str(row["section"]) if row["section"] else None
@@ -260,6 +275,10 @@ class EvidencePassageSelector:
         if _is_methods(section) and not methods_requested:
             score -= 0.12
             reasons.append("methods deferred unless needed")
+        if context_anchor_distance is not None:
+            context_bonus = 0.22 * max(0.0, 1.0 - context_anchor_distance / 4)
+            score += context_bonus
+            reasons.append(f"intra-article context near ranked chunk ({context_anchor_distance})")
         return SelectedPassage(
             chunk_id=int(row["id"]),
             article_id=article_id,
@@ -269,6 +288,7 @@ class EvidencePassageSelector:
             text=text,
             selection_score=min(max(score, 0.0), 1.0),
             selection_reasons=reasons or ["bounded article candidate"],
+            context_role=_context_role(section) if context_anchor_distance is not None else None,
         )
 
     def select(
@@ -278,6 +298,9 @@ class EvidencePassageSelector:
         article_id: str,
         ranked_chunk_ids: Sequence[int],
         passage_count: int | None = None,
+        expand_intra_article_context: bool = False,
+        max_candidate_chunks: int | None = None,
+        neighborhood_radius: int = 1,
     ) -> list[SelectedPassage]:
         cleaned_query = query.strip()
         if not cleaned_query:
@@ -286,6 +309,10 @@ class EvidencePassageSelector:
         target = config.passages_per_article if passage_count is None else passage_count
         if not config.min_passages_per_article <= target <= config.max_passages_per_article:
             raise ValueError("evidence passage count is outside configured bounds")
+        if max_candidate_chunks is not None and max_candidate_chunks <= 0:
+            raise ValueError("evidence candidate chunk limit must be positive")
+        if neighborhood_radius < 0:
+            raise ValueError("evidence neighborhood radius cannot be negative")
         ranked_ids = list(dict.fromkeys(ranked_chunk_ids))
         if len(ranked_ids) > config.max_passages_per_article:
             ranked_ids = ranked_ids[: config.max_passages_per_article]
@@ -296,12 +323,13 @@ class EvidencePassageSelector:
         if any(str(row["article_id"]) != article_id for row in ranked_details.values()):
             raise EvidenceSourceValidationError("ranked chunk belongs to a different article")
 
+        candidate_limit = config.candidate_chunks_per_article
+        if max_candidate_chunks is not None:
+            candidate_limit = min(candidate_limit, max_candidate_chunks)
         pool: dict[int, Mapping[str, Any]] = {
             chunk_id: ranked_details[chunk_id] for chunk_id in ranked_ids
         }
-        for row in self.database.chunks_for_article(
-            article_id, limit=config.candidate_chunks_per_article
-        ):
+        for row in self.database.chunks_for_article(article_id, limit=candidate_limit):
             pool.setdefault(int(row["id"]), row)
         if not pool:
             raise EvidenceSourceValidationError("article has no available chunks")
@@ -309,6 +337,18 @@ class EvidencePassageSelector:
         query_terms = _terms(cleaned_query)
         methods_requested = bool(METHOD_QUERY_TERMS.intersection(query_terms))
         ranked_positions = {chunk_id: position for position, chunk_id in enumerate(ranked_ids)}
+        anchor_indexes = (
+            [int(row["chunk_index"]) for row in ranked_details.values()]
+            if expand_intra_article_context
+            else []
+        )
+
+        def context_distance(row: Mapping[str, Any]) -> int | None:
+            if not anchor_indexes:
+                return None
+            distance = min(abs(int(row["chunk_index"]) - index) for index in anchor_indexes)
+            return distance if distance <= neighborhood_radius else None
+
         candidates = [
             self._candidate(
                 row,
@@ -316,6 +356,7 @@ class EvidencePassageSelector:
                 query_terms=query_terms,
                 ranked_position=ranked_positions.get(chunk_id),
                 methods_requested=methods_requested,
+                context_anchor_distance=context_distance(row),
             )
             for chunk_id, row in pool.items()
         ]
@@ -324,6 +365,7 @@ class EvidencePassageSelector:
         chosen: list[SelectedPassage] = []
         deferred_duplicates: list[SelectedPassage] = []
         deferred_methods: list[SelectedPassage] = []
+        deferred_roles: list[SelectedPassage] = []
         total_characters = 0
         for candidate in candidates:
             if len(chosen) >= target:
@@ -332,6 +374,16 @@ class EvidencePassageSelector:
                 continue
             if _is_methods(candidate.section) and not methods_requested:
                 deferred_methods.append(candidate)
+                continue
+            if (
+                expand_intra_article_context
+                and candidate.context_role is not None
+                and any(existing.context_role == candidate.context_role for existing in chosen)
+                and any(
+                    other.context_role not in {None, candidate.context_role} for other in candidates
+                )
+            ):
+                deferred_roles.append(candidate)
                 continue
             candidate_terms = _terms(candidate.text)
             if any(
@@ -344,7 +396,7 @@ class EvidencePassageSelector:
             total_characters += len(candidate.text)
 
         if len(chosen) < config.min_passages_per_article:
-            for candidate in [*deferred_duplicates, *deferred_methods]:
+            for candidate in [*deferred_duplicates, *deferred_methods, *deferred_roles]:
                 if len(chosen) >= min(config.min_passages_per_article, len(candidates)):
                     break
                 if total_characters + len(candidate.text) > config.max_passage_characters:

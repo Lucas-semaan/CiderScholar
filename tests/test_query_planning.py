@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
+from app.llm.argo_client import ArgoProtocolError
 from app.llm.contracts import GenerationMetrics, GenerationResponse
 from app.retrieval.query_planning import (
     ArgoQueryPlanningService,
@@ -10,11 +13,15 @@ from app.retrieval.query_planning import (
 )
 
 
-def _response(content: dict[str, object]) -> GenerationResponse:
+def _response(
+    content: dict[str, object] | str,
+    *,
+    done_reason: str = "stop",
+) -> GenerationResponse:
     return GenerationResponse(
         model="planner-test",
-        content=json.dumps(content),
-        done_reason="stop",
+        content=json.dumps(content) if isinstance(content, dict) else content,
+        done_reason=done_reason,
         metrics=GenerationMetrics(
             total_duration_seconds=0.1,
             load_duration_seconds=0,
@@ -36,6 +43,16 @@ class _FakePlanningClient:
         self.messages = messages
         self.options = options
         return _response(self.payload)
+
+
+class _SequencePlanningClient:
+    def __init__(self, responses: list[GenerationResponse]) -> None:
+        self.responses = responses
+        self.calls: list[tuple[object, dict[str, object]]] = []
+
+    def chat(self, messages, **options):
+        self.calls.append((messages, options))
+        return self.responses[len(self.calls) - 1]
 
 
 def test_argo_planner_keeps_a_simple_question_on_one_axis() -> None:
@@ -82,6 +99,7 @@ def test_argo_planner_keeps_a_simple_question_on_one_axis() -> None:
     ]
     assert result.prompt_tokens == 120
     assert client.options["json_schema"] == ResearchQueryPlan.model_json_schema()
+    assert client.options["max_output_tokens"] == 1800
     prompt = client.messages[0]["content"]
     assert "concept_definition" in prompt
     assert "faux amis" in prompt
@@ -144,6 +162,127 @@ def test_argo_planner_can_choose_two_independent_axes_and_expand_the_matrix() ->
     assert "phenolic compounds" in intent.facet("structure").terms_en
 
 
+@pytest.mark.parametrize(
+    ("generated_value", "axis_count", "expected_value"),
+    [(False, 2, True), (True, 1, False)],
+)
+def test_argo_planner_derives_faceted_flag_from_the_validated_axes(
+    generated_value: bool,
+    axis_count: int,
+    expected_value: bool,
+) -> None:
+    axes = [
+        {
+            "key": f"comparison_{index}",
+            "label": f"Comparison {index}",
+            "question": f"How does treatment {index} affect apple juice?",
+            "terms_fr": [f"traitement {index}"],
+            "terms_en": [f"treatment {index}"],
+            "search_queries": [f"apple juice treatment {index}"],
+        }
+        for index in range(1, axis_count + 1)
+    ]
+    payload = {
+        "interpreted_question": "Comparer deux traitements du jus de pomme",
+        "requires_faceted_answer": generated_value,
+        "axes": axes,
+        "retrieval_queries": ["apple juice treatment comparison"],
+    }
+
+    result = ArgoQueryPlanningService(_FakePlanningClient(payload)).plan(
+        "Quel est l'intérêt des traitements du jus de pomme ?"
+    )
+
+    assert result.plan.requires_faceted_answer is expected_value
+    assert len(result.plan.axes) == axis_count
+
+
+def test_argo_planner_derives_faceted_flag_when_argo_omits_the_redundant_field() -> None:
+    payload = {
+        "interpreted_question": "Effet du traitement sur le jus de pomme",
+        "axes": [
+            {
+                "key": "treatment",
+                "label": "Effet du traitement",
+                "question": "Quel est l'effet du traitement sur le jus de pomme ?",
+                "terms_fr": ["traitement"],
+                "terms_en": ["treatment"],
+                "search_queries": ["apple juice treatment effect"],
+            }
+        ],
+        "retrieval_queries": ["apple juice treatment effect"],
+    }
+
+    result = ArgoQueryPlanningService(_FakePlanningClient(payload)).plan(
+        "Effet du traitement sur le jus de pomme ?"
+    )
+
+    assert result.plan.requires_faceted_answer is False
+
+
+def test_argo_planner_accepts_a_whole_document_json_fence() -> None:
+    payload = {
+        "interpreted_question": "Effet du traitement sur le jus de pomme",
+        "axes": [
+            {
+                "key": "treatment",
+                "label": "Effet du traitement",
+                "question": "Quel est l'effet du traitement sur le jus de pomme ?",
+                "terms_fr": ["traitement"],
+                "terms_en": ["treatment"],
+                "search_queries": ["apple juice treatment effect"],
+            }
+        ],
+        "retrieval_queries": ["apple juice treatment effect"],
+    }
+    client = _SequencePlanningClient([_response(f"```json\n{json.dumps(payload)}\n```")])
+
+    result = ArgoQueryPlanningService(client).plan("Effet du traitement sur le jus de pomme ?")
+
+    assert result.plan.axes[0].key == "treatment"
+
+
+def test_argo_planner_expands_the_retry_budget_after_a_truncated_plan() -> None:
+    valid_payload = {
+        "interpreted_question": "Effet du traitement sur le jus de pomme",
+        "axes": [
+            {
+                "key": "treatment",
+                "label": "Effet du traitement",
+                "question": "Quel est l'effet du traitement sur le jus de pomme ?",
+                "terms_fr": ["traitement"],
+                "terms_en": ["treatment"],
+                "search_queries": ["apple juice treatment effect"],
+            }
+        ],
+        "retrieval_queries": ["apple juice treatment effect"],
+    }
+    client = _SequencePlanningClient(
+        [
+            _response('{"interpreted_question": "plan tronqué"', done_reason="length"),
+            _response(valid_payload),
+        ]
+    )
+
+    result = ArgoQueryPlanningService(client, max_output_tokens=4096).plan(
+        "Effet du traitement sur le jus de pomme ?"
+    )
+
+    assert result.plan.axes[0].key == "treatment"
+    assert [call[1]["max_output_tokens"] for call in client.calls] == [1800, 3200]
+    assert "tronqué ou invalide" in client.calls[1][0][-1]["content"]
+
+
+def test_argo_planner_reports_repeated_invalid_outputs_as_a_protocol_error() -> None:
+    client = _FakePlanningClient({"requires_faceted_answer": False})
+
+    with pytest.raises(ArgoProtocolError) as error:
+        ArgoQueryPlanningService(client).plan("Effet du traitement sur le jus de pomme ?")
+
+    assert str(error.value) == "ARGO returned an invalid research query plan"
+    assert isinstance(error.value.__cause__, Exception)
+
+
 def test_deterministic_plan_is_only_marked_as_fallback() -> None:
     result = deterministic_query_plan(
         "Impact de l'élevage en barrique sur les arômes et la structure du Calvados ?"
@@ -168,6 +307,24 @@ def test_deterministic_plan_expands_apple_juice_protein_stability_storage() -> N
     assert [axis.key for axis in result.plan.axes] == ["protein_stability"]
     assert any(
         "protein stability" in query and "storage temperature" in query
+        for query in result.plan.retrieval_queries
+    )
+
+
+def test_deterministic_plan_expands_fining_and_plant_animal_comparison() -> None:
+    result = deterministic_query_plan(
+        "Quel est l'intérêt du collage dans les jus de pomme ? Donner des éléments "
+        "de comparaison entre les colles végétales et animales."
+    )
+
+    assert "fining" in result.plan.process_terms_en
+    assert [axis.key for axis in result.plan.axes] == [
+        "fining_effects",
+        "fining_agents_comparison",
+    ]
+    assert result.plan.requires_faceted_answer is True
+    assert any(
+        "fining" in query and "plant proteins" in query and "gelatin" in query
         for query in result.plan.retrieval_queries
     )
 

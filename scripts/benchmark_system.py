@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from app.config import load_settings
+from app.corpora import CorpusScope, settings_for_corpus
 from app.database.sqlite import Database
 from app.evaluation.benchmark import (
     BenchmarkRunner,
@@ -55,7 +56,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.demo_corpus == (args.cases is not None):
         parser.error("provide exactly one cases JSON path or --demo-corpus")
 
-    settings = load_settings(args.config)
+    settings = settings_for_corpus(load_settings(args.config), CorpusScope.COMMON)
     settings.paths.create()
     database = Database(settings.paths.database_path)
     database.initialize()

@@ -5,6 +5,7 @@ from collections.abc import Sequence
 import pytest
 
 from app.database.sqlite import Database
+from app.desktop.model_integrity import ModelIntegrityError, write_model_manifest
 from app.ingestion.embeddings import (
     EmbeddedChunkBatch,
     EmbeddingBatchProcessor,
@@ -12,6 +13,7 @@ from app.ingestion.embeddings import (
     SentenceTransformerBackend,
     model_storage_name,
     prepare_prefixed_texts,
+    verify_local_embedding_model,
 )
 from app.memory import MemoryLimitError
 
@@ -99,6 +101,22 @@ def test_runtime_never_downloads_a_missing_model(settings) -> None:
     backend = SentenceTransformerBackend(settings)
     with pytest.raises(LocalEmbeddingModelNotFoundError, match="--allow-network"):
         backend.encode_queries(["question locale"])
+
+
+def test_managed_model_verification_detects_missing_or_changed_weights(tmp_path) -> None:
+    model_path = tmp_path / "verified-model"
+    model_path.mkdir()
+    (model_path / "weights.bin").write_bytes(b"original weights")
+
+    with pytest.raises(ModelIntegrityError, match="manifest"):
+        verify_local_embedding_model(model_path, "fake/verified", required=True)
+
+    write_model_manifest(model_path, "fake/verified")
+    assert verify_local_embedding_model(model_path, "fake/verified", required=True) is True
+
+    (model_path / "weights.bin").write_bytes(b"altered model weights with another length")
+    with pytest.raises(ModelIntegrityError, match="hash mismatch"):
+        verify_local_embedding_model(model_path, "fake/verified", required=True)
 
 
 def test_embedding_processor_uses_bounded_batches(settings) -> None:

@@ -19,6 +19,22 @@ import { cn, formatNumber } from "@/lib/cn";
 import { formatResponseTime, type ChatMessage as ChatMessageValue } from "./chatSession";
 import { sourceEvidenceLabel, sourceOriginLabel } from "./sourcePresentation";
 
+const timingLabels: Record<string, string> = {
+  argo_planning: "Planification ARGO",
+  retrieval_lock_wait: "Attente de la recherche locale",
+  abstract_search: "Recherche dans les abstracts",
+  full_text_acquisition: "Acquisition des textes intégraux",
+  full_text_search: "Recherche dans les textes intégraux",
+  external_enrichment: "Enrichissement bibliographique",
+  evidence_merge: "Classement et fusion des preuves",
+  argo_semantic_filter: "Filtrage sémantique ARGO",
+  argo_coverage: "Contrôle de couverture ARGO",
+  supplemental_abstract_search: "Recherche complémentaire dans les abstracts",
+  supplemental_full_text_search: "Recherche complémentaire en texte intégral",
+  figure_analysis: "Analyse locale des figures",
+  argo_generation: "Génération et validation ARGO",
+};
+
 export function ChatMessage({
   message,
   onFeedback,
@@ -29,7 +45,6 @@ export function ChatMessage({
   const assistant = message.role === "assistant";
   const terminalNotice = message.terminalNotice;
   const response = message.response;
-  const facetDrafts = response?.facet_drafts ?? [];
 
   return (
     <article
@@ -72,6 +87,12 @@ export function ChatMessage({
               {response.generation_status === "extractive_fallback" && (
                 <Badge tone="warning">Réponse extractive dégradée</Badge>
               )}
+              {response.generation_status === "partial_generated" && (
+                <Badge tone="warning">Réponse partielle</Badge>
+              )}
+              {response.generation_status === "abstained" && (
+                <Badge tone="warning">Preuves insuffisantes</Badge>
+              )}
               {response.generation_status === "diagnostic_only" && (
                 <Badge tone="warning">Diagnostic sans synthèse</Badge>
               )}
@@ -95,11 +116,6 @@ export function ChatMessage({
                   API bibliographique
                 </Badge>
               )}
-              {facetDrafts.length > 0 && (
-                <Badge tone="info">
-                  Synthèse en {facetDrafts.length} axe{facetDrafts.length > 1 ? "s" : ""}
-                </Badge>
-              )}
               {(response.figure_analysis_count ?? 0) > 0 && (
                 <Badge tone="info">
                   <ChartNoAxesCombined aria-hidden="true" className="size-3" />
@@ -120,6 +136,28 @@ export function ChatMessage({
                 )}
               </Badge>
             </div>
+
+            {response.timings && response.timings.length > 0 && (
+              <details className="mt-4 rounded-xl bg-slate-50 p-3">
+                <summary className="cursor-pointer text-xs font-bold text-slate-700">
+                  Détail des temps de traitement
+                </summary>
+                <ul className="mt-3 space-y-1 text-xs text-slate-600">
+                  {response.timings.map((timing) => (
+                    <li
+                      className="flex justify-between gap-3"
+                      key={`${timing.stage}-${timing.count}`}
+                    >
+                      <span>
+                        {timingLabels[timing.stage] ?? timing.stage}
+                        {timing.count > 1 ? ` · ${timing.count}` : ""}
+                      </span>
+                      <span>{formatResponseTime(timing.duration_seconds * 1000)}</span>
+                    </li>
+                  ))}
+                </ul>
+              </details>
+            )}
 
             {response.sources.length > 0 && (
               <details className="mt-4 rounded-xl bg-slate-50 p-3">

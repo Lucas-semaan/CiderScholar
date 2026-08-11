@@ -91,6 +91,7 @@ class ClarivateClient(OfficialBibliographicClient):
                 item.get("abstract") or item.get("summary") or item.get("abstractText")
             ),
             journal=clean_text(source.get("sourceTitle") or source.get("source_title")),
+            work_type=_first_text(item.get("documentTypes"), item.get("documentType")),
             publication_year=integer_or_none(
                 source.get("publishYear") or source.get("publish_year") or item.get("year")
             ),
@@ -116,6 +117,7 @@ class ClarivateClient(OfficialBibliographicClient):
                 )
             ),
             journal=_typed_text(titles, "source"),
+            work_type=_first_text(_dig(item, "static_data.summary.pub_info.pubtype")),
             publication_year=_year_value(_dig(pub_info, "pubyear") or _dig(pub_info, "sortdate")),
             doi=_doi_from_identifiers(identifiers),
             citation_count=_expanded_citation_count(

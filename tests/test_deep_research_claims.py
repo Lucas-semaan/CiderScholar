@@ -112,3 +112,73 @@ def test_claim_stage_without_argo_persists_safe_empty_checkpoint(tmp_path) -> No
 
     assert checkpoint.source_fragment_count == 1
     assert checkpoint.claims == []
+
+
+def test_atomic_claim_translates_statement_but_preserves_verbatim_excerpt(tmp_path) -> None:
+    excerpt = "The study observed increased ester concentration during fermentation."
+    fragment = CitationSourceFragment(
+        scope=CorpusScope.COMMON,
+        article_id="article-english-source",
+        chunk_id=9,
+        page_start=5,
+        page_end=5,
+        text=excerpt,
+    )
+
+    class LanguageClient:
+        def chat(self, messages, **_kwargs):
+            assert json.loads(messages[1]["content"])["output_language"] == "fr"
+            assert "source_excerpt reste" in messages[0]["content"]
+            return SimpleNamespace(
+                content=json.dumps(
+                    {
+                        "claims": [
+                            {
+                                "statement": (
+                                    "L'étude observe une augmentation de la concentration en "
+                                    "esters pendant la fermentation."
+                                ),
+                                "role": "result",
+                                "evidence": [{"source_key": "source-1", "source_excerpt": excerpt}],
+                            }
+                        ]
+                    }
+                )
+            )
+
+    checkpoint = AtomicClaimExtractionStage(LanguageClient(), tmp_path).extract(
+        _payload(),
+        [fragment],
+    )
+
+    assert checkpoint.claims[0].statement.startswith("L'étude observe")
+    assert checkpoint.claims[0].evidence[0].source_excerpt == excerpt
+
+
+def test_atomic_claim_in_source_language_is_rejected_when_question_is_french(tmp_path) -> None:
+    excerpt = "The study shows increased ester concentration during fermentation."
+    fragment = CitationSourceFragment(
+        scope=CorpusScope.COMMON,
+        article_id="article-untranslated-source",
+        chunk_id=10,
+        page_start=6,
+        page_end=6,
+        text=excerpt,
+    )
+    stage = AtomicClaimExtractionStage(
+        _Client(
+            {
+                "claims": [
+                    {
+                        "statement": "The study shows increased ester concentration.",
+                        "role": "result",
+                        "evidence": [{"source_key": "source-1", "source_excerpt": excerpt}],
+                    }
+                ]
+            }
+        ),
+        tmp_path,
+    )
+
+    with pytest.raises(AtomicClaimExtractionError, match="supplied local excerpts"):
+        stage.extract(_payload(), [fragment])

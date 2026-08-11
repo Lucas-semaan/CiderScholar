@@ -18,6 +18,11 @@ import {
 import { initialLibraryFilters } from "@/features/library/libraryPresentation";
 import { nextReviewRecordId } from "@/features/library/reviewQueue";
 import { SuggestionForm } from "@/features/library/SuggestionForm";
+import {
+  librarySplitViewMediaQuery,
+  shouldOpenLibraryDetailDialog,
+} from "@/features/library/libraryDetail";
+import { useMediaQuery } from "@/hooks/useMediaQuery";
 import { useRemoteData } from "@/hooks/useRemoteData";
 import { api, type LibraryRecordFilters } from "@/lib/api";
 import { formatNumber } from "@/lib/cn";
@@ -77,6 +82,7 @@ function BibliographicLibrary() {
   const [applied, setApplied] = useState<LibraryRecordFilters>(initialLibraryFilters);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [reviewNotice, setReviewNotice] = useState<string | null>(null);
+  const splitViewVisible = useMediaQuery(librarySplitViewMediaQuery);
   const summary = useRemoteData(useCallback(() => api.library.summary(), []));
   const records = useRemoteData(useCallback(() => api.library.records(applied), [applied]));
   const explicitlySelected = useMemo(
@@ -88,6 +94,10 @@ function BibliographicLibrary() {
     records.data?.records.find((record) => record.relevance_status === "review") ??
     records.data?.records[0] ??
     null;
+  const detailDialogOpen = shouldOpenLibraryDetailDialog(
+    explicitlySelected !== null,
+    splitViewVisible,
+  );
   const handleReviewed = (message: string, recordId: string) => {
     setReviewNotice(message);
     setSelectedId(nextReviewRecordId(records.data?.records ?? [], recordId));
@@ -165,7 +175,6 @@ function BibliographicLibrary() {
         filters={draft}
         onChange={setDraft}
         onSubmit={() => setApplied({ ...draft, offset: 0 })}
-        sources={summary.data.filters.sources}
         themes={summary.data.filters.themes}
       />
       {records.error && <ErrorState message={records.error} retry={records.refresh} />}
@@ -198,7 +207,7 @@ function BibliographicLibrary() {
           <div className="xl:hidden">
             <Dialog
               onClose={() => setSelectedId(null)}
-              open={explicitlySelected !== null}
+              open={detailDialogOpen}
               title="Document scientifique"
             >
               {explicitlySelected && (

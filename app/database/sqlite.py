@@ -420,6 +420,22 @@ class Database:
                 "SELECT * FROM articles WHERE doi = ? COLLATE NOCASE", (normalized,)
             ).fetchone()
 
+    def article_identity_candidates(self) -> list[sqlite3.Row]:
+        """Return durable full-text identities for conservative content deduplication."""
+
+        with closing(self.connect()) as connection:
+            return list(
+                connection.execute(
+                    """
+                    SELECT a.id, a.sha256, a.doi, a.title, a.publication_year, a.pdf_path
+                    FROM articles AS a
+                    WHERE EXISTS (
+                        SELECT 1 FROM chunks AS c WHERE c.article_id = a.id
+                    )
+                    """
+                )
+            )
+
     def article_with_first_chunk_by_doi(self, doi: str) -> sqlite3.Row | None:
         """Resolve local DOI metadata and, when present, one actually readable chunk."""
 
@@ -486,8 +502,9 @@ class Database:
                 """
                 INSERT INTO articles (
                     id, sha256, doi, title, abstract, authors, journal,
-                    publication_year, language, pdf_path, validation_status, source
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    work_type, publisher, publication_year, language, pdf_path, validation_status,
+                    source
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     article["id"],
@@ -497,6 +514,8 @@ class Database:
                     article.get("abstract"),
                     json.dumps(article.get("authors", []), ensure_ascii=False),
                     article.get("journal"),
+                    article.get("work_type"),
+                    article.get("publisher"),
                     article.get("publication_year"),
                     article.get("language"),
                     article["pdf_path"],
@@ -1106,7 +1125,8 @@ class Database:
                 connection.execute(
                     f"""
                     SELECT
-                        a.id, a.title, a.doi, a.journal, a.publication_year,
+                        a.id, a.title, a.doi, a.journal, a.work_type, a.publisher,
+                        a.publication_year,
                         a.language, a.validation_status, a.pdf_path, a.source,
                         a.created_at, a.indexed_at,
                         COUNT(c.id) AS chunk_count,

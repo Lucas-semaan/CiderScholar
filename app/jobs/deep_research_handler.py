@@ -31,6 +31,7 @@ class DeepResearchCheckpoint(BaseModel):
 
     completed_steps: list[JobStep] = Field(default_factory=list)
     answer_markdown: str | None = None
+    verification_contract_version: int = Field(default=1, ge=1, le=2)
 
 
 @dataclass(slots=True)
@@ -85,6 +86,15 @@ class DeepResearchHandler:
         ):
             raise ValueError("deep-research handler received another job type")
         checkpoint = self._load(job)
+        if checkpoint.verification_contract_version < 2:
+            checkpoint.completed_steps = [
+                step
+                for step in checkpoint.completed_steps
+                if JOB_STEP_ORDER[step] < JOB_STEP_ORDER[JobStep.VERIFICATION]
+            ]
+            checkpoint.answer_markdown = None
+            checkpoint.verification_contract_version = 2
+            self._save(job, checkpoint)
         for step in (
             JobStep.SEARCH,
             JobStep.RERANKING,

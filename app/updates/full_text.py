@@ -2298,6 +2298,8 @@ def _catalog_metadata(record: Mapping[str, Any], source: str) -> PdfCatalogMetad
         abstract=(str(record["abstract"]) if record.get("abstract") else None),
         authors=authors,
         journal=(str(record["journal"]) if record.get("journal") else None),
+        work_type=(str(record["work_type"]) if record.get("work_type") else None),
+        publisher=(str(record["publisher"]) if record.get("publisher") else None),
         publication_year=(
             int(record["publication_year"]) if record.get("publication_year") else None
         ),

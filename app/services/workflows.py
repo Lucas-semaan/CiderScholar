@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import os
 import re
@@ -14,6 +15,7 @@ from pathlib import Path
 from time import perf_counter, sleep
 from typing import Any, BinaryIO, Literal
 
+from app.chat_effort import AnswerEffort, answer_effort_budget
 from app.config import Settings
 from app.corpora import CorpusScope, corpus_paths, corpus_scope_label, settings_for_corpus
 from app.database.sqlite import Database
@@ -52,9 +54,14 @@ from app.llm.final_synthesis import (
     HierarchicalSynthesisService,
     SynthesisExecutionResult,
 )
+from app.llm.response_language import question_language
+from app.llm.response_style import ResponseStyle, detect_response_style
+from app.memory import MemoryGuard, MemorySnapshot
 from app.models.chatbot import (
     ChatbotResult,
+    ChatbotRetrievalTrace,
     ChatbotSource,
+    ChatbotTiming,
     ChatEvidencePassage,
     ChatEvidenceRecord,
 )
@@ -74,6 +81,12 @@ from app.retrieval.coverage_assessment import (
     CoverageAssessmentResult,
 )
 from app.retrieval.hybrid_search import HybridChunkResult, HybridSearchService
+from app.retrieval.index_manifest import (
+    assert_index_generation_mutable,
+    prepare_index_generation_mutation,
+    resume_index_generation,
+    write_ready_index_generation_manifest,
+)
 from app.retrieval.lexical_search import LexicalSearchService
 from app.retrieval.query_planning import (
     ArgoQueryPlanningService,
@@ -136,15 +149,196 @@ BIBTEX_KEY = re.compile(r"[^A-Za-z0-9_:-]+")
 _LOCAL_CHAT_RETRIEVAL_LOCK = threading.Lock()
 
 
+class _ChatTimingCollector:
+    """Accumulate content-free stage resource totals without affecting execution."""
+
+    def __init__(self, settings: Settings) -> None:
+        self._memory = MemoryGuard(settings.memory)
+        self._values: dict[str, dict[str, Any]] = {}
+
+    def snapshot(self) -> MemorySnapshot | None:
+        try:
+            return self._memory.snapshot()
+        except Exception:
+            return None
+
+    def add(
+        self,
+        stage: str,
+        duration_seconds: float,
+        *,
+        before: MemorySnapshot | None = None,
+    ) -> None:
+        after = self.snapshot()
+        value = self._values.setdefault(
+            stage,
+            {
+                "duration_seconds": 0.0,
+                "count": 0,
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "before": before or after,
+                "after": after,
+            },
+        )
+        value["duration_seconds"] += max(0.0, duration_seconds)
+        value["count"] += 1
+        if value["before"] is None:
+            value["before"] = before or after
+        value["after"] = after or value["after"]
+
+    def add_tokens(self, stage: str, *, prompt_tokens: int, completion_tokens: int) -> None:
+        value = self._values.get(stage)
+        if value is None:
+            return
+        value["prompt_tokens"] += max(0, prompt_tokens)
+        value["completion_tokens"] += max(0, completion_tokens)
+
+    def models(self) -> list[ChatbotTiming]:
+        models: list[ChatbotTiming] = []
+        for stage, value in self._values.items():
+            before = value["before"]
+            after = value["after"]
+            models.append(
+                ChatbotTiming(
+                    stage=stage,
+                    duration_seconds=value["duration_seconds"],
+                    count=value["count"],
+                    prompt_tokens=value["prompt_tokens"],
+                    completion_tokens=value["completion_tokens"],
+                    process_rss_before_gb=(None if before is None else before.process_rss_gb),
+                    process_rss_after_gb=(None if after is None else after.process_rss_gb),
+                    system_used_before_gb=(None if before is None else before.system_used_gb),
+                    system_used_after_gb=(None if after is None else after.system_used_gb),
+                    system_available_before_gb=(
+                        None if before is None else before.system_available_gb
+                    ),
+                    system_available_after_gb=(
+                        None if after is None else after.system_available_gb
+                    ),
+                )
+            )
+        return models
+
+
+class _ChatRetrievalTraceCollector:
+    """Aggregate bounded candidate-flow counters without retaining source identities."""
+
+    _COUNT_FIELDS = (
+        "query_variant_count",
+        "lexical_candidate_count",
+        "dense_candidate_count",
+        "rrf_unique_candidate_count",
+        "fused_candidate_count",
+        "pre_rerank_candidate_count",
+        "post_rerank_candidate_count",
+        "selected_article_count",
+        "selected_passage_count",
+    )
+
+    def __init__(self) -> None:
+        self._values: dict[str, ChatbotRetrievalTrace] = {}
+
+    def add(self, stage: str, **measurements: Any) -> None:
+        current = self._values.get(stage)
+        if current is None:
+            self._values[stage] = ChatbotRetrievalTrace(stage=stage, **measurements)
+            return
+        update = {
+            field: getattr(current, field) + int(measurements.get(field, 0))
+            for field in self._COUNT_FIELDS
+        }
+        rejections = dict(current.rejection_counts)
+        for reason, count in measurements.get("rejection_counts", {}).items():
+            rejections[reason] = rejections.get(reason, 0) + int(count)
+        update["rejection_counts"] = rejections
+        update["vector_search_degraded"] = current.vector_search_degraded or bool(
+            measurements.get("vector_search_degraded", False)
+        )
+        self._values[stage] = current.model_copy(update=update)
+
+    def models(self) -> list[ChatbotRetrievalTrace]:
+        return list(self._values.values())
+
+
+class _ChatRetrievalResources:
+    """Lazily reuse heavy local models during one complete chat answer."""
+
+    def __init__(self) -> None:
+        self._embedding_backend: SentenceTransformerBackend | None = None
+        self._reranker: MultilingualReranker | None = None
+
+    def embedding_backend(self, settings: Settings) -> SentenceTransformerBackend:
+        if self._embedding_backend is None:
+            self._embedding_backend = SentenceTransformerBackend(settings)
+        elif self._embedding_backend.model_name != settings.embeddings.model_name:
+            raise RuntimeError("chat retrieval cannot mix embedding models")
+        return self._embedding_backend
+
+    def reranker(self, settings: Settings) -> MultilingualReranker:
+        if self._reranker is None:
+            self._reranker = MultilingualReranker.from_settings(settings)
+        return self._reranker
+
+    def close(self) -> None:
+        if self._reranker is not None:
+            self._reranker.close()
+            self._reranker = None
+        if self._embedding_backend is not None:
+            self._embedding_backend.close()
+            self._embedding_backend = None
+
+
+def _evidence_rag_service(
+    client: Any,
+    answer_effort: AnswerEffort,
+    correction_temperature: float,
+) -> CiderEvidenceRagService:
+    """Keep injected legacy test/adaptor factories compatible with the new option."""
+
+    parameters = inspect.signature(CiderEvidenceRagService).parameters.values()
+    supports_kwargs = any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters
+    )
+    options: dict[str, Any] = {}
+    if supports_kwargs or any(parameter.name == "answer_effort" for parameter in parameters):
+        options["answer_effort"] = answer_effort
+    if supports_kwargs or any(
+        parameter.name == "correction_temperature" for parameter in parameters
+    ):
+        options["correction_temperature"] = correction_temperature
+    return CiderEvidenceRagService(client, **options)
+
+
 def _serialized_chat_retrieval(
     operation: Callable[..., Any],
     *args: Any,
+    timing: _ChatTimingCollector | None = None,
+    timing_stage: str = "local_retrieval",
     **kwargs: Any,
 ) -> Any:
     """Keep local model/index access exclusive without serializing ARGO generation."""
 
+    wait_started = perf_counter()
+    wait_memory = timing.snapshot() if timing is not None else None
     with _LOCAL_CHAT_RETRIEVAL_LOCK:
-        return operation(*args, **kwargs)
+        if timing is not None:
+            timing.add(
+                "retrieval_lock_wait",
+                perf_counter() - wait_started,
+                before=wait_memory,
+            )
+        operation_started = perf_counter()
+        operation_memory = timing.snapshot() if timing is not None else None
+        try:
+            return operation(*args, **kwargs)
+        finally:
+            if timing is not None:
+                timing.add(
+                    timing_stage,
+                    perf_counter() - operation_started,
+                    before=operation_memory,
+                )
 
 
 def apply_runtime_overrides(
@@ -273,25 +467,106 @@ def ingest_paths(
     return reports
 
 
+def ingest_and_index_paths(
+    settings: Settings,
+    database: Database,
+    paths: Sequence[Path],
+    **ingestion_options: Any,
+) -> tuple[list[IngestionReport], EmbeddingRunReport | None]:
+    """Persist PDFs, then index only their successfully resolved article ids.
+
+    This intentionally owns the embedding resources only after ingestion has
+    committed its SQLite transaction.  Callers must treat a non-successful
+    embedding report as a failed addition, even though the durable ingestion
+    can be resumed later from its pending chunks.
+    """
+
+    reports = ingest_paths(settings, database, paths, **ingestion_options)
+    resolved_article_ids = [
+        report.article_id
+        for report in reports
+        if report.article_id is not None and report.status in {"chunks_ready", "duplicate"}
+    ]
+    article_ids = list(dict.fromkeys(resolved_article_ids))
+    if not article_ids or not database.chunks_for_embedding(
+        limit=1,
+        retry_failed=True,
+        article_ids=article_ids,
+    ):
+        return reports, None
+    indexing = index_pending_chunks(
+        settings,
+        database,
+        article_ids=article_ids,
+        retry_failed=True,
+    )
+    if database.chunks_for_embedding(
+        limit=1,
+        retry_failed=True,
+        article_ids=article_ids,
+    ):
+        raise RuntimeError(
+            "L’ingestion est persistée, mais l’indexation automatique reste incomplète."
+        )
+    return reports, indexing
+
+
 def index_pending_chunks(
     settings: Settings,
     database: Database,
     *,
     article_ids: Sequence[str] | None = None,
     retry_failed: bool = False,
+    _manifest_is_building: bool = False,
 ) -> EmbeddingRunReport:
     index = QdrantLocalIndex(settings)
-    backend = SentenceTransformerBackend(settings)
+    backend: SentenceTransformerBackend | None = None
     try:
-        return EmbeddingBatchProcessor(settings, database, backend).run(
+        has_pending_chunks = bool(
+            database.chunks_for_embedding(
+                limit=1,
+                retry_failed=retry_failed,
+                article_ids=article_ids,
+            )
+        )
+        has_recoverable_processing = bool(database.embedding_status_counts().get("processing", 0))
+        resumed_manifest = resume_index_generation(index)
+        managed_manifest = _manifest_is_building or resumed_manifest is not None
+        index_manifest = resumed_manifest
+        if _manifest_is_building:
+            index_manifest = assert_index_generation_mutable(index)
+            if index_manifest is None:
+                raise RuntimeError("expected a building index generation manifest")
+        if (has_pending_chunks or has_recoverable_processing) and not managed_manifest:
+            index_manifest = prepare_index_generation_mutation(index)
+            managed_manifest = index_manifest is not None
+        backend = SentenceTransformerBackend(
+            settings,
+            require_model_manifest=managed_manifest,
+        )
+        report = EmbeddingBatchProcessor(settings, database, backend).run(
             index,
             retry_failed=retry_failed,
             stop_on_error=True,
             close_backend=True,
             article_ids=article_ids,
         )
+        if (
+            managed_manifest
+            and report.error_type is None
+            and report.chunks_failed == 0
+            and index.collection_exists()
+        ):
+            write_ready_index_generation_manifest(
+                database,
+                index,
+                generation_id=index_manifest.generation_id,
+                created_at=index_manifest.created_at,
+            )
+        return report
     finally:
-        backend.close()
+        if backend is not None:
+            backend.close()
         index.close()
 
 
@@ -491,6 +766,10 @@ def search_common_corpus_abstracts(
     limit: int = 15,
     search_queries: Sequence[str] = (),
     intent_override: ScientificIntent | None = None,
+    max_query_variants: int | None = None,
+    retrieval_resources: _ChatRetrievalResources | None = None,
+    retrieval_trace: _ChatRetrievalTraceCollector | None = None,
+    supplemental: bool = False,
 ) -> list[BibliographicHybridResult]:
     """Search full articles and verified abstract-only records in the common corpus."""
 
@@ -500,9 +779,12 @@ def search_common_corpus_abstracts(
         raise ValueError("common corpus abstract limit must be between 1 and 100")
     scoped_settings = settings_for_corpus(settings, CorpusScope.COMMON)
     database = Database(corpus_paths(settings, CorpusScope.COMMON).database_path)
+    query_limit = max_query_variants or scoped_settings.retrieval.hybrid_max_query_variants
+    if not 1 <= query_limit <= scoped_settings.retrieval.hybrid_max_query_variants:
+        raise ValueError("abstract query variant limit is outside configured bounds")
     queries = list(
         dict.fromkeys(" ".join(item.split()) for item in [query, *search_queries] if item.strip())
-    )[:8]
+    )[:query_limit]
     title_rows = []
     seen_title_ids: set[str] = set()
     for search_query in queries:
@@ -517,12 +799,14 @@ def search_common_corpus_abstracts(
     lexical_service = LexicalSearchService(scoped_settings, database)
     lexical_by_article: dict[str, Any] = {}
     lexical_scores: dict[str, float] = {}
+    lexical_candidate_count = 0
     for search_query in queries:
         lexical = lexical_service.search(
             expand_cider_query(search_query)[:maximum_query_length],
             limit=candidate_limit,
             mode="any",
         )
+        lexical_candidate_count += len(lexical.results)
         for result in lexical.results:
             lexical_by_article.setdefault(result.article_id, result)
             lexical_scores[result.article_id] = lexical_scores.get(
@@ -586,9 +870,17 @@ def search_common_corpus_abstracts(
             break
 
     abstract_results: list[BibliographicHybridResult] = []
+    abstract_lexical_candidates = 0
+    abstract_dense_candidates = 0
+    abstract_rrf_candidates = 0
+    unverified_abstract_count = 0
     abstract_store = BibliographicHarvestStore(database)
     if abstract_store.statistics()["abstracts"]:
-        backend = SentenceTransformerBackend(scoped_settings)
+        backend = (
+            retrieval_resources.embedding_backend(scoped_settings)
+            if retrieval_resources is not None
+            else SentenceTransformerBackend(scoped_settings)
+        )
         service = BibliographicHybridSearchService(
             scoped_settings,
             abstract_store,
@@ -602,9 +894,13 @@ def search_common_corpus_abstracts(
                     search_query,
                     limit=min(max(limit * 2, 30), 60),
                 )
+                abstract_lexical_candidates += response.lexical_candidate_count
+                abstract_dense_candidates += response.dense_candidate_count
+                abstract_rrf_candidates += response.rrf_unique_candidate_count
                 for result in response.results:
                     doi = _verified_normalized_doi(result.doi)
                     if doi is None:
+                        unverified_abstract_count += 1
                         continue
                     converted = result.model_copy(
                         update={
@@ -619,7 +915,10 @@ def search_common_corpus_abstracts(
                         collected_abstracts[key] = converted
             abstract_results = list(collected_abstracts.values())
         finally:
-            service.close()
+            if retrieval_resources is None:
+                service.close()
+            else:
+                service.index.close()
 
     full_text_dois = {
         doi
@@ -627,12 +926,31 @@ def search_common_corpus_abstracts(
         if (doi := _verified_normalized_doi(row["doi"])) is not None
     }
     filtered_abstracts = [result for result in abstract_results if result.doi not in full_text_dois]
-    return rerank_bibliographic_candidates(
+    reranker_input_count = len(article_results) + len(filtered_abstracts)
+    ranked = rerank_bibliographic_candidates(
         query,
         [*article_results, *filtered_abstracts],
         limit=limit,
         intent_override=intent_override,
     )
+    if retrieval_trace is not None:
+        retrieval_trace.add(
+            "supplemental_abstract_search" if supplemental else "abstract_search",
+            query_variant_count=len(queries),
+            lexical_candidate_count=(lexical_candidate_count + abstract_lexical_candidates),
+            dense_candidate_count=abstract_dense_candidates,
+            rrf_unique_candidate_count=abstract_rrf_candidates,
+            fused_candidate_count=len(article_results) + len(abstract_results),
+            pre_rerank_candidate_count=reranker_input_count,
+            post_rerank_candidate_count=len(ranked),
+            selected_article_count=len(ranked),
+            rejection_counts={
+                "abstract_without_verified_doi": unverified_abstract_count,
+                "duplicate_of_full_text": len(abstract_results) - len(filtered_abstracts),
+                "not_selected_after_reranking": max(0, reranker_input_count - len(ranked)),
+            },
+        )
+    return ranked
 
 
 def _lexical_full_text_ranking(
@@ -650,6 +968,7 @@ def _lexical_full_text_ranking(
     candidate_limit = max(120, article_count * 12)
     lexical_service = LexicalSearchService(settings, database)
     fused: dict[tuple[str, int], dict[str, Any]] = {}
+    lexical_candidate_count = 0
     for variant_index, variant in enumerate(variants):
         lexical = lexical_service.search(
             variant.text[: settings.retrieval.lexical_max_query_characters],
@@ -657,6 +976,7 @@ def _lexical_full_text_ranking(
             mode="any",
             article_ids=article_ids,
         )
+        lexical_candidate_count += len(lexical.results)
         for result in lexical.results:
             if not variant_matches_text(
                 variant,
@@ -715,12 +1035,20 @@ def _lexical_full_text_ranking(
                 scope=CorpusScope.COMMON,
             )
         )
-    return ArticleRankingService(settings, database).rank_candidates(
+    response = ArticleRankingService(settings, database).rank_candidates(
         query,
         chunks,
         article_count=article_count,
         diversity_mode="none",
         central_concepts=central_concepts,
+    )
+    return response.model_copy(
+        update={
+            "query_variant_count": len(variants),
+            "lexical_candidate_count": lexical_candidate_count,
+            "dense_candidate_count": 0,
+            "rrf_unique_candidate_count": len(fused),
+        }
     )
 
 
@@ -733,6 +1061,13 @@ def search_common_corpus_full_text_evidence(
     search_queries: Sequence[str] = (),
     axis_queries: Mapping[str, Sequence[str]] | None = None,
     intent_override: ScientificIntent | None = None,
+    max_query_variants: int | None = None,
+    passage_count: int | None = None,
+    candidate_chunks_per_article: int | None = None,
+    context_radius: int = 1,
+    retrieval_resources: _ChatRetrievalResources | None = None,
+    retrieval_trace: _ChatRetrievalTraceCollector | None = None,
+    supplemental: bool = False,
 ) -> list[ChatEvidenceRecord]:
     """Hybrid-search full articles, causally rerank them, then hydrate passages."""
 
@@ -746,7 +1081,11 @@ def search_common_corpus_full_text_evidence(
     fallback_variants = build_bilingual_variants(query, max_variants=3)
     variants = fallback_variants[:1]
     known_variant_texts = {variant.text.casefold() for variant in variants}
-    maximum_variant_count = scoped_settings.retrieval.hybrid_max_query_variants
+    maximum_variant_count = (
+        max_query_variants or scoped_settings.retrieval.hybrid_max_query_variants
+    )
+    if not 1 <= maximum_variant_count <= scoped_settings.retrieval.hybrid_max_query_variants:
+        raise ValueError("full-text query variant limit is outside configured bounds")
     for planned_query in search_queries:
         cleaned_planned_query = " ".join(planned_query.split())[:2000]
         if (
@@ -781,7 +1120,7 @@ def search_common_corpus_full_text_evidence(
                 for axis_query in queries
                 if len(" ".join(axis_query.split())) >= 2
             )
-        )[:maximum_variant_count]
+        )[: min(2, maximum_variant_count)]
         for axis_key, queries in (axis_queries or {}).items()
         if axis_key.strip()
     }
@@ -796,7 +1135,11 @@ def search_common_corpus_full_text_evidence(
     axis_candidate_count = min(max(article_count * 2, 12), 30)
     axis_rankings: dict[str, Sequence[RankedArticle]] = {}
     if local_model_path(scoped_settings).is_dir():
-        backend = SentenceTransformerBackend(scoped_settings)
+        backend = (
+            retrieval_resources.embedding_backend(scoped_settings)
+            if retrieval_resources is not None
+            else SentenceTransformerBackend(scoped_settings)
+        )
         ranking_service = ArticleRankingService(
             scoped_settings,
             database,
@@ -808,6 +1151,7 @@ def search_common_corpus_full_text_evidence(
                     database,
                     backend,
                     QdrantLocalIndex(scoped_settings),
+                    close_backend=retrieval_resources is None,
                 ),
             ),
         )
@@ -830,6 +1174,21 @@ def search_common_corpus_full_text_evidence(
                     article_ids=article_ids,
                 )
                 axis_rankings[axis_key] = axis_ranking.articles
+                if retrieval_trace is not None:
+                    retrieval_trace.add(
+                        (
+                            "supplemental_full_text_axis_search"
+                            if supplemental
+                            else "full_text_axis_search"
+                        ),
+                        query_variant_count=axis_ranking.query_variant_count,
+                        lexical_candidate_count=axis_ranking.lexical_candidate_count,
+                        dense_candidate_count=axis_ranking.dense_candidate_count,
+                        rrf_unique_candidate_count=axis_ranking.rrf_unique_candidate_count,
+                        fused_candidate_count=axis_ranking.hybrid_candidate_count,
+                        selected_article_count=axis_ranking.selected_article_count,
+                        vector_search_degraded=axis_ranking.vector_search_degraded,
+                    )
         finally:
             ranking_service.close()
     else:
@@ -864,8 +1223,50 @@ def search_common_corpus_full_text_evidence(
                 article_ids=article_ids,
             )
             axis_rankings[axis_key] = axis_ranking.articles
+            if retrieval_trace is not None:
+                retrieval_trace.add(
+                    (
+                        "supplemental_full_text_axis_search"
+                        if supplemental
+                        else "full_text_axis_search"
+                    ),
+                    query_variant_count=axis_ranking.query_variant_count,
+                    lexical_candidate_count=axis_ranking.lexical_candidate_count,
+                    dense_candidate_count=axis_ranking.dense_candidate_count,
+                    rrf_unique_candidate_count=axis_ranking.rrf_unique_candidate_count,
+                    fused_candidate_count=axis_ranking.hybrid_candidate_count,
+                    selected_article_count=axis_ranking.selected_article_count,
+                    vector_search_degraded=axis_ranking.vector_search_degraded,
+                )
+
+    if retrieval_trace is not None:
+        retrieval_trace.add(
+            "supplemental_full_text_search" if supplemental else "full_text_search",
+            query_variant_count=ranking.query_variant_count,
+            lexical_candidate_count=ranking.lexical_candidate_count,
+            dense_candidate_count=ranking.dense_candidate_count,
+            rrf_unique_candidate_count=ranking.rrf_unique_candidate_count,
+            fused_candidate_count=ranking.hybrid_candidate_count,
+            selected_article_count=ranking.selected_article_count,
+            vector_search_degraded=ranking.vector_search_degraded,
+        )
 
     coverage_pool = merge_axis_rankings(ranking.articles, axis_rankings)
+    if retrieval_trace is not None:
+        pool_input_count = len(ranking.articles) + sum(
+            len(articles) for articles in axis_rankings.values()
+        )
+        retrieval_trace.add(
+            ("supplemental_full_text_pool_merge" if supplemental else "full_text_pool_merge"),
+            pre_rerank_candidate_count=pool_input_count,
+            post_rerank_candidate_count=len(coverage_pool.articles),
+            selected_article_count=len(coverage_pool.articles),
+            rejection_counts={
+                "duplicate_across_query_pools": max(
+                    0, pool_input_count - len(coverage_pool.articles)
+                )
+            },
+        )
 
     chunk_rows = database.chunk_details_by_ids(
         [chunk_id for article in coverage_pool.articles for chunk_id in article.top_chunk_ids]
@@ -901,7 +1302,11 @@ def search_common_corpus_full_text_evidence(
         )
 
     local_model_available = local_reranker_model_path(scoped_settings).is_dir()
-    reranker = MultilingualReranker.from_settings(scoped_settings)
+    reranker = (
+        retrieval_resources.reranker(scoped_settings)
+        if retrieval_resources is not None
+        else MultilingualReranker.from_settings(scoped_settings)
+    )
     if reranker.enabled and not local_model_available:
         raise RuntimeError("configured local reranker model is unavailable")
     try:
@@ -911,7 +1316,17 @@ def search_common_corpus_full_text_evidence(
             top_k=len(reranker_candidates),
         )
     finally:
-        reranker.close()
+        if retrieval_resources is None:
+            reranker.close()
+    if retrieval_trace is not None:
+        retrieval_trace.add(
+            ("supplemental_full_text_reranking" if supplemental else "full_text_reranking"),
+            pre_rerank_candidate_count=len(reranker_candidates),
+            post_rerank_candidate_count=len(reranked),
+            rejection_counts={
+                "not_returned_by_reranker": max(0, len(reranker_candidates) - len(reranked))
+            },
+        )
     reranker_position = {
         result.candidate_id: position for position, result in enumerate(reranked, start=1)
     }
@@ -966,9 +1381,13 @@ def search_common_corpus_full_text_evidence(
 
     selector = EvidencePassageSelector(scoped_settings, database)
     records: list[ChatEvidenceRecord] = []
-    passage_count = min(
-        scoped_settings.evidence.min_passages_per_article + 1,
-        scoped_settings.evidence.passages_per_article,
+    selected_passage_count = (
+        min(
+            scoped_settings.evidence.min_passages_per_article + 1,
+            scoped_settings.evidence.passages_per_article,
+        )
+        if passage_count is None
+        else passage_count
     )
     selector_query = intent.selector_query()
     for article in selected_articles[:article_count]:
@@ -976,7 +1395,12 @@ def search_common_corpus_full_text_evidence(
             query=selector_query,
             article_id=article.article_id,
             ranked_chunk_ids=article.top_chunk_ids,
-            passage_count=passage_count,
+            passage_count=selected_passage_count,
+            expand_intra_article_context=(
+                relevance_by_article[article.article_id].evidence_grade in {"A", "B"}
+            ),
+            max_candidate_chunks=candidate_chunks_per_article,
+            neighborhood_radius=context_radius,
         )
         if not passages:
             continue
@@ -1004,6 +1428,11 @@ def search_common_corpus_full_text_evidence(
                         evidence_id=f"{record_id}:chunk:{passage.chunk_id}",
                         chunk_id=passage.chunk_id,
                         section=passage.section,
+                        context_role=(
+                            "anchor"
+                            if passage.chunk_id in article.top_chunk_ids
+                            else passage.context_role or "other"
+                        ),
                         page_start=passage.page_start,
                         page_end=passage.page_end,
                         text=passage.text,
@@ -1011,6 +1440,26 @@ def search_common_corpus_full_text_evidence(
                     for passage in passages
                 ],
             )
+        )
+    if retrieval_trace is not None:
+        retrieval_trace.add(
+            (
+                "supplemental_full_text_evidence_selection"
+                if supplemental
+                else "full_text_evidence_selection"
+            ),
+            pre_rerank_candidate_count=len(assessed_articles),
+            post_rerank_candidate_count=len(selected_articles[:article_count]),
+            selected_article_count=len(records),
+            selected_passage_count=sum(len(record.passages) for record in records),
+            rejection_counts={
+                "not_selected_after_scientific_ranking": max(
+                    0, len(assessed_articles) - len(selected_articles[:article_count])
+                ),
+                "no_passage_selected": max(
+                    0, len(selected_articles[:article_count]) - len(records)
+                ),
+            },
         )
     return records
 
@@ -1302,7 +1751,10 @@ def answer_from_harvested_abstracts(
     search_response: BibliographicHybridResponse,
 ) -> CiderAbstractRagResult:
     with ArgoClient(settings) as llm:
-        return CiderAbstractRagService(llm).answer(question, search_response.results)
+        return CiderAbstractRagService(
+            llm,
+            correction_temperature=settings.argo.scientific_correction_temperature,
+        ).answer(question, search_response.results)
 
 
 def _semantic_filter_and_coverage(
@@ -1313,26 +1765,91 @@ def _semantic_filter_and_coverage(
     evidence: Sequence[ChatEvidenceRecord],
     on_argo_reserved: Callable[[], None] | None,
     on_coverage_started: Callable[[], None] | None = None,
+    timings: _ChatTimingCollector | None = None,
 ) -> tuple[SemanticFilterResult, CoverageAssessmentResult]:
     """Filter evidence by scientific meaning, then assess each planned axis."""
 
     with ArgoClient(settings) as llm:
-        semantic_filter = ArgoSemanticEvidenceFilter(llm).filter_records(
-            question,
-            axes,
-            evidence,
-            on_argo_reserved=on_argo_reserved,
-        )
+        semantic_started = perf_counter()
+        semantic_memory = timings.snapshot() if timings is not None else None
+        try:
+            semantic_filter = ArgoSemanticEvidenceFilter(llm).filter_records(
+                question,
+                axes,
+                evidence,
+                on_argo_reserved=on_argo_reserved,
+            )
+        finally:
+            if timings is not None:
+                timings.add(
+                    "argo_semantic_filter",
+                    perf_counter() - semantic_started,
+                    before=semantic_memory,
+                )
+        if timings is not None:
+            timings.add_tokens(
+                "argo_semantic_filter",
+                prompt_tokens=semantic_filter.prompt_tokens,
+                completion_tokens=semantic_filter.completion_tokens,
+            )
         if on_coverage_started is not None:
             on_coverage_started()
-        coverage = ArgoEvidenceCoverageAssessor(llm).assess(
-            question,
-            axes,
-            evidence,
-            semantic_filter,
-            on_argo_reserved=on_argo_reserved,
-        )
+        coverage_started = perf_counter()
+        coverage_memory = timings.snapshot() if timings is not None else None
+        try:
+            coverage = ArgoEvidenceCoverageAssessor(llm).assess(
+                question,
+                axes,
+                evidence,
+                semantic_filter,
+                on_argo_reserved=on_argo_reserved,
+            )
+        finally:
+            if timings is not None:
+                timings.add(
+                    "argo_coverage",
+                    perf_counter() - coverage_started,
+                    before=coverage_memory,
+                )
+        if timings is not None:
+            timings.add_tokens(
+                "argo_coverage",
+                prompt_tokens=coverage.prompt_tokens,
+                completion_tokens=coverage.completion_tokens,
+            )
     return semantic_filter, coverage
+
+
+def _run_semantic_filter_and_coverage(
+    settings: Settings,
+    *,
+    question: str,
+    axes: Sequence[ResearchAxis],
+    evidence: Sequence[ChatEvidenceRecord],
+    on_argo_reserved: Callable[[], None] | None,
+    on_coverage_started: Callable[[], None] | None,
+    timings: _ChatTimingCollector,
+) -> tuple[SemanticFilterResult, CoverageAssessmentResult]:
+    """Supply latency telemetry when supported by an injected semantic adaptor."""
+
+    parameters = inspect.signature(_semantic_filter_and_coverage).parameters.values()
+    timing_options = (
+        {"timings": timings}
+        if any(
+            parameter.name == "timings" or parameter.kind is inspect.Parameter.VAR_KEYWORD
+            for parameter in parameters
+        )
+        else {}
+    )
+    return _semantic_filter_and_coverage(
+        settings,
+        question=question,
+        axes=axes,
+        evidence=evidence,
+        on_argo_reserved=on_argo_reserved,
+        on_coverage_started=on_coverage_started,
+        **timing_options,
+    )
 
 
 def _coverage_follow_up_queries(
@@ -1340,10 +1857,12 @@ def _coverage_follow_up_queries(
     coverage: CoverageAssessmentResult,
     *,
     include_all_axes: bool = False,
+    exclude_queries: Sequence[str] = (),
 ) -> dict[str, list[str]]:
     """Return bounded follow-up queries only for axes not proven covered."""
 
     coverage_by_key = {assessment.axis_key: assessment for assessment in coverage.axes}
+    excluded = {" ".join(query.split()).casefold() for query in exclude_queries}
     follow_up: dict[str, list[str]] = {}
     for axis in axes:
         assessment = coverage_by_key.get(axis.key)
@@ -1352,9 +1871,10 @@ def _coverage_follow_up_queries(
         generated = [] if assessment is None else assessment.suggested_queries
         queries = list(
             dict.fromkeys(
-                " ".join(query.split())[:600]
+                cleaned
                 for query in [*generated, *axis.search_queries]
-                if len(" ".join(query.split())) >= 2
+                if len(cleaned := " ".join(query.split())[:600]) >= 2
+                and cleaned.casefold() not in excluded
             )
         )[:4]
         if queries:
@@ -1417,58 +1937,84 @@ def _fallback_chatbot_result(
     figure_analysis_count: int = 0,
     figure_analysis_duration_seconds: float = 0.0,
     figure_analysis_model: str | None = None,
+    answer_effort: AnswerEffort = AnswerEffort.BALANCED,
+    timings: Sequence[ChatbotTiming] = (),
+    retrieval_traces: Sequence[ChatbotRetrievalTrace] = (),
 ) -> ChatbotResult:
-    """Always return a bounded, source-traceable outcome without inventing a synthesis."""
+    """Return the normal answer shape without presenting raw candidates as a synthesis."""
 
     selected = list(evidence[:5])
-    cited_evidence_ids = [record.passages[0].evidence_id for record in selected]
-    sources = chatbot_sources_from_evidence(selected, cited_evidence_ids)
-    if selected:
-        lines = [
-            "## Réponse dégradée fondée sur le corpus",
-            "",
-            "La synthèse générative n'a pas produit de réponse scientifiquement validable. "
-            "Les passages les mieux classés sont donc restitués directement, sans extrapolation.",
-        ]
-        for index, record in enumerate(selected, start=1):
-            excerpt = " ".join(record.passages[0].text.split())[:700]
-            lines.extend(
-                [
-                    "",
-                    f"### Source {index} — {record.title}",
-                    "",
-                    f"> {excerpt}",
-                ]
-            )
-        lines.extend(
-            [
-                "",
-                "Cette sortie est exploitable pour diagnostiquer la sélection documentaire, "
-                "mais ne doit pas être notée comme une synthèse ARGO réussie.",
-            ]
+    is_french = question_language(message) == "fr"
+    abstained = diagnostic_code == "semantic_filter_empty"
+    status: Literal["abstained", "diagnostic_only"] = (
+        "abstained" if abstained else "diagnostic_only"
+    )
+    expected_style = detect_response_style(message)
+    if is_french:
+        direct = (
+            "Les preuves sélectionnées ne permettent pas d'établir une réponse scientifique "
+            "suffisamment étayée."
+            if abstained
+            else "Aucune réponse scientifique validée ne peut être fournie pour cette exécution."
         )
-        status: Literal["extractive_fallback", "diagnostic_only"] = "extractive_fallback"
-        model = "deterministic-evidence-fallback"
+        limitation = (
+            "Aucune affirmation n'est présentée, car elle ne pourrait pas être reliée à une "
+            "preuve validée. Une nouvelle recherche ou une relance peut être nécessaire."
+        )
+        headings = (
+            "Réponse synthétique",
+            "Effets documentés",
+            "Limites des preuves",
+            "Références",
+        )
+        no_effect = "Aucun effet directement documenté ne peut être affirmé."
+        no_reference = "Aucune référence n'est citée."
     else:
-        lines = [
-            "## Diagnostic de réponse",
-            "",
-            (
-                "Aucune preuve qualifiée n'a été restituée par le pipeline pour cette question. "
-                "La question est conservée et ce résultat signale une anomalie de retrieval "
-                "à analyser."
-            ),
-            "",
-            f"Code diagnostique : `{diagnostic_code}`.",
-        ]
-        status = "diagnostic_only"
-        model = "deterministic-diagnostic-fallback"
+        direct = (
+            "The selected evidence does not support a sufficiently grounded scientific answer."
+            if abstained
+            else "No validated scientific answer can be provided for this execution."
+        )
+        limitation = (
+            "No claim is presented because it could not be linked to validated evidence. "
+            "A new search or retry may be required."
+        )
+        headings = ("Summary answer", "Documented effects", "Evidence limitations", "References")
+        no_effect = "No directly documented effect can be stated."
+        no_reference = "No reference is cited."
+    rendered_direct = f"- {direct}" if expected_style is ResponseStyle.BULLET_LIST else direct
+    lines = [
+        f"## {headings[0]}",
+        "",
+        rendered_direct,
+        "",
+        f"## {headings[1]}",
+        "",
+        no_effect,
+        "",
+        f"## {headings[2]}",
+        "",
+        limitation,
+        "",
+        f"## {headings[3]}",
+        "",
+        no_reference,
+    ]
+    sources: list[ChatbotSource] = []
+    model = "deterministic-structured-fallback"
     return ChatbotResult(
         message=" ".join(message.split()),
         retrieval_query=retrieval_query,
         answer_markdown="\n".join(lines),
         sources=sources,
-        warnings=[*warnings, f"Sortie de secours activée ({diagnostic_code})."],
+        warnings=[
+            *warnings,
+            (
+                f"Sortie de secours activée ({diagnostic_code})."
+                if is_french
+                else f"Fallback output enabled ({diagnostic_code})."
+            ),
+        ],
         model=model,
         local_result_count=sum(record.origin == "local_rag" for record in selected),
         external_result_count=external_result_count,
@@ -1484,6 +2030,9 @@ def _fallback_chatbot_result(
         figure_analysis_count=figure_analysis_count,
         figure_analysis_duration_seconds=figure_analysis_duration_seconds,
         figure_analysis_model=figure_analysis_model,
+        answer_effort=answer_effort,
+        timings=list(timings),
+        retrieval_traces=list(retrieval_traces),
     )
 
 
@@ -1502,10 +2051,61 @@ def answer_chatbot(
     on_argo_response: Callable[[], None] | None = None,
     on_progress: ChatbotProgressCallback | None = None,
     experimental_profile: Literal["p0", "p1", "p2"] | None = None,
+    answer_effort: AnswerEffort = AnswerEffort.BALANCED,
+) -> ChatbotResult:
+    """Own and explicitly release heavy resources for one complete chat answer."""
+
+    resources = _ChatRetrievalResources()
+    timings = _ChatTimingCollector(settings)
+    retrieval_traces = _ChatRetrievalTraceCollector()
+    try:
+        return _answer_chatbot(
+            settings,
+            database,
+            message=message,
+            history=history,
+            use_external_sources=use_external_sources,
+            analyze_figures=analyze_figures,
+            interaction_mode=interaction_mode,
+            previous_sources=previous_sources,
+            on_figure_analysis=on_figure_analysis,
+            on_argo_reserved=on_argo_reserved,
+            on_argo_response=on_argo_response,
+            on_progress=on_progress,
+            experimental_profile=experimental_profile,
+            answer_effort=answer_effort,
+            retrieval_resources=resources,
+            timings=timings,
+            retrieval_traces=retrieval_traces,
+        )
+    finally:
+        resources.close()
+
+
+def _answer_chatbot(
+    settings: Settings,
+    database: Database,
+    *,
+    message: str,
+    history: Sequence[Mapping[str, str]],
+    use_external_sources: bool,
+    analyze_figures: bool = False,
+    interaction_mode: str = "research",
+    previous_sources: Sequence[ChatbotSource] = (),
+    on_figure_analysis: Callable[[], None] | None = None,
+    on_argo_reserved: Callable[[], None] | None = None,
+    on_argo_response: Callable[[], None] | None = None,
+    on_progress: ChatbotProgressCallback | None = None,
+    experimental_profile: Literal["p0", "p1", "p2"] | None = None,
+    answer_effort: AnswerEffort = AnswerEffort.BALANCED,
+    retrieval_resources: _ChatRetrievalResources,
+    timings: _ChatTimingCollector,
+    retrieval_traces: _ChatRetrievalTraceCollector,
 ) -> ChatbotResult:
     """Answer with local full-text passages, abstract fallback and bounded enrichment."""
 
     started = perf_counter()
+    effort_budget = answer_effort_budget(answer_effort)
 
     def publish_progress(stage: ChatbotProgressStage) -> None:
         if on_progress is not None:
@@ -1533,10 +2133,21 @@ def answer_chatbot(
             f"({type(exc).__name__}); une nouvelle recherche locale est exécutée."
         )
     if reused_evidence:
+        retrieval_traces.add(
+            "llm_context",
+            selected_article_count=len(reused_evidence),
+            selected_passage_count=sum(len(record.passages) for record in reused_evidence),
+        )
         publish_progress("generation")
+        generation_started = perf_counter()
+        generation_memory = timings.snapshot()
         try:
             with ArgoClient(settings) as llm:
-                rag = CiderEvidenceRagService(llm)
+                rag = _evidence_rag_service(
+                    llm,
+                    answer_effort,
+                    settings.argo.scientific_correction_temperature,
+                )
                 rag.experimental_profile = active_experimental_profile
                 answer = rag.answer(
                     message,
@@ -1546,8 +2157,18 @@ def answer_chatbot(
                     on_argo_response=on_argo_response,
                 )
         except ArgoQuotaError:
+            timings.add(
+                "argo_generation",
+                perf_counter() - generation_started,
+                before=generation_memory,
+            )
             raise
         except ArgoError as exc:
+            timings.add(
+                "argo_generation",
+                perf_counter() - generation_started,
+                before=generation_memory,
+            )
             return _fallback_chatbot_result(
                 message=message,
                 retrieval_query=retrieval_query,
@@ -1561,7 +2182,20 @@ def answer_chatbot(
                 interaction_mode="conversation",
                 reused_previous_sources=True,
                 figure_analysis_requested=analyze_figures,
+                answer_effort=answer_effort,
+                timings=timings.models(),
+                retrieval_traces=retrieval_traces.models(),
             )
+        timings.add(
+            "argo_generation",
+            perf_counter() - generation_started,
+            before=generation_memory,
+        )
+        timings.add_tokens(
+            "argo_generation",
+            prompt_tokens=answer.prompt_tokens,
+            completion_tokens=answer.completion_tokens,
+        )
         sources = chatbot_sources_from_evidence(
             reused_evidence,
             answer.cited_evidence_ids,
@@ -1584,8 +2218,15 @@ def answer_chatbot(
             interaction_mode="conversation",
             reused_previous_sources=True,
             figure_analysis_requested=analyze_figures,
+            generation_status=getattr(answer, "generation_status", "generated"),
+            answer_effort=answer_effort,
+            timings=timings.models(),
+            retrieval_traces=retrieval_traces.models(),
+            generation_traces=getattr(answer, "generation_traces", []),
         )
     planning: QueryPlanningResult
+    planning_started = perf_counter()
+    planning_memory = timings.snapshot()
     try:
         with ArgoClient(settings) as planning_client:
             planning = ArgoQueryPlanningService(planning_client).plan(
@@ -1607,6 +2248,17 @@ def answer_chatbot(
             "La compréhension adaptative de la requête est indisponible "
             f"({type(exc).__name__}); utilisation du planificateur local de secours."
         )
+    finally:
+        timings.add(
+            "argo_planning",
+            perf_counter() - planning_started,
+            before=planning_memory,
+        )
+    timings.add_tokens(
+        "argo_planning",
+        prompt_tokens=planning.prompt_tokens,
+        completion_tokens=planning.completion_tokens,
+    )
     intent = planning.plan.scientific_intent(retrieval_query)
     search_queries = planning.plan.retrieval_queries
 
@@ -1617,9 +2269,14 @@ def answer_chatbot(
             search_common_corpus_abstracts,
             settings,
             query=retrieval_query,
-            limit=15,
+            limit=effort_budget.abstract_result_limit,
             search_queries=search_queries,
             intent_override=intent,
+            max_query_variants=effort_budget.max_query_variants,
+            retrieval_resources=retrieval_resources,
+            retrieval_trace=retrieval_traces,
+            timing=timings,
+            timing_stage="abstract_search",
         )
     except Exception as exc:
         retrieval_failed = True
@@ -1636,6 +2293,8 @@ def answer_chatbot(
             settings,
             local_results,
             max_downloads=2,
+            timing=timings,
+            timing_stage="full_text_acquisition",
         )
         warnings.extend(acquisition_warnings)
 
@@ -1644,10 +2303,18 @@ def answer_chatbot(
             search_common_corpus_full_text_evidence,
             settings,
             query=retrieval_query,
-            article_count=8,
+            article_count=effort_budget.article_count,
             search_queries=search_queries,
             axis_queries={axis.key: axis.search_queries for axis in planning.plan.axes},
             intent_override=intent,
+            max_query_variants=effort_budget.max_query_variants,
+            passage_count=effort_budget.passages_per_article,
+            candidate_chunks_per_article=effort_budget.candidate_chunks_per_article,
+            context_radius=effort_budget.context_radius,
+            retrieval_resources=retrieval_resources,
+            retrieval_trace=retrieval_traces,
+            timing=timings,
+            timing_stage="full_text_search",
         )
     except Exception as exc:
         retrieval_failed = True
@@ -1659,6 +2326,8 @@ def answer_chatbot(
 
     external_report: BibliographicSearchReport | None = None
     if use_external_sources:
+        enrichment_started = perf_counter()
+        enrichment_memory = timings.snapshot()
         try:
             external_report = discover_bibliographic_records(
                 settings,
@@ -1670,8 +2339,16 @@ def answer_chatbot(
                 "L'enrichissement bibliographique externe est indisponible pour cette réponse "
                 f"({type(exc).__name__})."
             )
+        finally:
+            timings.add(
+                "external_enrichment",
+                perf_counter() - enrichment_started,
+                before=enrichment_memory,
+            )
 
     publish_progress("reranking")
+    merge_started = perf_counter()
+    merge_memory = timings.snapshot()
     external_records = external_report.records if external_report else []
     candidates, external_count = merge_chatbot_candidates(
         local_results,
@@ -1683,7 +2360,18 @@ def answer_chatbot(
         full_text_records,
         abstract_evidence,
         query=retrieval_query,
+        limit=effort_budget.evidence_record_limit,
         intent_override=intent,
+    )
+    timings.add("evidence_merge", perf_counter() - merge_started, before=merge_memory)
+    merge_input_count = len(full_text_records) + len(abstract_evidence)
+    retrieval_traces.add(
+        "evidence_merge",
+        pre_rerank_candidate_count=merge_input_count,
+        post_rerank_candidate_count=len(evidence),
+        selected_article_count=len(evidence),
+        selected_passage_count=sum(len(record.passages) for record in evidence),
+        rejection_counts={"duplicate_or_not_selected": max(0, merge_input_count - len(evidence))},
     )
     if not evidence:
         return _fallback_chatbot_result(
@@ -1699,6 +2387,9 @@ def answer_chatbot(
             prompt_tokens=planning.prompt_tokens,
             completion_tokens=planning.completion_tokens,
             figure_analysis_requested=analyze_figures,
+            answer_effort=answer_effort,
+            timings=timings.models(),
+            retrieval_traces=retrieval_traces.models(),
         )
     if external_report:
         warnings.extend(
@@ -1714,13 +2405,14 @@ def answer_chatbot(
     coverage: CoverageAssessmentResult | None = None
     publish_progress("evidence_selection")
     try:
-        semantic_filter, coverage = _semantic_filter_and_coverage(
+        semantic_filter, coverage = _run_semantic_filter_and_coverage(
             settings,
             question=retrieval_query,
             axes=planning.plan.axes,
             evidence=evidence,
             on_argo_reserved=on_argo_reserved,
             on_coverage_started=lambda: publish_progress("coverage"),
+            timings=timings,
         )
     except ArgoQuotaError:
         raise
@@ -1746,6 +2438,7 @@ def answer_chatbot(
             )
 
     retrieved_evidence = evidence
+    semantic_trace_input_count = len(evidence)
     filtered_evidence = (
         evidence if semantic_filter is None else semantic_filter.selected_records(evidence)
     )
@@ -1775,7 +2468,8 @@ def answer_chatbot(
         and (
             not filtered_evidence
             or (
-                not coverage.used_fallback
+                effort_budget.follow_up_incomplete_axes
+                and not coverage.used_fallback
                 and any(assessment.status != "covered" for assessment in coverage.axes)
             )
         )
@@ -1785,19 +2479,26 @@ def answer_chatbot(
             planning.plan.axes,
             coverage,
             include_all_axes=not filtered_evidence,
+            exclude_queries=[retrieval_query, *search_queries],
         )
         follow_up_queries = list(
             dict.fromkeys(query for queries in follow_up_by_axis.values() for query in queries)
-        )[:8]
+        )[: effort_budget.follow_up_query_limit]
         if follow_up_queries:
             try:
                 supplemental_abstracts = _serialized_chat_retrieval(
                     search_common_corpus_abstracts,
                     settings,
                     query=follow_up_queries[0],
-                    limit=15,
+                    limit=effort_budget.abstract_result_limit,
                     search_queries=follow_up_queries,
                     intent_override=intent,
+                    max_query_variants=effort_budget.max_query_variants,
+                    retrieval_resources=retrieval_resources,
+                    retrieval_trace=retrieval_traces,
+                    supplemental=True,
+                    timing=timings,
+                    timing_stage="supplemental_abstract_search",
                 )
             except Exception as exc:
                 supplemental_abstracts = []
@@ -1810,10 +2511,19 @@ def answer_chatbot(
                     search_common_corpus_full_text_evidence,
                     settings,
                     query=follow_up_queries[0],
-                    article_count=8,
+                    article_count=effort_budget.article_count,
                     search_queries=follow_up_queries,
                     axis_queries=follow_up_by_axis,
                     intent_override=intent,
+                    max_query_variants=effort_budget.max_query_variants,
+                    passage_count=effort_budget.passages_per_article,
+                    candidate_chunks_per_article=(effort_budget.candidate_chunks_per_article),
+                    context_radius=effort_budget.context_radius,
+                    retrieval_resources=retrieval_resources,
+                    retrieval_trace=retrieval_traces,
+                    supplemental=True,
+                    timing=timings,
+                    timing_stage="supplemental_full_text_search",
                 )
             except Exception as exc:
                 supplemental_full_text = []
@@ -1831,8 +2541,26 @@ def answer_chatbot(
                     *abstract_candidates_to_chat_evidence(supplemental_abstracts),
                 ],
                 query=retrieval_query,
-                limit=20,
+                limit=effort_budget.evidence_record_limit,
                 intent_override=intent,
+            )
+            expanded_input_count = (
+                sum(record.evidence_level == "full_text" for record in evidence)
+                + len(supplemental_full_text)
+                + sum(record.evidence_level == "abstract" for record in evidence)
+                + len(supplemental_abstracts)
+            )
+            retrieval_traces.add(
+                "evidence_merge",
+                pre_rerank_candidate_count=expanded_input_count,
+                post_rerank_candidate_count=len(expanded_evidence),
+                selected_article_count=len(expanded_evidence),
+                selected_passage_count=sum(len(record.passages) for record in expanded_evidence),
+                rejection_counts={
+                    "duplicate_or_not_selected": max(
+                        0, expanded_input_count - len(expanded_evidence)
+                    )
+                },
             )
             original_signature = [(record.record_id, record.evidence_level) for record in evidence]
             expanded_signature = [
@@ -1841,13 +2569,14 @@ def answer_chatbot(
             if expanded_signature != original_signature:
                 previous_coverage = coverage
                 try:
-                    second_semantic_filter, second_coverage = _semantic_filter_and_coverage(
+                    second_semantic_filter, second_coverage = _run_semantic_filter_and_coverage(
                         settings,
                         question=retrieval_query,
                         axes=planning.plan.axes,
                         evidence=expanded_evidence,
                         on_argo_reserved=on_argo_reserved,
                         on_coverage_started=lambda: publish_progress("coverage"),
+                        timings=timings,
                     )
                 except ArgoQuotaError:
                     raise
@@ -1873,6 +2602,7 @@ def answer_chatbot(
                         if second_filtered_evidence:
                             semantic_filter = second_semantic_filter
                             filtered_evidence = second_filtered_evidence
+                            semantic_trace_input_count = len(expanded_evidence)
                             coverage = (
                                 previous_coverage
                                 if second_coverage.used_fallback
@@ -1885,6 +2615,18 @@ def answer_chatbot(
                             )
 
     evidence = filtered_evidence
+    retrieval_traces.add(
+        "semantic_filter",
+        pre_rerank_candidate_count=semantic_trace_input_count,
+        post_rerank_candidate_count=len(evidence),
+        selected_article_count=len(evidence),
+        selected_passage_count=sum(len(record.passages) for record in evidence),
+        rejection_counts={
+            "semantic_or_scientific_grade_rejected": max(
+                0, semantic_trace_input_count - len(evidence)
+            )
+        },
+    )
     if not evidence:
         return _fallback_chatbot_result(
             message=message,
@@ -1901,6 +2643,9 @@ def answer_chatbot(
                 planning.completion_tokens + semantic_completion_tokens + coverage_completion_tokens
             ),
             figure_analysis_requested=analyze_figures,
+            answer_effort=answer_effort,
+            timings=timings.models(),
+            retrieval_traces=retrieval_traces.models(),
         )
     coverage_notes = _coverage_notes(planning.plan.axes, coverage)
     if coverage_notes:
@@ -1918,6 +2663,8 @@ def answer_chatbot(
     figure_analysis_duration = 0.0
     figure_analysis_model: str | None = None
     if analyze_figures:
+        figure_started = perf_counter()
+        figure_memory = timings.snapshot()
 
         def publish_figure_analysis() -> None:
             publish_progress("figure_analysis")
@@ -1944,11 +2691,29 @@ def answer_chatbot(
             figure_analysis_count = len(figure_batch.admitted)
             figure_analysis_duration = figure_batch.duration_seconds
             figure_analysis_model = figure_batch.model_name
+        finally:
+            timings.add(
+                "figure_analysis",
+                perf_counter() - figure_started,
+                before=figure_memory,
+            )
+
+    retrieval_traces.add(
+        "llm_context",
+        selected_article_count=len(evidence),
+        selected_passage_count=sum(len(record.passages) for record in evidence),
+    )
 
     publish_progress("generation")
+    generation_started = perf_counter()
+    generation_memory = timings.snapshot()
     try:
         with ArgoClient(settings) as llm:
-            rag = CiderEvidenceRagService(llm)
+            rag = _evidence_rag_service(
+                llm,
+                answer_effort,
+                settings.argo.scientific_correction_temperature,
+            )
             rag.experimental_profile = active_experimental_profile
             if planning.plan.requires_faceted_answer:
                 answer = rag.answer_faceted(
@@ -1980,8 +2745,18 @@ def answer_chatbot(
                     on_argo_response=on_argo_response,
                 )
     except ArgoQuotaError:
+        timings.add(
+            "argo_generation",
+            perf_counter() - generation_started,
+            before=generation_memory,
+        )
         raise
     except ArgoError as exc:
+        timings.add(
+            "argo_generation",
+            perf_counter() - generation_started,
+            before=generation_memory,
+        )
         return _fallback_chatbot_result(
             message=message,
             retrieval_query=retrieval_query,
@@ -2000,7 +2775,20 @@ def answer_chatbot(
             figure_analysis_count=figure_analysis_count,
             figure_analysis_duration_seconds=figure_analysis_duration,
             figure_analysis_model=figure_analysis_model,
+            answer_effort=answer_effort,
+            timings=timings.models(),
+            retrieval_traces=retrieval_traces.models(),
         )
+    timings.add(
+        "argo_generation",
+        perf_counter() - generation_started,
+        before=generation_memory,
+    )
+    timings.add_tokens(
+        "argo_generation",
+        prompt_tokens=answer.prompt_tokens,
+        completion_tokens=answer.completion_tokens,
+    )
     sources = chatbot_sources_from_evidence(evidence, answer.cited_evidence_ids)
     return ChatbotResult(
         message=" ".join(message.split()),
@@ -2032,6 +2820,11 @@ def answer_chatbot(
         figure_analysis_count=figure_analysis_count,
         figure_analysis_duration_seconds=figure_analysis_duration,
         figure_analysis_model=figure_analysis_model,
+        generation_status=getattr(answer, "generation_status", "generated"),
+        answer_effort=answer_effort,
+        timings=timings.models(),
+        retrieval_traces=retrieval_traces.models(),
+        generation_traces=getattr(answer, "generation_traces", []),
     )
 
 
@@ -2133,10 +2926,18 @@ def delete_article(settings: Settings, database: Database, *, article_id: str) -
     chunk_ids = database.article_chunk_ids(article_id)
     index = QdrantLocalIndex(settings)
     try:
+        index_manifest = prepare_index_generation_mutation(index)
         deleted_points = index.delete_points(chunk_ids)
+        deleted_queries = database.delete_article(article_id)
+        if index_manifest is not None:
+            write_ready_index_generation_manifest(
+                database,
+                index,
+                generation_id=index_manifest.generation_id,
+                created_at=index_manifest.created_at,
+            )
     finally:
         index.close()
-    deleted_queries = database.delete_article(article_id)
     return {
         "deleted_chunks": len(chunk_ids),
         "deleted_vector_points": deleted_points,
@@ -2152,11 +2953,18 @@ def reindex_article(
         raise ValueError("article has no chunks to reindex")
     index = QdrantLocalIndex(settings)
     try:
+        index_manifest = prepare_index_generation_mutation(index)
         index.delete_points(chunk_ids)
     finally:
         index.close()
     database.reset_article_for_reindex(article_id)
-    return index_pending_chunks(settings, database, article_ids=[article_id], retry_failed=True)
+    return index_pending_chunks(
+        settings,
+        database,
+        article_ids=[article_id],
+        retry_failed=True,
+        _manifest_is_building=index_manifest is not None,
+    )
 
 
 def _bibtex_value(value: str) -> str:

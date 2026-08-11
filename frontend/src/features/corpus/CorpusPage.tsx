@@ -12,6 +12,7 @@ import { pollDurableJob } from "@/features/chatbot/jobPolling";
 import { CorpusArticlesPanel } from "@/features/corpus/CorpusArticlesPanel";
 import { CorpusImportPanel } from "@/features/corpus/CorpusImportPanel";
 import { CorpusActivityPanel, DeleteArticleDialog } from "@/features/corpus/CorpusSupportPanels";
+import { ingestionOutcomeMessage } from "@/features/corpus/ingestionSummary";
 import { useRemoteData } from "@/hooks/useRemoteData";
 import { api } from "@/lib/api";
 import { formatNumber } from "@/lib/cn";
@@ -45,13 +46,17 @@ export function CorpusPage({ embedded = false }: { embedded?: boolean }) {
       return next;
     });
   const runAction = useCallback(
-    async (name: string, action: () => Promise<unknown>, success: string) => {
+    async <Result,>(
+      name: string,
+      action: () => Promise<Result>,
+      success: string | ((result: Result) => string),
+    ) => {
       setBusy(name);
       setNotice(null);
       setActionError(null);
       try {
-        await action();
-        setNotice(success);
+        const result = await action();
+        setNotice(typeof success === "function" ? success(result) : success);
         refresh();
       } catch (caught: unknown) {
         setActionError(caught instanceof Error ? caught.message : "Erreur inconnue");
@@ -83,21 +88,33 @@ export function CorpusPage({ embedded = false }: { embedded?: boolean }) {
       "upload",
       async () => {
         const response = await api.corpus.upload(files);
-        setReports(response.reports ?? []);
+        const completedReports = response.reports ?? [];
+        setReports(completedReports);
         if (response.job) trackQueuedJob(response.job);
         setFiles([]);
+        return {
+          reports: completedReports,
+          expectedFileCount: response.staged_files ?? files.length,
+        };
       },
-      `${files.length} PDF traité(s).`,
+      ({ reports: completedReports, expectedFileCount }) =>
+        ingestionOutcomeMessage(completedReports, expectedFileCount),
     );
   const ingestFolder = () =>
     void runAction(
       "folder",
       async () => {
         const response = await api.corpus.folder(folder, recursive);
-        setReports(response.reports ?? []);
+        const completedReports = response.reports ?? [];
+        setReports(completedReports);
         if (response.job) trackQueuedJob(response.job);
+        return {
+          reports: completedReports,
+          expectedFileCount: response.discovered_files,
+        };
       },
-      "Dossier analysé et fichiers traités.",
+      ({ reports: completedReports, expectedFileCount }) =>
+        ingestionOutcomeMessage(completedReports, expectedFileCount),
     );
 
   if (loading && !data) return <LoadingState label="Lecture du corpus PDF…" />;

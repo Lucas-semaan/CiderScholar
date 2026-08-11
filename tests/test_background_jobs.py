@@ -4,12 +4,14 @@ from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from uuid import uuid4
 
+from app.database.sqlite import Database
 from app.ingestion.pipeline import IngestionReport
 from app.jobs.background_handlers import CorpusIngestionHandler, LongSynthesisHandler
 from app.jobs.contracts import (
     CorpusIngestionPayload,
     JobState,
     JobStep,
+    JobType,
     LongSynthesisPayload,
 )
 from app.jobs.repository import (
@@ -18,6 +20,8 @@ from app.jobs.repository import (
     JobRepository,
 )
 from app.jobs.worker import DurableJobWorker, JobHandlerRegistry
+from app.services.workflows import ingest_and_index_paths
+from scripts.run_job_worker import build_worker
 
 
 class FakeExecution:
@@ -41,7 +45,11 @@ def test_long_synthesis_is_idempotently_queued_and_completed(settings) -> None:
     second = repository.enqueue_long_synthesis(payload, now=now)
     calls: list[tuple[str, bool]] = []
 
-    def synthesize(_settings, _database, *, query_id: str, resume: bool):
+    scientific_database = Database(settings.paths.common_database_path)
+    scientific_database.initialize()
+
+    def synthesize(_settings, database, *, query_id: str, resume: bool):
+        assert database.path == settings.paths.common_database_path
         calls.append((query_id, resume))
         return FakeExecution()
 
@@ -51,7 +59,7 @@ def test_long_synthesis_is_idempotently_queued_and_completed(settings) -> None:
             {
                 first.type: LongSynthesisHandler(
                     settings,
-                    repository.database,
+                    scientific_database,
                     synthesize=synthesize,
                 )
             }
@@ -78,6 +86,28 @@ def test_long_synthesis_is_idempotently_queued_and_completed(settings) -> None:
     assert JobStep.SYNTHESIS.value in steps
 
 
+def test_worker_keeps_long_synthesis_evidence_in_common_corpus(settings) -> None:
+    worker = build_worker(settings, job_types=frozenset({JobType.LONG_SYNTHESIS}))
+    try:
+        handler = worker.registry.resolve(JobType.LONG_SYNTHESIS)
+        assert isinstance(handler, LongSynthesisHandler)
+        assert handler.database.path == settings.paths.common_database_path
+        assert worker.repository.path == settings.paths.database_path
+    finally:
+        worker.close()
+
+
+def test_worker_automatically_indexes_corpus_ingestions(settings) -> None:
+    worker = build_worker(settings, job_types=frozenset({JobType.CORPUS_INGESTION}))
+    try:
+        handler = worker.registry.resolve(JobType.CORPUS_INGESTION)
+        assert isinstance(handler, CorpusIngestionHandler)
+        assert handler.database.path == settings.paths.common_database_path
+        assert handler.ingest is ingest_and_index_paths
+    finally:
+        worker.close()
+
+
 def test_corpus_ingestion_uses_only_staged_corpus_pdf_and_persists_counts(settings) -> None:
     repository = JobRepository(settings.paths.database_path)
     repository.initialize()
@@ -98,14 +128,17 @@ def test_corpus_ingestion_uses_only_staged_corpus_pdf_and_persists_counts(settin
         assert database.path == settings.paths.database_path
         if progress:
             progress(0, 1, paths[0].name, "ingestion")
-        return [
-            IngestionReport(
-                pdf_path=str(paths[0]),
-                status="chunks_ready",
-                chunk_count=2,
-                duration_seconds=0.01,
-            )
-        ]
+        return (
+            [
+                IngestionReport(
+                    pdf_path=str(paths[0]),
+                    status="chunks_ready",
+                    chunk_count=2,
+                    duration_seconds=0.01,
+                )
+            ],
+            None,
+        )
 
     worker = DurableJobWorker(
         repository=repository,

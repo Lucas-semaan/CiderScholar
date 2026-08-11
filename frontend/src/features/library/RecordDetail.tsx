@@ -10,6 +10,8 @@ import { formatDate } from "@/lib/cn";
 import { statusTone } from "@/lib/status";
 import type { LibraryRecord } from "@/types/api";
 
+import { publicationSource, publicationTypeLabel } from "./libraryPresentation";
+
 const statusLabels: Record<string, string> = {
   accepted: "Acceptée",
   review: "À réviser",
@@ -34,7 +36,12 @@ export function RecordDetail({
   onReviewed: (message: string, recordId: string) => void;
 }) {
   return (
-    <Card className="h-fit xl:sticky xl:top-24">
+    <Card
+      aria-label={`Détails de l’article : ${record.title}`}
+      className="h-fit xl:sticky xl:top-24 xl:max-h-[calc(100dvh-8rem)] xl:overflow-y-auto xl:overscroll-contain xl:[scrollbar-gutter:stable] xl:focus-visible:outline-none xl:focus-visible:ring-2 xl:focus-visible:ring-forest-500"
+      role="region"
+      tabIndex={0}
+    >
       <CardHeader>
         <RecordDetailHeader record={record} />
       </CardHeader>
@@ -84,6 +91,8 @@ export function RecordDetailBody({
   onReviewed: (message: string, recordId: string) => void;
 }) {
   const recordAuthors = authors(record.authors);
+  const source = publicationSource(record);
+  const workType = publicationTypeLabel(record.work_type);
   return (
     <div className="space-y-5">
       {record.relevance_status === "review" && (
@@ -106,12 +115,12 @@ export function RecordDetailBody({
           <dd className="mt-1 font-semibold">{record.publication_year ?? "—"}</dd>
         </div>
         <div>
-          <dt className="text-xs text-slate-400">Citations</dt>
-          <dd className="mt-1 font-semibold">{record.citation_count ?? "—"}</dd>
+          <dt className="text-xs text-slate-400">Type</dt>
+          <dd className="mt-1 font-semibold">{workType ?? "—"}</dd>
         </div>
         <div className="col-span-2">
-          <dt className="text-xs text-slate-400">Journal</dt>
-          <dd className="mt-1 font-semibold">{record.journal ?? "—"}</dd>
+          <dt className="text-xs text-slate-400">{source.label}</dt>
+          <dd className="mt-1 font-semibold">{source.value ?? "—"}</dd>
         </div>
         <div className="col-span-2">
           <dt className="text-xs text-slate-400">Auteurs</dt>
@@ -136,7 +145,7 @@ export function RecordDetailBody({
       )}
       <div>
         <h3 className="text-xs font-bold uppercase tracking-wider text-slate-400">Abstract</h3>
-        <p className="mt-2 max-h-72 overflow-y-auto whitespace-pre-wrap text-sm leading-6 text-slate-600">
+        <p className="mt-2 whitespace-pre-wrap text-sm leading-6 text-slate-600">
           {record.abstract ?? "Abstract indisponible."}
         </p>
       </div>

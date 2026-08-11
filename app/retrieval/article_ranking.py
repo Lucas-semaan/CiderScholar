@@ -83,6 +83,11 @@ class ArticleRankingResponse(BaseModel):
     selected_article_count: int = Field(ge=0)
     excluded_article_ids: list[str]
     hybrid_candidate_count: int = Field(ge=0)
+    query_variant_count: int = Field(default=1, ge=1)
+    lexical_candidate_count: int = Field(default=0, ge=0)
+    dense_candidate_count: int = Field(default=0, ge=0)
+    rrf_unique_candidate_count: int = Field(default=0, ge=0)
+    vector_search_degraded: bool = False
     articles: list[RankedArticle]
     duration_seconds: float = Field(ge=0.0)
 
@@ -404,6 +409,11 @@ class ArticleRankingService:
             selected_article_count=len(articles),
             excluded_article_ids=exclusions,
             hybrid_candidate_count=len(eligible_chunks),
+            lexical_candidate_count=sum(
+                chunk.lexical_rank is not None for chunk in eligible_chunks
+            ),
+            dense_candidate_count=sum(chunk.vector_rank is not None for chunk in eligible_chunks),
+            rrf_unique_candidate_count=len(eligible_chunks),
             articles=articles,
             duration_seconds=perf_counter() - started,
         )
@@ -453,7 +463,16 @@ class ArticleRankingService:
             central_concepts=central_concepts,
             exclude_article_ids=exclude_article_ids,
         )
-        return response.model_copy(update={"duration_seconds": perf_counter() - started})
+        return response.model_copy(
+            update={
+                "duration_seconds": perf_counter() - started,
+                "query_variant_count": len(hybrid_response.queries),
+                "lexical_candidate_count": hybrid_response.lexical_candidates,
+                "dense_candidate_count": hybrid_response.vector_candidates,
+                "rrf_unique_candidate_count": hybrid_response.unique_candidates,
+                "vector_search_degraded": hybrid_response.vector_search_degraded,
+            }
+        )
 
     def close(self) -> None:
         if self.hybrid is not None:

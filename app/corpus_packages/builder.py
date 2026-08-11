@@ -96,7 +96,15 @@ def _write_deterministic_zip(
             info.compress_type = zipfile.ZIP_DEFLATED
             info.create_system = 3
             info.external_attr = 0o100644 << 16
-            archive.writestr(info, source.read_bytes())
+            with (
+                source.open("rb") as input_stream,
+                archive.open(
+                    info,
+                    "w",
+                    force_zip64=True,
+                ) as output_stream,
+            ):
+                shutil.copyfileobj(input_stream, output_stream)
 
 
 def _load_existing(final_directory: Path) -> CorpusPackageBuildReport:

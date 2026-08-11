@@ -10,6 +10,7 @@ from typing import Any, Protocol
 
 from app.config import Settings
 from app.database.sqlite import Database
+from app.ingestion.embeddings import EmbeddingRunReport
 from app.ingestion.pipeline import IngestionReport
 from app.jobs.contracts import (
     CorpusIngestionPayload,
@@ -19,7 +20,7 @@ from app.jobs.contracts import (
 )
 from app.jobs.repository import JobRecord
 from app.jobs.worker import JobHandlerResult, JobProgressContext
-from app.services.workflows import ingest_paths, synthesize_query
+from app.services.workflows import ingest_and_index_paths, synthesize_query
 
 
 class SynthesisRunner(Protocol):
@@ -41,7 +42,7 @@ class CorpusIngester(Protocol):
         paths: Sequence[Path],
         *,
         progress: Callable[[int, int, str, str], None] | None = None,
-    ) -> list[IngestionReport]: ...
+    ) -> tuple[list[IngestionReport], EmbeddingRunReport | None]: ...
 
 
 @dataclass(slots=True)
@@ -77,7 +78,7 @@ class LongSynthesisHandler:
 class CorpusIngestionHandler:
     settings: Settings
     database: Database
-    ingest: CorpusIngester = ingest_paths
+    ingest: CorpusIngester = ingest_and_index_paths
     clock: Callable[[], float] = monotonic
 
     def handle(self, job: JobRecord, context: JobProgressContext) -> JobHandlerResult:
@@ -94,7 +95,7 @@ class CorpusIngestionHandler:
         def progress(_completed: int, _total: int, _name: str, _state: str) -> None:
             context.check_cancellation()
 
-        reports = self.ingest(
+        reports, _indexing = self.ingest(
             self.settings,
             self.database,
             paths,
@@ -107,7 +108,7 @@ class CorpusIngestionHandler:
         context.check_cancellation()
         return JobHandlerResult(
             assistant_content=(
-                f"Ingestion terminée : {len(reports)} document(s), "
+                f"Ingestion et indexation terminées : {len(reports)} document(s), "
                 f"{counts['chunks_ready']} prêt(s), {counts['duplicate']} doublon(s), "
                 f"{counts['ocr_required']} à OCRiser, {counts['failed']} en échec."
             ),

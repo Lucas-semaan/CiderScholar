@@ -53,6 +53,7 @@ class EuropePmcClient(OfficialBibliographicClient):
             authors=authors,
             abstract=clean_text(item.get("abstractText")),
             journal=clean_text(item.get("journalTitle")),
+            work_type=clean_text(item.get("pubType")),
             publication_year=integer_or_none(item.get("pubYear")),
             doi=normalize_doi(item.get("doi")),
             citation_count=integer_or_none(item.get("citedByCount")),

@@ -19,6 +19,7 @@ from app.deep_research.iteration import (
     MissingInformationAssessment,
     ResearchLoopStore,
 )
+from app.deep_research.numeric import DeepResearchNumericVerificationStage
 from app.deep_research.pipeline import DeepResearchPreparationOperations
 from app.deep_research.retrieval import DeepResearchRetrievalStage
 from app.deep_research.verification import SemanticClaimVerificationStage
@@ -131,6 +132,7 @@ def _operations(
         claim_extraction=AtomicClaimExtractionStage(None, tmp_path),
         claim_verification=SemanticClaimVerificationStage(None, tmp_path),
         epistemic_assessment=EpistemicAssessmentStage(tmp_path),
+        numeric_verification=DeepResearchNumericVerificationStage(tmp_path),
         claim_admission=ClaimAdmissionStage(tmp_path),
         abstention=DeepResearchAbstentionStage(tmp_path),
         renderer=_Renderer(),

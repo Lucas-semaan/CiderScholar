@@ -104,10 +104,7 @@ def _evaluate_and_submit(
     return SuggestionSubmissionResult(
         suggestion_id=draft.suggestion_id,
         state="accepted",
-        message=(
-            "Suggestion acceptée et transmise. Elle n'est pas encore dans le RAG commun : "
-            "l'administrateur l'examinera lors de la maintenance hebdomadaire."
-        ),
+        message="Suggestion acceptée et transmise.",
         decision=decision,
     )
 
@@ -141,6 +138,9 @@ def submit_pdf_suggestion(
     payload: bytes,
     scientific_comment: str | None,
     transmit_pdf_confirmed: bool,
+    title: str | None = None,
+    doi: str | None = None,
+    abstract: str | None = None,
     evaluator: Evaluator | None = None,
 ) -> SuggestionSubmissionResult:
     if not transmit_pdf_confirmed:
@@ -154,6 +154,9 @@ def submit_pdf_suggestion(
         internal_filename=internal_name,
         size_bytes=len(payload),
         sha256=digest,
+        title=title,
+        doi=doi,
+        abstract=abstract,
     )
     draft = SuggestionDraft(
         created_at=datetime.now(UTC),

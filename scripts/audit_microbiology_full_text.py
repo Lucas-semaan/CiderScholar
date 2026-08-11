@@ -325,8 +325,7 @@ def build_verified_bibliography(
     common_settings = settings_for_corpus(settings, CorpusScope.COMMON)
     common_database = Database(common_settings.paths.database_path)
     common_database.initialize()
-    metadata_database = Database(settings.paths.database_path)
-    metadata_database.initialize()
+    metadata_database = common_database
 
     candidates: dict[str, list[VerifiedArticle]] = {
         "microorganismes_des_fermentations": [],

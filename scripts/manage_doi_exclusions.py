@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 
 from app.config import load_settings
+from app.corpora import CorpusScope, settings_for_corpus
 from app.updates.doi_exclusions import DoiExclusionRegistry
 from app.updates.models import normalize_doi
 
@@ -28,7 +29,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    settings = load_settings(args.config)
+    settings = settings_for_corpus(load_settings(args.config), CorpusScope.COMMON)
     registry = DoiExclusionRegistry.for_database(settings.paths.database_path)
     if args.command == "reinstate":
         changed = registry.reinstate(args.doi)

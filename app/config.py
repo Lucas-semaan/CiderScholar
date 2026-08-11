@@ -70,8 +70,22 @@ class PathConfig(BaseModel):
         return self.common_dir / "full-text"
 
     @property
-    def common_database_path(self) -> Path:
+    def scientific_database_path(self) -> Path:
+        """Single SQLite authority for bibliography, full text, chunks, and evidence."""
+
         return self.common_dir / "database" / "science_rag.sqlite3"
+
+    @property
+    def common_database_path(self) -> Path:
+        """Backward-compatible name for the authoritative scientific database."""
+
+        return self.scientific_database_path
+
+    @property
+    def bibliographic_database_path(self) -> Path:
+        """Bibliographic notices are records in the authoritative scientific corpus."""
+
+        return self.scientific_database_path
 
     def resolved(self, project_dir: Path) -> PathConfig:
         values: dict[str, Path] = {}
@@ -95,7 +109,7 @@ class PathConfig(BaseModel):
             self.common_extracted_dir,
             self.common_qdrant_dir,
             self.common_full_text_assets_dir,
-            self.common_database_path.parent,
+            self.scientific_database_path.parent,
         ):
             path.mkdir(parents=True, exist_ok=True)
 
@@ -262,6 +276,7 @@ class ArgoConfig(BaseModel):
         pattern=r"^[A-Z][A-Z0-9_]{2,127}$",
     )
     temperature: float = Field(default=0.1, ge=0.0, le=2.0)
+    scientific_correction_temperature: float = Field(default=0.1, ge=0.0, le=0.2)
     max_input_characters: int = Field(default=64000, ge=1000, le=250000)
     max_output_tokens: int = Field(default=8192, ge=256, le=16384)
     request_timeout_seconds: int = Field(default=300, ge=10)

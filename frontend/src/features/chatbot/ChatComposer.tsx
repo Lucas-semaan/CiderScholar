@@ -1,6 +1,6 @@
 import { useState, type FormEventHandler, type ReactNode } from "react";
 
-import { Cloud, Microscope, Plus, Send } from "lucide-react";
+import { ChevronDown, Cloud, Microscope, Plus, Send } from "lucide-react";
 
 import { Button } from "@/components/ui/Button";
 import { CardBody } from "@/components/ui/Card";
@@ -8,7 +8,13 @@ import { cn } from "@/lib/cn";
 
 import { ChatModeMenu } from "./ChatModeMenu";
 import { suggestions } from "./conversationView";
-import type { ChatInteractionMode } from "./durableChat";
+import type { AnswerEffort, ChatInteractionMode } from "./durableChat";
+
+const effortOptions: ReadonlyArray<{ label: string; value: AnswerEffort }> = [
+  { label: "Concis", value: "concise" },
+  { label: "Équilibré", value: "balanced" },
+  { label: "Approfondi", value: "deep" },
+];
 
 interface ChatComposerProps {
   disabled: boolean;
@@ -22,6 +28,7 @@ interface ChatComposerProps {
   figureAnalysisAvailable: boolean;
   figureAnalysisEstimate: string;
   interactionMode: ChatInteractionMode;
+  answerEffort: AnswerEffort;
   conversationContextAvailable: boolean;
   showSuggestions: boolean;
   onDraftChange: (value: string) => void;
@@ -29,6 +36,7 @@ interface ChatComposerProps {
   onDeepResearchChange: (value: boolean) => void;
   onFigureAnalysisChange: (value: boolean) => void;
   onInteractionModeChange: (value: ChatInteractionMode) => void;
+  onAnswerEffortChange: (value: AnswerEffort) => void;
   onSubmit: FormEventHandler<HTMLFormElement>;
 }
 
@@ -44,6 +52,7 @@ export function ChatComposer({
   figureAnalysisAvailable,
   figureAnalysisEstimate,
   interactionMode,
+  answerEffort,
   conversationContextAvailable,
   showSuggestions,
   onDraftChange,
@@ -51,13 +60,20 @@ export function ChatComposer({
   onDeepResearchChange,
   onFigureAnalysisChange,
   onInteractionModeChange,
+  onAnswerEffortChange,
   onSubmit,
 }: ChatComposerProps) {
   const [modeMenuOpen, setModeMenuOpen] = useState(false);
+  const [effortMenuOpen, setEffortMenuOpen] = useState(false);
 
   const chooseMode = (mode: ChatInteractionMode) => {
     onInteractionModeChange(mode);
     setModeMenuOpen(false);
+  };
+
+  const chooseEffort = (effort: AnswerEffort) => {
+    onAnswerEffortChange(effort);
+    setEffortMenuOpen(false);
   };
 
   return (
@@ -116,42 +132,108 @@ export function ChatComposer({
             value={draft}
           />
           <div className="flex items-center justify-between gap-2 px-2.5 pb-2.5">
-            <div className="relative shrink-0">
-              {modeMenuOpen && (
-                <ChatModeMenu
-                  conversationContextAvailable={conversationContextAvailable}
-                  figureAnalysis={figureAnalysis}
-                  figureAnalysisAvailable={figureAnalysisAvailable}
-                  figureAnalysisEstimate={figureAnalysisEstimate}
-                  interactionMode={interactionMode}
-                  onChoose={chooseMode}
-                  onToggleFigures={(enabled) => {
-                    onFigureAnalysisChange(enabled);
-                    setModeMenuOpen(false);
+            <div className="flex min-w-0 items-center gap-1">
+              <div className="relative shrink-0">
+                {modeMenuOpen && (
+                  <ChatModeMenu
+                    conversationContextAvailable={conversationContextAvailable}
+                    figureAnalysis={figureAnalysis}
+                    figureAnalysisAvailable={figureAnalysisAvailable}
+                    figureAnalysisEstimate={figureAnalysisEstimate}
+                    interactionMode={interactionMode}
+                    onChoose={chooseMode}
+                    onToggleFigures={(enabled) => {
+                      onFigureAnalysisChange(enabled);
+                      setModeMenuOpen(false);
+                    }}
+                    onEscape={() => setModeMenuOpen(false)}
+                  />
+                )}
+                <Button
+                  aria-expanded={modeMenuOpen}
+                  aria-haspopup="menu"
+                  aria-label="Changer de mode"
+                  className="rounded-md border-0 bg-transparent shadow-none"
+                  disabled={disabled}
+                  onClick={() => {
+                    setEffortMenuOpen(false);
+                    setModeMenuOpen((open) => !open);
                   }}
-                  onEscape={() => setModeMenuOpen(false)}
-                />
-              )}
-              <Button
-                aria-expanded={modeMenuOpen}
-                aria-haspopup="menu"
-                aria-label="Changer de mode"
-                className="rounded-md border-0 bg-transparent shadow-none"
-                disabled={disabled}
-                onClick={() => setModeMenuOpen((open) => !open)}
-                onKeyDown={(event) => {
-                  if (event.key === "Escape") setModeMenuOpen(false);
-                }}
-                size="icon"
-                title="Changer de mode"
-                type="button"
-                variant="ghost"
-              >
-                <Plus
-                  aria-hidden="true"
-                  className={`size-5 transition-transform ${modeMenuOpen ? "rotate-45" : ""}`}
-                />
-              </Button>
+                  onKeyDown={(event) => {
+                    if (event.key === "Escape") setModeMenuOpen(false);
+                  }}
+                  size="icon"
+                  title="Changer de mode"
+                  type="button"
+                  variant="ghost"
+                >
+                  <Plus
+                    aria-hidden="true"
+                    className={`size-5 transition-transform ${modeMenuOpen ? "rotate-45" : ""}`}
+                  />
+                </Button>
+              </div>
+              <div className="relative shrink-0">
+                {effortMenuOpen && (
+                  <div
+                    aria-label="Choisir l’effort de réponse"
+                    className="absolute bottom-full left-0 z-20 mb-2 w-40 overflow-hidden rounded-xl border border-slate-200 bg-white p-1 shadow-xl"
+                    onKeyDown={(event) => {
+                      if (event.key === "Escape") setEffortMenuOpen(false);
+                    }}
+                    role="menu"
+                  >
+                    {effortOptions.map((option) => {
+                      const selected = answerEffort === option.value;
+
+                      return (
+                        <button
+                          aria-checked={selected}
+                          className={cn(
+                            "flex w-full items-center rounded-lg px-3 py-2 text-left text-sm font-medium transition hover:bg-slate-50 focus-visible:ring-2 focus-visible:ring-forest-600",
+                            selected && "bg-forest-50 text-forest-800",
+                          )}
+                          key={option.value}
+                          onClick={() => chooseEffort(option.value)}
+                          role="menuitemradio"
+                          type="button"
+                        >
+                          {option.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+                <Button
+                  aria-expanded={effortMenuOpen}
+                  aria-haspopup="menu"
+                  aria-label={`Régler l’effort de réponse : ${
+                    effortOptions.find((option) => option.value === answerEffort)?.label
+                  }`}
+                  className="h-[42px] rounded-md border-0 bg-transparent px-3 shadow-none"
+                  disabled={disabled || deepResearch}
+                  onClick={() => {
+                    setModeMenuOpen(false);
+                    setEffortMenuOpen((open) => !open);
+                  }}
+                  onKeyDown={(event) => {
+                    if (event.key === "Escape") setEffortMenuOpen(false);
+                  }}
+                  title={
+                    deepResearch
+                      ? "La recherche approfondie utilise l’effort Approfondi."
+                      : "Régler l’effort de réponse"
+                  }
+                  type="button"
+                  variant="ghost"
+                >
+                  {effortOptions.find((option) => option.value === answerEffort)?.label}
+                  <ChevronDown
+                    aria-hidden="true"
+                    className={cn("size-3.5 transition-transform", effortMenuOpen && "rotate-180")}
+                  />
+                </Button>
+              </div>
             </div>
             <Button
               aria-label="Envoyer la question"

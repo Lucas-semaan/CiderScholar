@@ -2,24 +2,16 @@
 
 from __future__ import annotations
 
-import hashlib
 import shutil
 import uuid
 from pathlib import Path
 
 from app.desktop.app_updates import ApplicationReleaseManifest
+from app.file_integrity import sha256_file
 
 
 class ApplicationPublishError(RuntimeError):
     """The local installer release is incomplete, altered or conflicts with publication."""
-
-
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        while block := handle.read(1024 * 1024):
-            digest.update(block)
-    return digest.hexdigest()
 
 
 def _verified_release(source: Path) -> tuple[ApplicationReleaseManifest, Path, Path]:
@@ -32,7 +24,7 @@ def _verified_release(source: Path) -> tuple[ApplicationReleaseManifest, Path, P
         if (
             not installer.is_file()
             or installer.stat().st_size != manifest.size_bytes
-            or _sha256(installer) != manifest.sha256
+            or sha256_file(installer) != manifest.sha256
             or not checksum.is_file()
             or checksum.read_text(encoding="ascii").strip() != expected_line
         ):
@@ -61,12 +53,19 @@ def publish_application_release(source: Path, synchronized_root: Path) -> Path:
         staged_checksum = staging / checksum.name
         shutil.copy2(installer, staged_installer)
         shutil.copy2(checksum, staged_checksum)
-        if _sha256(staged_installer) != manifest.sha256:
+        if sha256_file(staged_installer) != manifest.sha256:
             raise ApplicationPublishError("staged installer hash mismatch")
-        for staged in (staged_installer, staged_checksum):
+        immutable_artifacts = (
+            (staged_installer, manifest.sha256),
+            (staged_checksum, sha256_file(staged_checksum)),
+        )
+        for staged, expected_sha256 in immutable_artifacts:
             destination = installers / staged.name
             if destination.exists():
-                if destination.read_bytes() != staged.read_bytes():
+                if (
+                    destination.stat().st_size != staged.stat().st_size
+                    or sha256_file(destination) != expected_sha256
+                ):
                     raise ApplicationPublishError("immutable published filename already differs")
                 staged.unlink()
             else:

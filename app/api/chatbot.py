@@ -170,6 +170,7 @@ def enqueue_chat_job(
                     use_external_sources=payload.use_external_sources,
                     analyze_figures=payload.analyze_figures,
                     interaction_mode=payload.interaction_mode,
+                    answer_effort=payload.answer_effort,
                     evaluation_run_id=payload.evaluation_run_id,
                     evaluation_question_id=payload.evaluation_question_id,
                     evaluation_profile=payload.evaluation_profile,

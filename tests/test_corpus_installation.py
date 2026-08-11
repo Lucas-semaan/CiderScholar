@@ -89,6 +89,17 @@ def test_every_staged_hash_is_checked_before_extraction(settings) -> None:
     assert not Path(staged.staging_directory).exists()
 
 
+def test_staged_artifacts_are_verified_without_zipfile_bulk_reads(settings, monkeypatch) -> None:
+    staged = _staged_package(settings, payload=b"streamed artifact" * 100_000)
+
+    def reject_bulk_read(*_args, **_kwargs):
+        raise AssertionError("staged artifacts must be hashed as streams")
+
+    monkeypatch.setattr(zipfile.ZipFile, "read", reject_bulk_read)
+
+    assert verify_staged_package(settings, staged) == staged
+
+
 @pytest.mark.parametrize(
     "member",
     ["../private/file", "/absolute/file", "C:/Windows/file", "folder\\file"],

@@ -3,23 +3,17 @@ import { Filter, Search } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { Card, CardBody, CardHeader } from "@/components/ui/Card";
 import { Field, Input, Select } from "@/components/ui/Form";
+import { themeLabel } from "@/features/library/libraryPresentation";
 import type { LibraryRecordFilters } from "@/lib/api";
 
 interface LibraryFiltersProps {
   filters: LibraryRecordFilters;
   themes: string[];
-  sources: string[];
   onChange: (update: (previous: LibraryRecordFilters) => LibraryRecordFilters) => void;
   onSubmit: () => void;
 }
 
-export function LibraryFilters({
-  filters,
-  themes,
-  sources,
-  onChange,
-  onSubmit,
-}: LibraryFiltersProps) {
+export function LibraryFilters({ filters, themes, onChange, onSubmit }: LibraryFiltersProps) {
   return (
     <Card>
       <CardHeader>
@@ -30,13 +24,13 @@ export function LibraryFilters({
       </CardHeader>
       <CardBody>
         <form
-          className="grid gap-4 lg:grid-cols-4"
+          className="grid gap-4 lg:grid-cols-[minmax(0,2fr)_minmax(10rem,1fr)_minmax(10rem,1fr)_auto] lg:items-end"
           onSubmit={(event) => {
             event.preventDefault();
             onSubmit();
           }}
         >
-          <Field className="lg:col-span-2" label="Mot-clé, titre, auteur ou DOI">
+          <Field label="Mot-clé, titre, auteur ou DOI">
             <div className="relative">
               <Search
                 aria-hidden="true"
@@ -61,20 +55,9 @@ export function LibraryFilters({
             >
               <option value="">Tous les thèmes</option>
               {themes.map((theme) => (
-                <option key={theme}>{theme}</option>
-              ))}
-            </Select>
-          </Field>
-          <Field label="Source">
-            <Select
-              onChange={(event) =>
-                onChange((previous) => ({ ...previous, source: event.target.value }))
-              }
-              value={filters.source}
-            >
-              <option value="">Toutes les sources</option>
-              {sources.map((source) => (
-                <option key={source}>{source}</option>
+                <option key={theme} value={theme}>
+                  {themeLabel(theme)}
+                </option>
               ))}
             </Select>
           </Field>
@@ -94,8 +77,8 @@ export function LibraryFilters({
             </Select>
           </Field>
           <div className="flex items-end">
-            <Button className="w-full" type="submit">
-              Appliquer les filtres
+            <Button className="w-full whitespace-nowrap lg:w-auto" type="submit">
+              Appliquer
             </Button>
           </div>
         </form>

@@ -3,43 +3,11 @@ import { useEffect, useState } from "react";
 import { AlertTriangle, CheckCircle2, Clock3, LoaderCircle } from "lucide-react";
 
 import { Button } from "@/components/ui/Button";
-import type { DurableJob, JobState, JobStep } from "@/types/api";
+import { jobStateLabels, jobStepLabels } from "@/lib/jobPresentation";
+import { formatJobDuration, formatRetryTime } from "@/lib/time";
+import type { DurableJob } from "@/types/api";
 
-import { formatJobDuration, formatRetryTime } from "./jobStatus";
 import { isTerminalJob } from "./jobPolling";
-
-const stateLabels: Record<JobState, string> = {
-  queued: "En attente",
-  running: "En cours",
-  succeeded: "Terminé",
-  failed: "Échec",
-  cancel_requested: "Annulation demandée",
-  cancelled: "Annulé",
-};
-
-const stepLabels: Record<JobStep, string> = {
-  waiting: "Préparation",
-  planning: "Analyse et planification de la question",
-  search: "Recherche locale dans le corpus",
-  enrichment: "Enrichissement bibliographique",
-  reranking: "Classement et fusion des passages",
-  evidence_selection: "Sélection sémantique des preuves",
-  coverage: "Contrôle et complément de la couverture",
-  figure_analysis: "Analyse locale des figures",
-  generation: "Génération de la réponse finale",
-  argo: "Traitement ARGO (ancien suivi)",
-  validation: "Validation scientifique",
-  persistence: "Enregistrement",
-  backup: "Sauvegarde du corpus",
-  suggestions: "Import des suggestions",
-  harvest: "Collecte bibliographique",
-  index: "Indexation et contrôles",
-  publish: "Publication du corpus",
-  evidence: "Extraction des preuves",
-  verification: "Vérification des affirmations",
-  synthesis: "Synthèse approfondie",
-  ingestion: "Ingestion des documents",
-};
 
 interface JobStatusCardProps {
   job: DurableJob;
@@ -85,7 +53,7 @@ export function JobStatusCard({ job, onCancel, onRetry }: JobStatusCardProps) {
       ? "Attente du quota ARGO"
       : job.state === "queued"
         ? "File d’attente — créneaux de traitement occupés"
-        : stepLabels[job.step];
+        : jobStepLabels[job.step];
   const statusIcon =
     job.state === "failed" ? (
       <AlertTriangle aria-hidden="true" className="size-4" />
@@ -97,14 +65,14 @@ export function JobStatusCard({ job, onCancel, onRetry }: JobStatusCardProps) {
 
   return (
     <section
-      aria-label={`Travail de réponse : ${stateLabels[job.state]}`}
+      aria-label={`Travail de réponse : ${jobStateLabels[job.state]}`}
       aria-live="polite"
       className="ml-11 max-w-xl rounded-2xl border border-forest-200 bg-forest-50 px-4 py-3 text-sm text-forest-900 shadow-soft"
       role="status"
     >
       <div className="flex items-center gap-2 font-bold">
         {statusIcon}
-        {stateLabels[job.state]}
+        {jobStateLabels[job.state]}
       </div>
       <dl className="mt-2 flex flex-wrap gap-x-5 gap-y-1 text-xs text-forest-800">
         <div className="flex gap-1.5">

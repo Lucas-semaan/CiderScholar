@@ -36,7 +36,7 @@ from app.llm.argo_client import (
     ArgoScientificValidationError,
     ArgoUnavailableError,
 )
-from app.models.chatbot import ChatbotResult
+from app.models.chatbot import ChatbotResult, ChatbotRetrievalTrace, ChatbotTiming
 from app.services.chatbot import ChatbotNoSourcesError
 
 
@@ -423,6 +423,23 @@ def test_chat_handler_delegates_to_existing_answer_chatbot_workflow(settings, tm
             prompt_tokens=1,
             completion_tokens=2,
             duration_seconds=0.5,
+            retrieval_traces=[
+                ChatbotRetrievalTrace(
+                    stage="llm_context",
+                    selected_article_count=3,
+                    selected_passage_count=7,
+                )
+            ],
+            timings=[
+                ChatbotTiming(
+                    stage="argo_generation",
+                    duration_seconds=0.2,
+                    prompt_tokens=1,
+                    completion_tokens=2,
+                    process_rss_before_gb=0.5,
+                    process_rss_after_gb=0.6,
+                )
+            ],
         )
 
     handler = ChatAnswerHandler(
@@ -441,6 +458,8 @@ def test_chat_handler_delegates_to_existing_answer_chatbot_workflow(settings, tm
 
     assert result.assistant_content == "Réponse existante"
     assert result.response_time_milliseconds == 500
+    assert result.assistant_response["retrieval_traces"][0]["selected_passage_count"] == 7
+    assert result.assistant_response["timings"][0]["process_rss_after_gb"] == 0.6
     assert len(calls) == 1
     assert calls[0][2:] == ("Question durable", [], False)
 
@@ -1136,7 +1155,7 @@ def test_invalid_scientific_generation_is_terminal_without_exposing_detail(tmp_p
     assert "unsupported numeric claim" not in notice["content"]
 
 
-def test_unexpected_handler_bug_becomes_a_visible_terminal_diagnostic(tmp_path) -> None:
+def test_unexpected_handler_bug_becomes_a_visible_terminal_diagnostic(tmp_path, caplog) -> None:
     repository = JobRepository(tmp_path / "queue.sqlite3")
     repository.initialize()
     now = datetime(2026, 7, 22, 12, tzinfo=UTC)
@@ -1157,12 +1176,13 @@ def test_unexpected_handler_bug_becomes_a_visible_terminal_diagnostic(tmp_path) 
             del job, context
             raise RuntimeError("sensitive implementation detail")
 
-    failed = DurableJobWorker(
-        repository=repository,
-        registry=JobHandlerRegistry({JobType.CHAT_ANSWER: BuggyHandler()}),
-        worker_id="worker-bug",
-        clock=lambda: now + timedelta(seconds=1),
-    ).run_once()
+    with caplog.at_level(logging.ERROR, logger="ciderscholar.jobs.worker"):
+        failed = DurableJobWorker(
+            repository=repository,
+            registry=JobHandlerRegistry({JobType.CHAT_ANSWER: BuggyHandler()}),
+            worker_id="worker-bug",
+            clock=lambda: now + timedelta(seconds=1),
+        ).run_once()
 
     assert failed is not None
     assert failed.state is JobState.FAILED
@@ -1174,6 +1194,8 @@ def test_unexpected_handler_bug_becomes_a_visible_terminal_diagnostic(tmp_path) 
     assert notice["role"] == "assistant"
     assert notice["response"]["diagnostic_code"] == "internal_handler_error"
     assert "sensitive implementation detail" not in notice["content"]
+    assert "test_job_worker.py:" in caplog.text
+    assert "sensitive implementation detail" not in caplog.text
 
 
 def test_unserializable_handler_result_becomes_a_visible_persistence_diagnostic(tmp_path) -> None:

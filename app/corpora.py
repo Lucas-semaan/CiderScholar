@@ -69,7 +69,7 @@ def load_local_profile(environ: Mapping[str, str] | None = None) -> LocalProfile
 
 
 def corpus_paths(settings: Settings, scope: CorpusScope) -> CorpusPaths:
-    """Resolve the single authoritative corpus without consulting a web request."""
+    """Resolve the single authority for bibliography, full text, chunks, and evidence."""
 
     paths = settings.paths
     return CorpusPaths(
@@ -77,13 +77,13 @@ def corpus_paths(settings: Settings, scope: CorpusScope) -> CorpusPaths:
         root=paths.common_dir,
         pdf_dir=paths.common_pdf_dir,
         extracted_dir=paths.common_extracted_dir,
-        database_path=paths.common_database_path,
+        database_path=paths.scientific_database_path,
         qdrant_dir=paths.common_qdrant_dir,
     )
 
 
 def settings_for_corpus(settings: Settings, scope: CorpusScope) -> Settings:
-    """Reuse corpus workflows with paths confined to one scope."""
+    """Route every scientific workflow to the same bibliographic and full-text store."""
 
     selected = corpus_paths(settings, scope)
     paths = settings.paths.model_copy(

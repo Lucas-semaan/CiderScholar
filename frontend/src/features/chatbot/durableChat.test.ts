@@ -82,6 +82,41 @@ describe("durable chat submission", () => {
     expect(enqueue.mock.calls[0]?.[1].analyze_figures).toBe(true);
   });
 
+  it("preserves the selected answer intensity for conversation replies", async () => {
+    const enqueue = vi.fn().mockResolvedValue({});
+    const pending = createPendingChatSubmission(
+      "Explique plus brièvement",
+      false,
+      "55555555-5555-4555-8555-555555555555",
+      false,
+      "conversation",
+      false,
+      "concise",
+    );
+
+    await enqueuePendingChat("conversation-1", pending, enqueue);
+
+    expect(enqueue.mock.calls[0]?.[1].interaction_mode).toBe("conversation");
+    expect(enqueue.mock.calls[0]?.[1].answer_effort).toBe("concise");
+  });
+
+  it("forces deep intensity when deep research is selected", async () => {
+    const enqueue = vi.fn().mockResolvedValue({});
+    const pending = createPendingChatSubmission(
+      "Analyse approfondie",
+      false,
+      "66666666-6666-4666-8666-666666666666",
+      true,
+      "research",
+      false,
+      "concise",
+    );
+
+    await enqueuePendingChat("conversation-1", pending, enqueue);
+
+    expect(enqueue.mock.calls[0]?.[1].answer_effort).toBe("deep");
+  });
+
   it("renders the canonical persisted message exactly once", () => {
     const persisted = {
       id: "message-from-sqlite",

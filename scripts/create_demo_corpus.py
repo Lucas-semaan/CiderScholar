@@ -7,6 +7,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from app.config import load_settings
+from app.corpora import CorpusScope, settings_for_corpus
 
 ARTICLES = (
     {
@@ -83,7 +84,7 @@ def create_demo_corpus(destination: Path | None = None) -> list[Path]:
     except ImportError as exc:  # pragma: no cover - installation concern
         raise RuntimeError("PyMuPDF is required to generate the demo corpus") from exc
 
-    settings = load_settings()
+    settings = settings_for_corpus(load_settings(), CorpusScope.COMMON)
     output_dir = (destination or settings.paths.pdf_dir / "demo").resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     generated: list[Path] = []

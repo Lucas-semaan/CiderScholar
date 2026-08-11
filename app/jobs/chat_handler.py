@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import inspect
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Protocol
 
+from app.chat_effort import AnswerEffort
 from app.config import Settings
 from app.corpora import LocalProfile, load_local_profile
 from app.database.sqlite import Database
@@ -35,6 +37,7 @@ class ChatbotAnswerer(Protocol):
         on_argo_response: Callable[[], None] | None = None,
         on_progress: Callable[[ChatbotProgressStage], None] | None = None,
         experimental_profile: str | None = None,
+        answer_effort: AnswerEffort = AnswerEffort.BALANCED,
     ) -> ChatbotResult: ...
 
 
@@ -141,6 +144,15 @@ class ChatAnswerHandler:
         evaluation_options = (
             {"experimental_profile": evaluation_profile} if evaluation_profile is not None else {}
         )
+        answer_parameters = inspect.signature(self.answer).parameters.values()
+        effort_options = (
+            {"answer_effort": job.payload.answer_effort}
+            if any(
+                parameter.name == "answer_effort" or parameter.kind is inspect.Parameter.VAR_KEYWORD
+                for parameter in answer_parameters
+            )
+            else {}
+        )
         result = self.answer(
             self.settings,
             self.database,
@@ -154,6 +166,7 @@ class ChatAnswerHandler:
             on_progress=publish_progress,
             **figure_options,
             **evaluation_options,
+            **effort_options,
         )
         if result.message != job.payload.message:
             raise ArgoScientificValidationError(

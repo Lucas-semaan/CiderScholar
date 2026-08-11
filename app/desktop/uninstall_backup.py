@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import sqlite3
 import tempfile
 import uuid
@@ -15,6 +14,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.config import Settings
+from app.file_integrity import sha256_file
 from app.services.corpus_backup import create_corpus_backup
 
 
@@ -24,14 +24,6 @@ class UninstallBackupManifest(BaseModel):
     format_version: Literal[1] = 1
     created_at: datetime
     files: dict[str, str] = Field(min_length=2, max_length=2)
-
-
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        while block := handle.read(1024 * 1024):
-            digest.update(block)
-    return digest.hexdigest()
 
 
 def _database_snapshot(source: Path, destination: Path) -> None:
@@ -61,7 +53,10 @@ def create_uninstall_backup(settings: Settings, destination: Path) -> Path:
         create_corpus_backup(settings, corpus)
         manifest = UninstallBackupManifest(
             created_at=datetime.now(UTC),
-            files={database.name: _sha256(database), corpus.name: _sha256(corpus)},
+            files={
+                database.name: sha256_file(database),
+                corpus.name: sha256_file(corpus),
+            },
         )
         try:
             with zipfile.ZipFile(temporary_archive, "w", zipfile.ZIP_DEFLATED) as archive:

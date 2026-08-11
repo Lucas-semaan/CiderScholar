@@ -732,6 +732,9 @@ def test_harvested_abstracts_are_indexed_in_a_separate_vector_collection(
         assert response.results[0].doi == "10.1000/yeast"
         assert response.results[0].vector_rank == 1
         assert response.results[0].sources == ["OpenAlex"]
+        assert response.lexical_candidate_count >= 1
+        assert response.dense_candidate_count == 2
+        assert response.rrf_unique_candidate_count == 2
     finally:
         service.close()
 

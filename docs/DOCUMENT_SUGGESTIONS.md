@@ -8,9 +8,9 @@ HTTPS, un PDF ou une référence saisie manuellement. Il donne immédiatement l'
 - **non retenue** : la pertinence ou la confiance n'atteint pas le seuil conservateur ;
 - **à réessayer** : la clé ARGO, le service ou la synchronisation SharePoint n'est pas disponible.
 
-Une proposition acceptée n'est pas encore présente dans le RAG commun. L'administrateur la contrôle
-lors de la maintenance hebdomadaire, et peut encore la rejeter. CiderScholar ne fournit volontairement
-ni liste, ni page de suivi, ni statut distant des propositions.
+Lorsqu’un PDF retenu est importé dans le corpus commun, son extraction et son indexation ciblée sont
+enchaînées automatiquement. Une référence sans texte intégral reste une notice bibliographique et
+n’est pas présentée comme un PDF indexé.
 
 ## Ce qui est transmis
 

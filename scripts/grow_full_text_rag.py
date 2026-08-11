@@ -54,7 +54,7 @@ def main(argv: list[str] | None = None) -> int:
     if arguments.target_pdfs < 1:
         raise ValueError("target-pdfs must be positive")
 
-    settings = load_settings(arguments.config)
+    settings = settings_for_corpus(load_settings(arguments.config), CorpusScope.COMMON)
     AdminBibliographicKeyVault(
         settings,
         load_local_profile(),
@@ -62,9 +62,8 @@ def main(argv: list[str] | None = None) -> int:
     settings.paths.create()
     database = Database(settings.paths.database_path)
     database.initialize()
-    rag_settings = settings_for_corpus(settings, CorpusScope.COMMON)
-    rag_database = Database(rag_settings.paths.database_path)
-    rag_database.initialize()
+    rag_settings = settings
+    rag_database = database
     store = FullTextStore(database)
 
     state = _growth_state(database, arguments.target_pdfs)

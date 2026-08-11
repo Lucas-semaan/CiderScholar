@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 
 from app.corpora import CorpusScope, settings_for_corpus
 from app.database.sqlite import Database
+from app.jobs.repository import JobRepository
 from app.main import create_app
 from app.updates.doi_exclusions import DoiExclusionRegistry
 from app.updates.harvest import BibliographicHarvestStore
@@ -282,7 +283,7 @@ def test_api_contract_rejects_unknown_runtime_fields(settings) -> None:
 
 
 def test_synthesis_without_source_valid_evidence_is_a_domain_conflict(settings) -> None:
-    database = Database(settings.paths.database_path)
+    database = Database(settings.paths.common_database_path)
     database.initialize()
     database.create_query(
         query_id="query-without-evidence",
@@ -301,6 +302,69 @@ def test_synthesis_without_source_valid_evidence_is_a_domain_conflict(settings) 
             "validée n’est disponible ou la traçabilité des sources est incomplète."
         )
     }
+
+
+def test_synthesis_uses_common_evidence_but_enqueues_in_application_database(
+    settings, tmp_path
+) -> None:
+    common = Database(settings.paths.common_database_path)
+    common.initialize()
+    common.save_article_and_chunks(
+        {
+            "id": "common-article",
+            "sha256": "a" * 64,
+            "title": "Article commun",
+            "authors": [],
+            "pdf_path": str(tmp_path / "common.pdf"),
+        },
+        [
+            {
+                "section": "Results",
+                "page_start": 1,
+                "page_end": 1,
+                "chunk_index": 0,
+                "text": "Une preuve factuelle validée.",
+                "token_count": 4,
+            }
+        ],
+    )
+    with common.transaction() as connection:
+        connection.execute(
+            """
+            INSERT INTO queries (id, original_query, expanded_queries, selected_article_ids)
+            VALUES ('common-query', 'Question', '[]', '["common-article"]')
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO article_evidence_runs (
+                query_id, article_id, state, selected_chunk_ids
+            ) VALUES ('common-query', 'common-article', 'completed', '[1]')
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO evidence (
+                id, query_id, article_id, chunk_id, claim, source_excerpt,
+                page_start, page_end, relevance_score
+            ) VALUES (
+                'common-evidence', 'common-query', 'common-article', 1, 'Preuve',
+                'Une preuve factuelle validée.', 1, 1, 0.9
+            )
+            """
+        )
+
+    with TestClient(create_app(settings)) as client:
+        response = client.post(
+            "/api/synthesis/common-query/run",
+            json={"resume": True, "client_request_id": "11111111-1111-4111-8111-111111111111"},
+        )
+
+    assert response.status_code == 202
+    job = JobRepository(settings.paths.database_path).get(response.json()["id"])
+    assert job is not None
+    with common.connect() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 0
 
 
 def test_synchronous_chatbot_route_is_removed(settings) -> None:

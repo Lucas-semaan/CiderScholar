@@ -29,7 +29,7 @@ FTS associées sont supprimées en cascade. L’interface sélectionne ensuite l
 réviser disponible sur la page courante.
 
 Tout rejet possédant un DOI est également inscrit dans
-`data/database/excluded_bibliographic_dois.json`. Ce registre JSON horodaté est consulté avant
+`data/common/excluded_bibliographic_dois.json`. Ce registre JSON horodaté est consulté avant
 chaque insertion issue d’une collecte et reprend au premier usage les DOI déjà présents dans
 l’archive SQLite des rejets. Une réautorisation conserve l’historique mais désactive explicitement
 l’exclusion :

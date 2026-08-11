@@ -21,11 +21,15 @@ class FakeExtractor:
         *,
         requires_ocr: bool = False,
         doi: str | None = None,
+        title: str = "Synthetic Study",
+        result_marker: str = "PAGE_MARKER",
         elements: list[ScientificDocumentElement] | None = None,
         ocr_pages: list[OcrPageTrace] | None = None,
     ) -> None:
         self.requires_ocr = requires_ocr
         self.doi = doi
+        self.title = title
+        self.result_marker = result_marker
         self.elements = elements or []
         self.ocr_pages = ocr_pages or []
         self.calls = 0
@@ -36,17 +40,17 @@ class FakeExtractor:
             ""
             if self.requires_ocr
             else (
-                "Synthetic Study of Local Retrieval\n"
+                f"{self.title}\n"
                 f"DOI: {self.doi or ''}\n"
                 "Abstract\nA local synthetic abstract without external data.\n"
-                "Results\nThe PAGE_MARKER result is reproducible and entirely synthetic."
+                f"Results\nThe {self.result_marker} result is reproducible and entirely synthetic."
             )
         )
         return ExtractedDocument(
             pdf_path=str(pdf_path.resolve()),
             page_count=1,
             pages=[PageText(1, text)],
-            metadata={"title": "Synthetic Study", "author": "Ada Test"},
+            metadata={"title": self.title, "author": "Ada Test"},
             text_character_count=len(text),
             text_page_count=0 if self.requires_ocr else 1,
             requires_ocr=self.requires_ocr,
@@ -74,9 +78,11 @@ def test_pipeline_persists_chunks_and_detects_duplicate(settings, tmp_path: Path
     assert first.status == "chunks_ready"
     assert first.chunk_count >= 1
     assert second.status == "duplicate"
+    assert second.duplicate_reason == "sha256"
     assert second.article_id == first.article_id
     assert extractor.calls == 1
     assert database.lexical_search("PAGE_MARKER")[0]["article_id"] == first.article_id
+    assert database.list_ingestion_jobs(limit=1)[0]["article_id"] == first.article_id
 
 
 def test_pipeline_accepts_a_precomputed_sha_without_hashing_again(settings, tmp_path: Path) -> None:
@@ -241,9 +247,63 @@ def test_pipeline_detects_same_doi_across_different_pdf_files(settings, tmp_path
 
     assert first.status == "chunks_ready"
     assert second.status == "duplicate"
+    assert second.duplicate_reason == "doi"
     assert second.article_id == first.article_id
     assert extractor.calls == 2
     assert len(database.list_articles(limit=10)) == 1
+
+
+def test_pipeline_detects_identical_normalized_text_in_different_pdf_files(
+    settings,
+    tmp_path: Path,
+) -> None:
+    database = Database(settings.paths.database_path)
+    database.initialize()
+    title = "Fermentation kinetics and volatile compounds in cider production"
+    extractor = FakeExtractor(title=title)
+    pipeline = IngestionPipeline(settings, database, extractor=extractor)
+    first_pdf = tmp_path / "first-rendering.pdf"
+    second_pdf = tmp_path / "second-rendering.pdf"
+    first_pdf.write_bytes(b"first synthetic PDF rendering")
+    second_pdf.write_bytes(b"second synthetic PDF rendering")
+
+    first = pipeline.ingest_file(first_pdf)
+    second = pipeline.ingest_file(second_pdf)
+
+    assert first.status == "chunks_ready"
+    assert second.status == "duplicate"
+    assert second.duplicate_reason == "normalized_text"
+    assert second.article_id == first.article_id
+    assert len(database.list_articles(limit=10)) == 1
+
+
+def test_pipeline_never_merges_same_title_when_normalized_text_differs(
+    settings,
+    tmp_path: Path,
+) -> None:
+    database = Database(settings.paths.database_path)
+    database.initialize()
+    title = "Fermentation kinetics and volatile compounds in cider production"
+    first_pdf = tmp_path / "first-study.pdf"
+    second_pdf = tmp_path / "second-study.pdf"
+    first_pdf.write_bytes(b"first synthetic PDF")
+    second_pdf.write_bytes(b"second synthetic PDF")
+
+    first = IngestionPipeline(
+        settings,
+        database,
+        extractor=FakeExtractor(title=title, result_marker="FIRST_RESULT"),
+    ).ingest_file(first_pdf)
+    second = IngestionPipeline(
+        settings,
+        database,
+        extractor=FakeExtractor(title=title, result_marker="SECOND_RESULT"),
+    ).ingest_file(second_pdf)
+
+    assert first.status == "chunks_ready"
+    assert second.status == "chunks_ready"
+    assert first.article_id != second.article_id
+    assert len(database.list_articles(limit=10)) == 2
 
 
 def test_pipeline_resumes_from_page_cache_after_database_error(settings, tmp_path: Path) -> None:

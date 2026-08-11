@@ -7,8 +7,9 @@ import unicodedata
 from collections.abc import Callable, Mapping, Sequence
 from typing import Annotated, Any, Protocol
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
+from app.llm.argo_client import ArgoProtocolError
 from app.llm.contracts import GenerationMessage, GenerationResponse
 from app.retrieval.scientific_intent import (
     ScientificFacet,
@@ -19,6 +20,8 @@ from app.retrieval.scientific_intent import (
 
 ScientificTerm = Annotated[str, Field(min_length=1, max_length=100)]
 SearchQuery = Annotated[str, Field(min_length=2, max_length=600)]
+_INITIAL_PLAN_OUTPUT_TOKENS = 1800
+_RETRY_PLAN_OUTPUT_TOKENS = 3200
 
 
 def _sanitize_generated_payload(value: Any) -> Any:
@@ -35,6 +38,20 @@ def _sanitize_generated_payload(value: Any) -> Any:
     if isinstance(value, dict):
         return {key: _sanitize_generated_payload(item) for key, item in value.items()}
     return value
+
+
+def _parse_generated_plan(content: str) -> ResearchQueryPlan:
+    """Validate one ARGO plan, accepting only an optional whole-document JSON fence."""
+
+    cleaned = content.strip()
+    lines = cleaned.splitlines()
+    if (
+        len(lines) >= 3
+        and lines[0].strip().casefold() in {"```", "```json"}
+        and lines[-1].strip() == "```"
+    ):
+        cleaned = "\n".join(lines[1:-1]).strip()
+    return ResearchQueryPlan.model_validate(_sanitize_generated_payload(json.loads(cleaned)))
 
 
 class QueryPlanningClient(Protocol):
@@ -68,7 +85,9 @@ class ResearchQueryPlan(BaseModel):
     concept_definition: str | None = Field(default=None, min_length=2, max_length=1000)
     ambiguities: list[ScientificTerm] = Field(default_factory=list, max_length=10)
     excluded_concepts: list[ScientificTerm] = Field(default_factory=list, max_length=24)
-    requires_faceted_answer: bool
+    # This value is derived from axes below. Keeping a default makes the structured
+    # response resilient when ARGO omits the redundant generated flag.
+    requires_faceted_answer: bool = False
     matrix_primary: list[ScientificTerm] = Field(default_factory=list, max_length=4)
     matrix_close: list[ScientificTerm] = Field(default_factory=list, max_length=8)
     matrix_distant: list[ScientificTerm] = Field(default_factory=list, max_length=8)
@@ -79,8 +98,10 @@ class ResearchQueryPlan(BaseModel):
 
     @model_validator(mode="after")
     def validate_decomposition(self) -> ResearchQueryPlan:
-        if self.requires_faceted_answer != (len(self.axes) > 1):
-            raise ValueError("requires_faceted_answer must match the number of axes")
+        # The axes are the source of authority. The generated boolean is redundant and
+        # some otherwise valid structured responses make it inconsistent with their
+        # decomposition, so canonicalize it instead of discarding the complete plan.
+        self.requires_faceted_answer = len(self.axes) > 1
         keys = [axis.key for axis in self.axes]
         if len(keys) != len(set(keys)):
             raise ValueError("research axis keys must be unique")
@@ -159,8 +180,23 @@ class QueryPlanningResult(BaseModel):
 class ArgoQueryPlanningService:
     """Ask ARGO to understand the request before any corpus retrieval."""
 
-    def __init__(self, client: QueryPlanningClient) -> None:
+    def __init__(
+        self,
+        client: QueryPlanningClient,
+        *,
+        max_output_tokens: int | None = None,
+    ) -> None:
+        if max_output_tokens is None:
+            configured_limit = getattr(getattr(client, "config", None), "max_output_tokens", None)
+            max_output_tokens = (
+                configured_limit
+                if isinstance(configured_limit, int) and not isinstance(configured_limit, bool)
+                else _RETRY_PLAN_OUTPUT_TOKENS
+            )
+        if max_output_tokens < 256:
+            raise ValueError("query planning output token limit must be at least 256")
         self.client = client
+        self.max_output_tokens = max_output_tokens
 
     def plan(
         self,
@@ -222,10 +258,16 @@ class ArgoQueryPlanningService:
         total_prompt_tokens = 0
         total_completion_tokens = 0
         validation_error: Exception | None = None
+        output_budgets = (
+            min(_INITIAL_PLAN_OUTPUT_TOKENS, self.max_output_tokens),
+            min(_RETRY_PLAN_OUTPUT_TOKENS, self.max_output_tokens),
+        )
         for attempt in range(2):
             options: dict[str, Any] = {
                 "json_schema": schema,
-                "max_output_tokens": 1800,
+                # A complex but valid four-axis plan can exceed the initial bound.
+                # Expand only the correction attempt so ordinary plans stay economical.
+                "max_output_tokens": output_budgets[attempt],
             }
             if on_argo_reserved is not None:
                 options["on_request_reserved"] = on_argo_reserved
@@ -233,19 +275,19 @@ class ArgoQueryPlanningService:
             total_prompt_tokens += response.metrics.prompt_eval_count
             total_completion_tokens += response.metrics.eval_count
             try:
-                plan = ResearchQueryPlan.model_validate(
-                    _sanitize_generated_payload(json.loads(response.content))
-                )
-            except Exception as exc:
+                plan = _parse_generated_plan(response.content)
+            except (json.JSONDecodeError, ValidationError) as exc:
                 validation_error = exc
                 if attempt == 0:
                     messages.append(
                         {
                             "role": "user",
                             "content": (
-                                "Le plan précédent est invalide. Régénère uniquement le JSON "
-                                "conforme au schéma. Ne découpe la question que si plusieurs axes "
-                                "scientifiques indépendants sont réellement nécessaires."
+                                "Le plan précédent est tronqué ou invalide. Régénère uniquement "
+                                "un objet JSON complet conforme au schéma, sans balise ni prose. "
+                                "Reste compact en limitant les termes et requêtes, mais conserve "
+                                "de un à quatre axes lorsque des dimensions scientifiques "
+                                "indépendantes l'exigent."
                             ),
                         }
                     )
@@ -257,7 +299,9 @@ class ArgoQueryPlanningService:
                 prompt_tokens=total_prompt_tokens,
                 completion_tokens=total_completion_tokens,
             )
-        raise RuntimeError("ARGO returned an invalid research query plan") from validation_error
+        raise ArgoProtocolError(
+            "ARGO returned an invalid research query plan"
+        ) from validation_error
 
 
 def deterministic_query_plan(question: str) -> QueryPlanningResult:

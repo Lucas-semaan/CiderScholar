@@ -23,7 +23,6 @@ from app.api.ingestion import router as ingestion_router
 from app.api.jobs import router as jobs_router
 from app.api.library import router as library_router
 from app.api.onboarding import router as onboarding_router
-from app.api.pilot_feedback import router as pilot_feedback_router
 from app.api.publisher_access import router as publisher_access_router
 from app.api.suggestions import router as suggestions_router
 from app.api.synthesis import router as synthesis_router
@@ -92,7 +91,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     application.include_router(jobs_router)
     application.include_router(library_router)
     application.include_router(onboarding_router)
-    application.include_router(pilot_feedback_router)
     application.include_router(publisher_access_router)
     application.include_router(synthesis_router)
     application.include_router(suggestions_router)

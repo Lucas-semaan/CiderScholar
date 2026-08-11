@@ -9,6 +9,10 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.deep_research.claims import AtomicClaim, AtomicClaimCheckpoint
 from app.deep_research.epistemic import EpistemicAssessmentCheckpoint
+from app.deep_research.numeric import (
+    DeepResearchNumericVerificationStage,
+    NumericVerificationCheckpoint,
+)
 from app.deep_research.verification import SemanticVerificationCheckpoint
 from app.jobs.contracts import DeepResearchPayload
 
@@ -22,6 +26,7 @@ class ClaimAdmissionDecision(BaseModel):
         "semantically_supported",
         "implication_not_entailed",
         "semantic_dimension_not_supported",
+        "numeric_not_supported",
         "hypothesis_not_admitted_as_fact",
     ]
     admitted_statement: str | None = Field(default=None, max_length=2_000)
@@ -39,7 +44,7 @@ class ClaimAdmissionDecision(BaseModel):
 class ClaimAdmissionCheckpoint(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: Literal[1] = 1
+    schema_version: Literal[2] = 2
     decisions: list[ClaimAdmissionDecision] = Field(default_factory=list, max_length=20)
 
     @model_validator(mode="after")
@@ -59,7 +64,7 @@ class ClaimAdmissionStage:
             self.checkpoint_root
             / str(payload.conversation_id)
             / str(payload.client_request_id)
-            / "claim-admission.json"
+            / "claim-admission-v2.json"
         )
 
     def load(self, payload: DeepResearchPayload) -> ClaimAdmissionCheckpoint:
@@ -74,6 +79,7 @@ class ClaimAdmissionStage:
         claims: AtomicClaimCheckpoint,
         verifications: SemanticVerificationCheckpoint,
         epistemic: EpistemicAssessmentCheckpoint,
+        numeric: NumericVerificationCheckpoint | None = None,
     ) -> ClaimAdmissionCheckpoint:
         path = self._path(payload)
         if path.is_file():
@@ -82,15 +88,19 @@ class ClaimAdmissionStage:
             return checkpoint
         verification_by_id = {item.claim_id: item for item in verifications.verifications}
         level_by_id = {item.claim_id: item.level for item in epistemic.assessments}
+        numeric_by_id = {item.claim_id: item for item in numeric.verifications} if numeric else {}
         claim_ids = {claim.claim_id for claim in claims.claims}
         if set(verification_by_id) != claim_ids or set(level_by_id) != claim_ids:
             raise ValueError("claim admission requires complete verification and epistemic levels")
+        if numeric is not None and set(numeric_by_id) != claim_ids:
+            raise ValueError("claim admission requires complete numeric verification")
         checkpoint = ClaimAdmissionCheckpoint(
             decisions=[
                 self._decision(
                     claim,
                     verification_by_id[claim.claim_id],
                     level_by_id[claim.claim_id],
+                    numeric_by_id.get(claim.claim_id),
                 )
                 for claim in claims.claims
             ]
@@ -102,8 +112,11 @@ class ClaimAdmissionStage:
         return checkpoint
 
     @staticmethod
-    def _decision(claim, verification, level) -> ClaimAdmissionDecision:
-        if verification.supported and level != "hypothese":
+    def _decision(claim, verification, level, numeric=None) -> ClaimAdmissionDecision:
+        numeric_supported = numeric is None or DeepResearchNumericVerificationStage.is_admissible(
+            numeric
+        )
+        if verification.supported and level != "hypothese" and numeric_supported:
             return ClaimAdmissionDecision(
                 claim_id=claim.claim_id,
                 status="accepted",
@@ -114,6 +127,8 @@ class ClaimAdmissionStage:
             reason = "implication_not_entailed"
         elif not verification.supported:
             reason = "semantic_dimension_not_supported"
+        elif not numeric_supported:
+            reason = "numeric_not_supported"
         else:
             reason = "hypothesis_not_admitted_as_fact"
         return ClaimAdmissionDecision(

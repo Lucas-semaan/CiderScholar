@@ -20,6 +20,19 @@ interface CorpusImportPanelProps {
   onFolderIngest: () => void;
 }
 
+const reportLabels: Record<IngestionReport["status"], string> = {
+  chunks_ready: "Ajouté",
+  duplicate: "Déjà présent",
+  ocr_required: "OCR requis",
+  failed: "Échec",
+};
+
+const duplicateDetails: Record<NonNullable<IngestionReport["duplicate_reason"]>, string> = {
+  sha256: "Même fichier déjà enregistré ; aucun nouvel article créé.",
+  doi: "Même DOI déjà enregistré ; aucun nouvel article créé.",
+  normalized_text: "Même texte intégral déjà enregistré ; aucun nouvel article créé.",
+};
+
 export function CorpusImportPanel({
   files,
   folder,
@@ -108,11 +121,18 @@ export function CorpusImportPanel({
               >
                 <div className="flex items-start justify-between gap-3">
                   <p className="truncate text-sm font-semibold text-slate-800">{report.pdf_path}</p>
-                  <Badge tone={statusTone(report.status)}>{report.status}</Badge>
+                  <Badge tone={statusTone(report.status)}>{reportLabels[report.status]}</Badge>
                 </div>
                 <p className="mt-2 text-xs text-slate-500">
                   {report.page_count} page(s) · {report.chunk_count} fragment(s)
                 </p>
+                {report.status === "duplicate" && (
+                  <p className="mt-2 text-xs font-medium text-slate-600">
+                    {report.duplicate_reason
+                      ? duplicateDetails[report.duplicate_reason]
+                      : "Document déjà enregistré ; aucun nouvel article créé."}
+                  </p>
+                )}
               </div>
             ))}
           </CardBody>

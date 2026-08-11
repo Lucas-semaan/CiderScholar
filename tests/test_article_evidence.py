@@ -202,6 +202,82 @@ def test_passage_selector_rejects_chunk_from_another_article(settings) -> None:
         )
 
 
+def test_passage_selector_can_add_bounded_neighbor_context(settings) -> None:
+    database = Database(settings.paths.database_path)
+    database.initialize()
+    chunks = [
+        ("Introduction", "Cider fermentation is sensitive to temperature."),
+        ("Other", "A pH limitation applies to the adjacent temperature measurement."),
+        ("Results", "At 20 Â°C, ester concentration increased by 25%."),
+        ("Conclusion", "Temperature changed the aroma profile."),
+    ]
+    database.save_article_and_chunks(
+        {
+            "id": "article-context",
+            "sha256": "c" * 64,
+            "doi": None,
+            "title": "Context selection",
+            "abstract": chunks[0][1],
+            "authors": ["Ada Test"],
+            "journal": "Synthetic Journal",
+            "publication_year": 2025,
+            "language": "en",
+            "pdf_path": "data/pdf/article-context.pdf",
+            "validation_status": "indexed",
+            "source": "local",
+        },
+        [
+            {
+                "section": section,
+                "page_start": index + 1,
+                "page_end": index + 1,
+                "chunk_index": index,
+                "text": text,
+                "token_count": len(text.split()),
+                "embedding_status": "indexed",
+            }
+            for index, (section, text) in enumerate(chunks)
+        ],
+    )
+    with closing(database.connect()) as connection:
+        ranked_id = int(
+            connection.execute(
+                "SELECT id FROM chunks WHERE article_id = ? AND chunk_index = 2",
+                ("article-context",),
+            ).fetchone()["id"]
+        )
+
+    passages = EvidencePassageSelector(settings, database).select(
+        query="What limits the temperature measurement?",
+        article_id="article-context",
+        ranked_chunk_ids=[ranked_id],
+        passage_count=3,
+        expand_intra_article_context=True,
+        max_candidate_chunks=4,
+        neighborhood_radius=1,
+    )
+
+    neighbor = next(passage for passage in passages if passage.page_start == 2)
+    assert neighbor.context_role == "supporting_context"
+    assert "intra-article context near ranked chunk (1)" in neighbor.selection_reasons
+    assert len(passages) == 3
+
+
+def test_passage_selector_bounds_article_candidate_window(settings) -> None:
+    database = Database(settings.paths.database_path)
+    database.initialize()
+    ids = _seed_article(database)
+
+    passages = EvidencePassageSelector(settings, database).select(
+        query="temperature aroma",
+        article_id="article-1",
+        ranked_chunk_ids=[ids[2]],
+        max_candidate_chunks=1,
+    )
+
+    assert [passage.chunk_id for passage in passages] == [ids[2]]
+
+
 def test_valid_evidence_is_persisted_and_resumed_without_llm(settings) -> None:
     database = Database(settings.paths.database_path)
     database.initialize()

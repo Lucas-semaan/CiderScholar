@@ -11,6 +11,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from app.chat_effort import AnswerEffort, migrate_legacy_answer_effort
+
 
 class JobType(StrEnum):
     """Job types accepted by the current application and database schema."""
@@ -167,6 +169,7 @@ class ChatAnswerPayload(BaseModel):
     use_external_sources: bool = False
     analyze_figures: bool = False
     interaction_mode: Literal["auto", "research", "conversation"] = "auto"
+    answer_effort: AnswerEffort = AnswerEffort.BALANCED
     evaluation_run_id: str | None = Field(
         default=None,
         pattern=r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,79}$",
@@ -180,6 +183,13 @@ class ChatAnswerPayload(BaseModel):
         default=None,
         pattern=r"^[0-9a-f]{64}$",
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_legacy_answer_intensity(cls, values: object) -> object:
+        """Read queued version-1 jobs written before ``answer_effort`` existed."""
+
+        return migrate_legacy_answer_effort(values)
 
     @property
     def idempotency_key(self) -> tuple[UUID, UUID]:

@@ -133,7 +133,18 @@ def build_signed_ciderqa_report(
 
 def verify_ciderqa_report(report: SignedCiderQAReport) -> bool:
     payload = report.model_dump(mode="json", exclude={"report_sha256"})
-    return _payload_hash(payload) == report.report_sha256
+    if _payload_hash(payload) == report.report_sha256:
+        return True
+    # Schema-v1 reports created before additive optional metrics do not contain those fields.
+    # Pydantic restores their defaults while loading, so retry with only fields that were
+    # present in the serialized report. This preserves old signatures without weakening the
+    # content hash for newly created reports.
+    legacy_payload = report.model_dump(
+        mode="json",
+        exclude={"report_sha256"},
+        exclude_unset=True,
+    )
+    return _payload_hash(legacy_payload) == report.report_sha256
 
 
 def write_ciderqa_report(report: SignedCiderQAReport, destination: str | Path) -> Path:

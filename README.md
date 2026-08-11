@@ -161,6 +161,8 @@ l’ouverture via `GET /api/corpus/{article_id}/pdf`. Les commandes d’exploita
 .\.venv\Scripts\python.exe -m scripts.ingest_folder "C:\chemin\vers\les\PDF" --recursive
 .\.venv\Scripts\python.exe -m scripts.ingest_folder "C:\chemin\vers\les\PDF" --recursive --ocr --skip-known --wait-for-memory
 .\.venv\Scripts\python.exe -m scripts.rebuild_index
+.\.venv\Scripts\python.exe -m scripts.rebuild_bibliographic_abstract_index --recreate
+.\.venv\Scripts\python.exe -m scripts.rebuild_bibliographic_abstract_index --verify
 .\.venv\Scripts\python.exe -m scripts.harvest_cider_pilot
 .\.venv\Scripts\python.exe -m scripts.harvest_cider_bulk --target 1000 --page-size 50
 .\.venv\Scripts\python.exe -m scripts.harvest_cider_bulk --target 500 --query-set materials
@@ -179,6 +181,14 @@ PDF est acquis plus tard, la déduplication DOI donne automatiquement priorité 
 Cette cadence est actuellement appliquée lors du lancement manuel de la commande. Aucun ordonnanceur
 hebdomadaire n’est activé ; les prérequis de cette évolution sont suivis dans la
 [`roadmap`](docs/ROADMAP.md).
+
+`rebuild_bibliographic_abstract_index` ne collecte ni ne migre de données : il ne gère que la
+collection locale `bibliographic_abstracts` du corpus commun. Elle ne contient que les notices
+`accepted` ayant un abstract non vide, un DOI déjà normalisé et valide, et aucun article complet
+portant ce DOI. `--recreate` remet explicitement en attente ce seul ensemble puis recrée la
+collection ; sans option, la commande reprend les notices `pending`, et `--retry-failed` ajoute les
+lots en échec. `--verify` ne charge pas E5 et vérifie les identifiants et payloads Qdrant contre
+SQLite. Chaque exécution d’indexation écrit un rapport JSON dans `data/exports`.
 
 `--force` permet un essai explicite hors cadence et `--no-evaluate` évite les requêtes de contrôle
 après une collecte. E5 n’est chargé que si au moins un abstract attend réellement son embedding.
@@ -236,6 +246,6 @@ Les règles complètes sont dans [`AGENTS.md`](AGENTS.md). Les données locales,
 
 ## Confidentialité et sauvegarde
 
-Ne jamais remplacer `127.0.0.1` par `0.0.0.0` sur une machine contenant des documents scientifiques. Le [guide du corpus commun](docs/CORPUS_ISOLATION.md) décrit son stockage et sa mise à jour. Le guide [OneDrive / SharePoint](docs/SHAREPOINT_DISTRIBUTION.md) explique la sélection du dossier utilisateur ainsi que la publication et le rollback administrateur ; le guide [proposer un document](docs/DOCUMENT_SUGGESTIONS.md) précise droits, données transmises et absence de suivi distant. Pour une sauvegarde vérifiée, arrêter les traitements lourds puis exécuter `python scripts/backup_corpus.py` ; la restauration correspondante remplace atomiquement `data/common` en conservant la version précédente.
+Ne jamais remplacer `127.0.0.1` par `0.0.0.0` sur une machine contenant des documents scientifiques. Le [guide du corpus commun](docs/CORPUS_ISOLATION.md) décrit son stockage et sa mise à jour. Le guide [OneDrive / SharePoint](docs/SHAREPOINT_DISTRIBUTION.md) explique la sélection du dossier utilisateur ainsi que la publication et le rollback administrateur ; le guide [proposer un document](docs/DOCUMENT_SUGGESTIONS.md) précise les droits et les données transmises. Pour une sauvegarde vérifiée, arrêter les traitements lourds puis exécuter `python scripts/backup_corpus.py` ; la restauration correspondante remplace atomiquement `data/common` en conservant la version précédente.
 
 Le projet est distribué sous licence AGPL-3.0-only.
