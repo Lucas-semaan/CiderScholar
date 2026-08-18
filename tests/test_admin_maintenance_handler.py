@@ -28,10 +28,6 @@ class FakeMaintenanceOperations:
             archive_sha256="b" * 64,
         )
 
-    def suggestions(self) -> MaintenanceOperationResult:
-        self.calls.append("suggestions")
-        return MaintenanceOperationResult(counters={"suggestions_imported": 2})
-
     def harvest(self) -> MaintenanceOperationResult:
         self.calls.append("harvest")
         return MaintenanceOperationResult(counters={"harvest_accepted": 3})
@@ -89,7 +85,6 @@ def test_full_simulated_maintenance_publishes_then_marks_success(settings) -> No
     assert completed.state is JobState.SUCCEEDED
     assert operations.calls == [
         "backup",
-        "suggestions",
         "harvest",
         "index",
         "validate",
@@ -130,5 +125,5 @@ def test_interrupted_mutation_rolls_back_and_restarts_after_backup(settings) -> 
     assert completed is not None
     assert completed.state is JobState.SUCCEEDED
     assert operations.calls.count("backup") == 1
-    assert operations.calls.count("suggestions") == 2
+    assert operations.calls.count("harvest") == 2
     assert operations.calls.count("publish") == 1

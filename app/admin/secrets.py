@@ -11,7 +11,15 @@ from app.config import Settings
 from app.corpora import LocalProfile
 from app.secrets import DpapiFileSecretStore
 
-BibliographicProvider = Literal["openalex", "elsevier", "clarivate", "istex"]
+BibliographicProvider = Literal[
+    "openalex",
+    "elsevier",
+    "clarivate",
+    "istex",
+    "core",
+    "semantic_scholar",
+    "opencitations",
+]
 PROVIDER_FILENAME = re.compile(r"^[a-z][a-z0-9_-]{2,31}$")
 
 
@@ -32,6 +40,9 @@ class AdminBibliographicKeyVault:
             "elsevier": config.elsevier_api_key_env,
             "clarivate": config.clarivate_api_key_env,
             "istex": self.settings.full_text.istex_token_env,
+            "core": config.core_api_key_env,
+            "semantic_scholar": config.semantic_scholar_api_key_env,
+            "opencitations": config.opencitations_api_key_env,
         }
 
     def _require_admin(self) -> None:

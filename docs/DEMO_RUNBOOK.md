@@ -66,6 +66,6 @@ mention **exemple enregistré, non généré pendant cette session**.
 ## Variantes de répétition
 
 Après le scénario de cinq minutes, dérouler les variantes redémarrage, corpus commun/privé, mise à
-jour, suggestion PDF et quota décrites dans `DEMO_E2E_MATRIX.md`. Elles utilisent un profil de
-démonstration et une inbox simulée, sans donnée sensible. Ne jamais présenter leur ARGO simulé comme
+jour et quota décrites dans `DEMO_E2E_MATRIX.md`. Elles utilisent un profil de démonstration sans
+donnée sensible. Ne jamais présenter leur ARGO simulé comme
 une génération réelle ; seule la répétition bornée `DEM-015` autorise cette conclusion.

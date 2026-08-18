@@ -42,5 +42,8 @@ describe("CorpusArticlesPanel pagination", () => {
     expect(markup).not.toContain("Article 50");
     expect(markup).toContain("Page 1 sur 2");
     expect(markup).toContain("51 document(s)");
+    expect(markup).toContain("sticky right-0");
+    expect(markup).toMatch(/aria-label="R.+indexer Article 0"/);
+    expect(markup).toContain('aria-label="Supprimer Article 0"');
   });
 });

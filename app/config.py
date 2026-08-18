@@ -39,11 +39,14 @@ class PathConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     data_dir: Path = Path("data")
-    pdf_dir: Path = Path("data/pdf")
-    extracted_dir: Path = Path("data/extracted")
-    qdrant_dir: Path = Path("data/qdrant")
+    # Scientific content has one durable authority.  The former data/pdf,
+    # data/extracted, data/qdrant and data/database locations are read only by
+    # explicit legacy migrations; new content must never recreate that split.
+    pdf_dir: Path = Path("data/common/pdf")
+    extracted_dir: Path = Path("data/common/extracted")
+    qdrant_dir: Path = Path("data/common/qdrant")
     models_dir: Path = Path("data/models")
-    database_path: Path = Path("data/database/science_rag.sqlite3")
+    database_path: Path = Path("data/common/database/science_rag.sqlite3")
     cache_dir: Path = Path("data/cache")
     exports_dir: Path = Path("data/exports")
 
@@ -117,15 +120,14 @@ class PathConfig(BaseModel):
 class IngestionConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    target_tokens: int = Field(default=500, ge=100, le=2000)
-    max_tokens: int = Field(default=750, ge=100, le=3000)
+    target_tokens: int = Field(default=420, ge=100, le=2000)
+    max_tokens: int = Field(default=512, ge=100, le=3000)
     overlap_tokens: int = Field(default=80, ge=0, le=500)
     min_page_text_characters: int = Field(default=25, ge=0)
     min_text_page_ratio: float = Field(default=0.15, ge=0.0, le=1.0)
     ocr_language: str = Field(default="fr-FR", pattern=r"^[a-z]{2,3}(?:-[A-Z]{2})?$")
     ocr_min_confidence: float = Field(default=0.75, ge=0.5, le=1.0)
     metadata_scan_pages: int = Field(default=3, ge=1, le=10)
-    local_import_validation_status: Literal["validated", "awaiting_validation"] = "validated"
 
     @model_validator(mode="after")
     def validate_chunk_sizes(self) -> IngestionConfig:
@@ -359,7 +361,23 @@ class FigureAnalysisConfig(BaseModel):
         return self
 
 
-BibliographicSource = Literal["crossref", "europe_pmc", "openalex", "clarivate", "elsevier"]
+BibliographicSource = Literal[
+    "crossref",
+    "europe_pmc",
+    "openalex",
+    "clarivate",
+    "elsevier",
+    "hal",
+    "core",
+    "doaj",
+    "semantic_scholar",
+    "istex",
+    "datacite",
+    "openaire",
+    "zenodo",
+    "pubmed",
+    "pubag",
+]
 
 
 class BibliographicConfig(BaseModel):
@@ -375,6 +393,16 @@ class BibliographicConfig(BaseModel):
             "openalex",
             "clarivate",
             "elsevier",
+            "hal",
+            "core",
+            "doaj",
+            "semantic_scholar",
+            "istex",
+            "datacite",
+            "openaire",
+            "zenodo",
+            "pubmed",
+            "pubag",
         ]
     )
     per_source_limit: int = Field(default=10, ge=1, le=50)
@@ -393,6 +421,22 @@ class BibliographicConfig(BaseModel):
     clarivate_api_mode: Literal["starter", "expanded"] = "starter"
     clarivate_database: str = "WOS"
     clarivate_expanded_option_view: Literal["SR", "FR"] = "SR"
+    hal_base_url: str = "https://api.archives-ouvertes.fr/search"
+    core_base_url: str = "https://api.core.ac.uk/v3"
+    core_api_key_env: str = "CORE_API_KEY"
+    doaj_base_url: str = "https://doaj.org/api/search/articles"
+    semantic_scholar_base_url: str = "https://api.semanticscholar.org/graph/v1"
+    semantic_scholar_api_key_env: str = "SEMANTIC_SCHOLAR_API_KEY"
+    istex_base_url: str = "https://api.istex.fr"
+    datacite_base_url: str = "https://api.datacite.org"
+    openaire_base_url: str = "https://api.openaire.eu/graph/v3"
+    zenodo_base_url: str = "https://zenodo.org/api"
+    pubmed_base_url: str = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
+    pubmed_email: str = ""
+    pubag_base_url: str = "https://search.nal.usda.gov/primaws/rest/pub/pnxs"
+    opencitations_index_base_url: str = "https://api.opencitations.net/index/v2"
+    opencitations_meta_base_url: str = "https://api.opencitations.net/meta/v1"
+    opencitations_api_key_env: str = "OPENCITATIONS_API_TOKEN"
 
     @field_validator("sources")
     @classmethod
@@ -405,6 +449,9 @@ class BibliographicConfig(BaseModel):
         "openalex_api_key_env",
         "elsevier_api_key_env",
         "clarivate_api_key_env",
+        "core_api_key_env",
+        "semantic_scholar_api_key_env",
+        "opencitations_api_key_env",
     )
     @classmethod
     def validate_key_environment_name(cls, value: str) -> str:
@@ -419,6 +466,18 @@ class BibliographicConfig(BaseModel):
             "crossref_base_url": "https://api.crossref.org",
             "europe_pmc_base_url": ("https://www.ebi.ac.uk/europepmc/webservices/rest"),
             "elsevier_base_url": ("https://api.elsevier.com/content/search/scopus"),
+            "hal_base_url": "https://api.archives-ouvertes.fr/search",
+            "core_base_url": "https://api.core.ac.uk/v3",
+            "doaj_base_url": "https://doaj.org/api/search/articles",
+            "semantic_scholar_base_url": ("https://api.semanticscholar.org/graph/v1"),
+            "istex_base_url": "https://api.istex.fr",
+            "datacite_base_url": "https://api.datacite.org",
+            "openaire_base_url": "https://api.openaire.eu/graph/v3",
+            "zenodo_base_url": "https://zenodo.org/api",
+            "pubmed_base_url": "https://eutils.ncbi.nlm.nih.gov/entrez/eutils",
+            "pubag_base_url": "https://search.nal.usda.gov/primaws/rest/pub/pnxs",
+            "opencitations_index_base_url": "https://api.opencitations.net/index/v2",
+            "opencitations_meta_base_url": "https://api.opencitations.net/meta/v1",
         }
         for name, required in expected.items():
             if getattr(self, name).rstrip("/") != required:
@@ -741,16 +800,6 @@ class CorpusDistributionConfig(BaseModel):
         return self
 
 
-class SuggestionConfig(BaseModel):
-    """Conservative limits for explicit document suggestions."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    maximum_pdf_bytes: int = Field(default=25 * 1024 * 1024, ge=1024, le=100 * 1024 * 1024)
-    maximum_context_characters: int = Field(default=8000, ge=500, le=16000)
-    acceptance_threshold: float = Field(default=0.80, ge=0.5, le=1.0)
-
-
 class NotificationConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -779,11 +828,12 @@ class Settings(BaseModel):
     synthesis: SynthesisConfig = Field(default_factory=SynthesisConfig)
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
     distribution: CorpusDistributionConfig = Field(default_factory=CorpusDistributionConfig)
-    suggestions: SuggestionConfig = Field(default_factory=SuggestionConfig)
     notifications: NotificationConfig = Field(default_factory=NotificationConfig)
 
     @model_validator(mode="after")
     def enforce_local_models(self) -> Settings:
+        if self.ingestion.max_tokens > self.embeddings.max_sequence_length:
+            raise ValueError("ingestion.max_tokens cannot exceed embeddings.max_sequence_length")
         if not self.embeddings.local_files_only:
             raise ValueError("runtime embedding models must be local-only")
         if not self.reranker.local_files_only or self.reranker.trust_remote_code:
@@ -883,6 +933,13 @@ def load_settings(config_path: str | Path | None = None) -> Settings:
             if not isinstance(override, dict):
                 raise ValueError("config.user.yaml must contain a mapping")
             raw = _deep_merge(raw, override)
+
+    # Retired proposal settings may remain in an existing desktop YAML. They are
+    # discarded during the compatibility window instead of preventing startup.
+    raw.pop("suggestions", None)
+    ingestion = raw.get("ingestion")
+    if isinstance(ingestion, dict):
+        ingestion.pop("local_import_validation_status", None)
 
     settings = Settings.model_validate(raw)
     settings.paths = settings.paths.resolved(project_dir)

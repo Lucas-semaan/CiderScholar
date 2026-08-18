@@ -16,7 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from app.config import Settings
 from app.database.sqlite import Database
-from app.ingestion.chunker import ScientificChunker
+from app.ingestion.chunker import ScientificChunker, TokenBudget
 from app.ingestion.deduplication import (
     is_specific_title,
     normalize_title,
@@ -29,6 +29,7 @@ from app.ingestion.pdf_extractor import (
     PdfExtractor,
     PyMuPdfExtractor,
 )
+from app.ingestion.token_budget import LocalEmbeddingTokenBudget
 from app.memory import MemoryGuard
 
 LOGGER = logging.getLogger(__name__)
@@ -79,6 +80,7 @@ class IngestionPipeline:
         extractor: PdfExtractor | None = None,
         *,
         refresh_ocr_cache: bool = False,
+        token_budget: TokenBudget | None = None,
     ) -> None:
         self.settings = settings
         self.database = database
@@ -87,12 +89,22 @@ class IngestionPipeline:
             min_text_page_ratio=settings.ingestion.min_text_page_ratio,
         )
         self.refresh_ocr_cache = refresh_ocr_cache
-        self.chunker = ScientificChunker(
-            target_tokens=settings.ingestion.target_tokens,
-            max_tokens=settings.ingestion.max_tokens,
-            overlap_tokens=settings.ingestion.overlap_tokens,
-        )
+        self._token_budget = token_budget
+        self._chunker: ScientificChunker | None = None
         self.memory = MemoryGuard(settings.memory)
+
+    @property
+    def chunker(self) -> ScientificChunker:
+        if self._chunker is None:
+            self._chunker = ScientificChunker(
+                target_tokens=self.settings.ingestion.target_tokens,
+                max_tokens=self.settings.ingestion.max_tokens,
+                overlap_tokens=self.settings.ingestion.overlap_tokens,
+                token_budget=(
+                    self._token_budget or LocalEmbeddingTokenBudget.from_settings(self.settings)
+                ),
+            )
+        return self._chunker
 
     def _cache_path(self, sha256: str) -> Path:
         return self.settings.paths.extracted_dir / f"{sha256}.pages.json"
@@ -336,7 +348,7 @@ class IngestionPipeline:
                 "id": article_id,
                 "sha256": sha256,
                 "pdf_path": str(path),
-                "validation_status": self.settings.ingestion.local_import_validation_status,
+                "validation_status": "validated",
                 "source": catalog_metadata.source if catalog_metadata else "local",
             }
             self.database.save_article_and_chunks(

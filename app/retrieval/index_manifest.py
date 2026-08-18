@@ -21,7 +21,7 @@ from app.desktop.model_integrity import MODEL_MANIFEST, ModelIntegrityError
 from app.ingestion.embeddings import local_model_path, verify_local_embedding_model
 
 INDEX_MANIFEST_DIRECTORY = "index-generation"
-CHUNKER_CONTRACT_VERSION = 1
+CHUNKER_CONTRACT_VERSION = 2
 _COLLECTION_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$")
 
 

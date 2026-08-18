@@ -1,7 +1,7 @@
 # Comment travailler sur CiderScholar
 
 Statut : guide méthodologique accepté.
-Dernière consolidation : 10 août 2026.
+Dernière consolidation : 13 août 2026.
 
 Ce guide transforme les consignes méthodologiques dispersées dans les conversations CiderScholar en
 règles durables et vérifiables. Il complète `AGENTS.md`, le contrat rédactionnel du chatbot et les
@@ -81,6 +81,10 @@ resserrer les requêtes si la précision se dégrade.
   notices bibliographiques, abstracts, textes intégraux, chunks, preuves et états d’acquisition y
   sont consolidés ; une base applicative ou un ancien chemin de migration ne reçoit jamais une
   collection bibliographique scientifique parallèle.
+- Les nouveaux PDF, caches d'extraction et index du corpus sont écrits sous `data/common/`
+  (`pdf`, `extracted`, `qdrant` et `database`). Les anciens chemins restent lisibles uniquement
+  pendant une migration explicite, sauvegardée et additive : elle copie les fichiers vérifiés,
+  conserve les originaux et ne remplace jamais un fichier existant.
 - Normaliser et vérifier le DOI avant insertion. Comparer le DOI à l’ensemble du corpus actif, pas à
   une seule table ou un seul ancien chemin.
 - À DOI normalisé identique, conserver une seule entrée documentaire et privilégier le texte intégral.
@@ -124,6 +128,12 @@ uniquement les nouveaux articles ou les fragments en échec à reprendre. L’op
 comme réussie que si l’indexation correspondante est complète ; un échec conserve les données
 persistées et un chemin de reprise, sans transformer un doublon déjà indexé en nouveau document.
 
+Instruction utilisateur explicite et durable du 13 août 2026 : un document ajouté par les parcours
+d’import locaux est adopté définitivement dans le corpus, sans circuit séparé de proposition ni
+évaluation préalable de confiance. Les contrôles de format, de déduplication, d’extraction et
+d’indexation restent obligatoires ; un fichier en échec ou nécessitant un OCR demeure reprenable et
+n’est pas présenté comme ajouté tant que ces contrôles ne sont pas satisfaits.
+
 Un rapport d’import distingue toujours les fichiers effectivement ajoutés, déjà présents, à vérifier
 par OCR et en échec. Le nombre de fichiers sélectionnés ou copiés ne doit pas être présenté comme un
 nombre de nouveaux articles.
@@ -141,7 +151,33 @@ Une année future repérée automatiquement dans un fichier local n’est jamais
 publication sans métadonnée bibliographique validée. Elle est laissée vide ou envoyée en revue afin
 d’éviter de confondre un objectif, un numéro de page, un ISSN ou un autre identifiant avec une année.
 
-### 3.1 Enrichir les métadonnées du corpus existant
+### 3.1 Mener les campagnes Aureli authentifiées
+
+Instruction utilisateur explicite et durable du 12 août 2026 : pour les futures campagnes Aureli,
+reprendre le processus validé lors de la collecte `cider`.
+
+1. L’utilisateur ouvre lui-même sa session Aureli dans le navigateur ; ne jamais lui demander de
+   transmettre son mot de passe dans la conversation.
+2. Réutiliser la session uniquement pour la campagne autorisée. Si un jeton doit alimenter le client
+   local, le fournir par une variable d’environnement au seul processus de collecte ; ne jamais
+   l’afficher, l’écrire dans le dépôt, un point de reprise, une sauvegarde ou un rapport. Le supprimer
+   de l’environnement de campagne à la fin ou à l’expiration de la session.
+3. Interroger en priorité l’API Primo officielle d’Aureli, séquentiellement et avec temporisation.
+   Paginer avec des points de reprise et respecter les limites différentes des sessions invitées et
+   identifiées ; une connexion autorisée n’est pas un droit de contourner un autre contrôle d’accès.
+4. Faire repasser chaque notice par la déduplication DOI et le classement
+   `accepted/review/rejected`. Une recherche plein texte sur `cider` contient des homonymes, des
+   occurrences incidentes et des publications cliniques ou marketing qui ne rejoignent pas le RAG.
+5. Pour les seules notices admises, utiliser « Obtenir PDF » ou un lien fournisseur direct lorsque
+   la session donne légalement accès au document. Vérifier le type PDF réel, calculer SHA-256,
+   rapprocher le DOI et ingérer atomiquement comme `Full article`.
+6. Si le texte intégral n’est pas directement disponible, conserver l’abstract validé avec DOI au
+   niveau `Abstract only`. Ne jamais transformer une page HTML, un extrait tronqué ou une simple
+   notice en texte intégral.
+7. Le rapport final indique séparément candidats vus, doublons, décisions, PDF tentés, PDF validés,
+   `Full article`, `Abstract only`, erreurs et point exact de reprise.
+
+### 3.2 Enrichir les métadonnées du corpus existant
 
 Pour compléter DOI, auteurs, année, type et éditeur sans confondre publications et documents
 internes, exécuter d’abord l’enrichisseur sans `--apply`. Il charge automatiquement le dernier audit
@@ -169,7 +205,7 @@ Un poster, un diaporama ou un supplément local n’hérite jamais automatiqueme
 l’article parent sur la seule égalité du titre. Conserver le type de la manifestation locale et relier
 l’article parent séparément lorsque cette relation est établie.
 
-### 3.2 Découvrir des publications connexes à partir des DOI du corpus
+### 3.3 Découvrir des publications connexes à partir des DOI du corpus
 
 Les articles du corpus pertinents pour le sujet étudié et dotés d’un DOI validé peuvent servir de
 points de départ à une collecte bibliographique connexe. Interroger les API bibliographiques
@@ -190,6 +226,76 @@ réessais et erreurs, et séquencer les appels lorsque le fournisseur l’exige.
 la collecte par API documentée : elle n’autorise ni contournement de paywall ou de contrôle d’accès,
 ni extraction HTML non permise. L’acquisition éventuelle du texte intégral reste soumise aux règles
 de provenance, de licence et de niveau de contenu de la section 3.
+
+### 3.4 Étendre durablement tous les thèmes par plusieurs fournisseurs
+
+Instruction durable issue de la campagne multi-sources du 12 août 2026 : pour une expansion large,
+utiliser le processus reprenable décrit dans `docs/CORPUS_EXPANSION.md`. Couvrir les huit thèmes avec
+les familles focused, expanded, specialized, materials et microbiology ; séquencer les fournisseurs,
+faire tourner les familles page par page lorsqu'un budget fournisseur est partagé, conserver un
+checkpoint par couple source/famille et laisser la saturation utile, un quota documenté
+ou le timeout explicite décider de l’arrêt. Un petit plafond arbitraire ne remplace pas ces critères.
+
+La collecte intermédiaire diffère normalisation globale, reclassement et purge. L’indexation
+incrémentale des seuls abstracts acceptés peut tourner en parallèle avec le harvest SQLite via
+`scripts.run_incremental_abstract_indexer` : elle borne chaque passe à quelques lots, libère le verrou
+Qdrant entre les passes et ne marque `indexed` qu’un contenu dont le hash est toujours celui encodé.
+Une notice enrichie pendant l’encodage reste donc `pending` et est reprise au passage suivant. Il ne
+faut jamais lancer simultanément deux workers Qdrant ni une reconstruction `--recreate`; la
+commande est lancée comme compagnon de l’orchestrateur au début de chaque campagne d’enrichissement,
+avec le même timeout et un journal JSONL de campagne. La
+consolidation finale reste la vérification exhaustive qui refuse tout harvest actif. Elle vérifie obligatoirement la sauvegarde
+pré-campagne, refuse tout harvest encore actif, réapplique le filtre éditorial à tous les hits, place
+les abstracts automatiques sans DOI en revue, archive les rejets et vérifie l’égalité SQLite/Qdrant.
+Si un processus interrompu a laissé un run `running`, ne le clôturer qu’après vérification explicite
+de l’absence de writer et en nommant exactement tous les identifiants concernés ; conserver les hits,
+recalculer leurs compteurs et journaliser la raison au lieu de modifier directement la base.
+Une limite 403/429, une clé absente, un budget insuffisant et une vraie absence d’ajout sont consignés
+séparément et ne bloquent pas les autres fournisseurs.
+
+Instruction utilisateur explicite du 13 août 2026 : lorsqu'un couple `source × famille de tags` ne
+produit aucun nouvel abstract pertinent pendant deux rotations thématiques complètes, le marquer
+`closed_weekly` pendant sept jours. Cette fermeture opérationnelle est persistée entre campagnes et
+évite les requêtes trop fréquentes, mais ne ferme pas les autres familles de la même source. À
+l'échéance, autoriser une nouvelle rotation ; tout nouveau gain efface la fermeture. Ne jamais assimiler
+à une absence scientifique de gain une clé manquante, un quota, un 403/429 ou une erreur fournisseur.
+
+Instruction durable complémentaire du 13 août 2026 : une campagne « toutes sources » énumère et
+essaie les API de découverte configurées Crossref, Europe PMC, OpenAlex, Clarivate, Elsevier/Scopus,
+HAL, CORE, DOAJ, Semantic Scholar, ISTEX, DataCite, OpenAIRE, Zenodo, PubMed via les E-utilities
+officielles du NCBI et USDA PubAg via son endpoint Primo public. Tester d'abord le mode public
+documenté lorsqu'il existe ;
+une limite publique devient un état différé et non une fausse saturation. Unpaywall intervient au
+stade de résolution DOI/full-text, car il ne fournit pas de recherche thématique. Les clés API
+durables autorisées sont conservées uniquement dans le coffre DPAPI administrateur et hydratées dans
+le processus de campagne ; les jetons de session courts, cookies et valeurs d'authentification ne
+sont jamais consignés dans SQLite, YAML, checkpoints, rapports ou journaux.
+Respecter les limites documentées par endpoint : en particulier, une recherche Zenodo anonyme est
+bornée à 25 notices et à 30 requêtes par minute. Paginer sans trou à partir de la page logique du
+checkpoint et espacer les appels d'au moins 2,1 secondes. Un HTTP 400 systématique est un défaut de
+requête à diagnostiquer, jamais une preuve d'absence de publications.
+
+Pour ces campagnes, ajouter en parallèle une exploration OpenCitations des citations entrantes et
+références sortantes de DOI acceptés, équilibrée entre les huit thèmes. Cette phase reste en lecture
+seule, bornée en graines, arêtes, candidats et temps, et conserve DOI graine, relation, DOI candidat,
+fournisseur et date. Le titre OpenCitations ne sert qu’au préfiltrage : chaque candidat repasse ensuite
+par une résolution DOI exacte et le filtre éditorial avant insertion.
+
+Lorsqu'une clé d'API bibliographique devient disponible après le démarrage du writer SQLite, ne pas
+lancer un second writer et ne pas interrompre brutalement le premier. Conserver la clé dans le coffre
+DPAPI administrateur puis, si le fournisseur le permet, collecter dans un staging reprenable en lecture
+seule avec la même échéance. Importer ce staging seulement après l'arrêt vérifié du writer, avec la
+résolution d'identité, la déduplication DOI et le filtre éditorial ordinaires.
+
+Instruction utilisateur explicite du 13 août 2026 : les opérateurs des moteurs sans API ont autorisé
+une collecte HTML pour cette campagne et les campagnes futures menées selon ce processus. Conserver
+la preuve d'autorisation sous forme d'un identifiant non secret dans le checkpoint. Utiliser ces
+moteurs seulement pour découvrir URL, titre, extrait et DOI éventuel ; aucune affirmation ni aucun
+abstract du corpus ne repose directement sur un snippet. Avant insertion, confirmer le candidat par
+un DOI exact auprès d'une API bibliographique ou par une page institutionnelle attribuable, puis
+réappliquer le filtre éditorial. Temporiser et rendre la pagination reprenable. Un 403, 429, CAPTCHA,
+défi anti-bot ou résultat scientifiquement inutilisable est consigné comme limite ; ne pas le
+contourner, changer d'identité réseau ou déguiser le client.
 
 ## 4. Rechercher et classer les preuves pour une question
 

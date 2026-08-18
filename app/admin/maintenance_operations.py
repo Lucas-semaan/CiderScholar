@@ -12,7 +12,6 @@ from app.admin.corpus_backup import (
     create_maintenance_backup,
     rollback_maintenance_backup,
 )
-from app.admin.suggestion_ingest import import_shared_suggestions
 from app.config import Settings
 from app.corpora import CorpusScope, LocalProfile, settings_for_corpus
 from app.corpus_packages.builder import build_corpus_package
@@ -52,19 +51,6 @@ class ProductionMaintenanceOperations:
 
     def backup(self) -> MaintenanceBackup:
         return create_maintenance_backup(self.settings, self.maintenance_id)
-
-    def suggestions(self) -> MaintenanceOperationResult:
-        report = import_shared_suggestions(self.settings)
-        return MaintenanceOperationResult(
-            counters={
-                "suggestions_scanned": report.scanned,
-                "suggestions_imported": report.imported,
-                "suggestions_duplicates": report.duplicates,
-                "suggestions_rejected": report.rejected,
-                "suggestions_corrupt": report.corrupt,
-                "suggestion_errors": len(report.errors),
-            }
-        )
 
     def harvest(self) -> MaintenanceOperationResult:
         corpus_settings = settings_for_corpus(self.settings, CorpusScope.COMMON)

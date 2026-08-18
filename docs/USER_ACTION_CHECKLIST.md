@@ -34,8 +34,6 @@ Décision :
 
 - [ ] Saisir localement une nouvelle clé selon [`ARGO_KEY_SETUP.md`](ARGO_KEY_SETUP.md), puis
   exécuter [`ARGO_MANUAL_VALIDATION.md`](ARGO_MANUAL_VALIDATION.md).
-- [ ] Envoyer une seule suggestion publique non sensible selon
-  [`DOCUMENT_SUGGESTIONS.md`](DOCUMENT_SUGGESTIONS.md).
 - [ ] Répéter la démonstration avec une seule génération ARGO réelle selon
   [`DEMO_RUNBOOK.md`](DEMO_RUNBOOK.md).
 - [ ] Observer quatre échéances hebdomadaires réelles de maintenance.

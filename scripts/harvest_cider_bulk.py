@@ -49,6 +49,14 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("crossref", "europe_pmc", "openalex", "clarivate", "elsevier"),
         help="Optional provider subset; defaults to every configured provider",
     )
+    parser.add_argument(
+        "--defer-maintenance",
+        action="store_true",
+        help=(
+            "Defer global normalization, reclassification, rejected-record cleanup, "
+            "and vector maintenance until the final campaign pass"
+        ),
+    )
     parser.add_argument("--no-index", action="store_true")
     return parser
 
@@ -58,19 +66,28 @@ def main(argv: list[str] | None = None) -> int:
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
     settings = settings_for_corpus(load_settings(args.config), CorpusScope.COMMON)
+    # This command is itself an explicit, operator-initiated harvest.  The
+    # application-wide scheduler may remain disabled without preventing a
+    # deliberate local campaign.
+    settings.harvest.enabled = True
     database = Database(settings.paths.database_path)
     database.initialize()
     store = BibliographicHarvestStore(database)
 
-    abstractless_rejected_before = store.reject_abstractless_records()
-    cleanup_before = archive_and_purge_rejected_records(settings, database)
-    print(
-        f"abstractless_before={abstractless_rejected_before} "
-        f"cleanup_before=archived:{cleanup_before.archived_records} "
-        f"deleted:{cleanup_before.records_deleted} "
-        f"remaining:{cleanup_before.remaining_rejected_records}",
-        flush=True,
-    )
+    cleanup_before = None
+    abstractless_rejected_before = 0
+    if args.defer_maintenance:
+        print("maintenance_before=deferred", flush=True)
+    else:
+        abstractless_rejected_before = store.reject_abstractless_records()
+        cleanup_before = archive_and_purge_rejected_records(settings, database)
+        print(
+            f"abstractless_before={abstractless_rejected_before} "
+            f"cleanup_before=archived:{cleanup_before.archived_records} "
+            f"deleted:{cleanup_before.records_deleted} "
+            f"remaining:{cleanup_before.remaining_rejected_records}",
+            flush=True,
+        )
     bulk = CiderBulkHarvester(settings, database).run(
         target_new_accepted_abstracts=args.target,
         page_size=args.page_size,
@@ -81,17 +98,24 @@ def main(argv: list[str] | None = None) -> int:
         start_page=args.start_page,
         progress=lambda message: print(message, flush=True),
     )
-    normalized = store.normalize_existing_text()
-    reclassified = store.reclassify_existing()
-    abstractless_rejected_after = store.reject_abstractless_records()
-    cleanup_after = archive_and_purge_rejected_records(settings, database)
-    print(
-        f"abstractless_after={abstractless_rejected_after} "
-        f"cleanup_after=archived:{cleanup_after.archived_records} "
-        f"deleted:{cleanup_after.records_deleted} "
-        f"remaining:{cleanup_after.remaining_rejected_records}",
-        flush=True,
-    )
+    cleanup_after = None
+    normalized = 0
+    reclassified = 0
+    abstractless_rejected_after = 0
+    if args.defer_maintenance:
+        print("maintenance_after=deferred", flush=True)
+    else:
+        normalized = store.normalize_existing_text()
+        reclassified = store.reclassify_existing()
+        abstractless_rejected_after = store.reject_abstractless_records()
+        cleanup_after = archive_and_purge_rejected_records(settings, database)
+        print(
+            f"abstractless_after={abstractless_rejected_after} "
+            f"cleanup_after=archived:{cleanup_after.archived_records} "
+            f"deleted:{cleanup_after.records_deleted} "
+            f"remaining:{cleanup_after.remaining_rejected_records}",
+            flush=True,
+        )
 
     index_payload: dict[str, Any] | None = None
     if not args.no_index and store.pending_abstracts(limit=1):
@@ -108,8 +132,13 @@ def main(argv: list[str] | None = None) -> int:
         "generated_at": datetime.now(UTC).isoformat(),
         "query_set": args.query_set,
         "bulk": bulk.model_dump(mode="json"),
-        "cleanup_before": cleanup_before.model_dump(mode="json"),
-        "cleanup_after": cleanup_after.model_dump(mode="json"),
+        "maintenance_deferred": args.defer_maintenance,
+        "cleanup_before": (
+            cleanup_before.model_dump(mode="json") if cleanup_before is not None else None
+        ),
+        "cleanup_after": (
+            cleanup_after.model_dump(mode="json") if cleanup_after is not None else None
+        ),
         "abstractless_rejected_before": abstractless_rejected_before,
         "abstractless_rejected_after": abstractless_rejected_after,
         "normalized_record_count": normalized,

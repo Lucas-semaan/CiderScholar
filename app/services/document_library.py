@@ -396,12 +396,6 @@ def document_library_summary(database: Database) -> dict[str, Any]:
         document["themes"] = _document_themes(document, cidre_article_ids)
     full_texts = [document for document in documents if document["document_type"] == "full_text"]
     abstracts = [document for document in documents if document["document_type"] == "abstract_only"]
-    indexed = [
-        document
-        for document in documents
-        if document["embedding_status"] == "indexed"
-        or int(document.get("indexed_chunk_count") or 0) > 0
-    ]
     themes = sorted(
         {theme for document in documents for theme in document["themes"]} | {_CIDRE_THEME},
         key=_fold,
@@ -415,7 +409,6 @@ def document_library_summary(database: Database) -> dict[str, Any]:
             "documents": len(documents),
             "full_texts": len(full_texts),
             "abstract_only": len(abstracts),
-            "searchable": len(indexed),
         },
         "filters": {"themes": themes, "sources": sources},
     }

@@ -40,14 +40,11 @@ CiderScholar/
 |   `-- corpus-v1-<sha256>/
 |       |-- manifest.json
 |       `-- corpus.zip
-|-- suggestions/
-|   `-- inbox/
 `-- archive/
 ```
 
 - `installers` distribue les installateurs signés ;
 - `corpus` distribue les versions immuables et le pointeur `latest` ;
-- `suggestions/inbox` reçoit uniquement les paquets de suggestion confirmés ;
 - `archive` conserve les versions retirées de la vue courante.
 
 Ce dossier ne contient jamais de clé ARGO, identifiant éditeur, secret DPAPI, conversation,

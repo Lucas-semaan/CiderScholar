@@ -8,6 +8,7 @@ from PIL import Image
 
 from app.corpora import CorpusScope, corpus_paths, settings_for_corpus
 from app.database.sqlite import Database
+from app.ingestion.chunker import RegexTokenBudget
 from app.ingestion.pipeline import IngestionPipeline
 from app.ingestion.visual_contracts import (
     ScientificFigureAnalysisRequest,
@@ -81,6 +82,7 @@ def _seed_figure(settings) -> tuple[ChatEvidenceRecord, Database]:
     report = IngestionPipeline(
         settings_for_corpus(settings, CorpusScope.COMMON),
         database,
+        token_budget=RegexTokenBudget(),
     ).ingest_file(pdf_path)
     assert report.status == "chunks_ready"
     assert report.article_id is not None

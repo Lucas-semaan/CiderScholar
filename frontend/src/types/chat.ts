@@ -18,6 +18,7 @@ export type JobStep =
   | "validation"
   | "persistence"
   | "backup"
+  // Compatibility with maintenance jobs persisted before the proposal workflow was retired.
   | "suggestions"
   | "harvest"
   | "index"

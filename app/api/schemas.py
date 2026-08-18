@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Literal
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -12,11 +12,6 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from app.chat_effort import AnswerEffort, migrate_legacy_answer_effort
 from app.jobs.contracts import JobPublic, JobState, JobStep, JobType
 from app.memory_profiles import MemoryProfileName
-from app.suggestions.models import (
-    DoiSuggestionSource,
-    ManualSuggestionSource,
-    UrlSuggestionSource,
-)
 
 
 class ApiModel(BaseModel):
@@ -238,14 +233,6 @@ class SynchronizedRootRequest(ApiModel):
 
 class MemoryProfileRequest(ApiModel):
     profile: MemoryProfileName
-
-
-class SuggestionReferenceRequest(ApiModel):
-    source: Annotated[
-        DoiSuggestionSource | UrlSuggestionSource | ManualSuggestionSource,
-        Field(discriminator="kind"),
-    ]
-    scientific_comment: str | None = Field(default=None, max_length=1500)
 
 
 class PublisherCollectionRequest(ApiModel):

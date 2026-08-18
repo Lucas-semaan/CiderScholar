@@ -1,6 +1,6 @@
 import { useCallback, useMemo, useState } from "react";
 
-import { BookOpenText, Database, FileText, Search } from "lucide-react";
+import { BookOpenText, Database, FileText } from "lucide-react";
 import { useSearchParams } from "react-router-dom";
 
 import { Dialog } from "@/components/ui/Dialog";
@@ -17,7 +17,6 @@ import {
 } from "@/features/library/RecordDetail";
 import { initialLibraryFilters } from "@/features/library/libraryPresentation";
 import { nextReviewRecordId } from "@/features/library/reviewQueue";
-import { SuggestionForm } from "@/features/library/SuggestionForm";
 import {
   librarySplitViewMediaQuery,
   shouldOpenLibraryDetailDialog,
@@ -26,7 +25,7 @@ import { useMediaQuery } from "@/hooks/useMediaQuery";
 import { useRemoteData } from "@/hooks/useRemoteData";
 import { api, type LibraryRecordFilters } from "@/lib/api";
 import { formatNumber } from "@/lib/cn";
-import { appDestinations, librarySectionFromQuery } from "@/lib/navigation";
+import { librarySectionFromQuery } from "@/lib/navigation";
 
 const librarySections = [
   { id: "records" as const, label: "Tous les documents", icon: BookOpenText },
@@ -132,7 +131,6 @@ function BibliographicLibrary() {
         eyebrow="Corpus scientifique unifié"
         title="Base documentaire"
       />
-      <SuggestionForm />
       {reviewNotice && (
         <div
           className="rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm font-semibold text-emerald-800"
@@ -141,7 +139,7 @@ function BibliographicLibrary() {
           {reviewNotice}
         </div>
       )}
-      <section className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+      <section className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
         <MetricCard
           icon={Database}
           label="Documents"
@@ -160,15 +158,6 @@ function BibliographicLibrary() {
           label="Abstract only"
           note="Abstract accepté sans PDF disponible"
           value={formatNumber(statistics.abstract_only)}
-        />
-        <MetricCard
-          actionLabel="Interroger l’assistant scientifique sur cette base"
-          icon={Search}
-          label="Recherchables"
-          note="Contenus présents dans l’index local"
-          tone="cider"
-          to={appDestinations.scientificAssistant}
-          value={formatNumber(statistics.searchable)}
         />
       </section>
       <LibraryFilters

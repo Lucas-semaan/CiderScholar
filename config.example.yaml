@@ -10,11 +10,11 @@ app:
 
 paths:
   data_dir: data
-  pdf_dir: data/pdf
-  extracted_dir: data/extracted
-  qdrant_dir: data/qdrant
+  pdf_dir: data/common/pdf
+  extracted_dir: data/common/extracted
+  qdrant_dir: data/common/qdrant
   models_dir: data/models
-  database_path: data/database/science_rag.sqlite3
+  database_path: data/common/database/science_rag.sqlite3
   cache_dir: data/cache
   exports_dir: data/exports
   # La clé ARGO chiffrée reste sous data/secrets, jamais dans exports ou SharePoint.
@@ -36,7 +36,6 @@ ingestion:
   min_page_text_characters: 25
   min_text_page_ratio: 0.15
   metadata_scan_pages: 3
-  local_import_validation_status: validated
 
 embeddings:
   model_name: intfloat/multilingual-e5-base
@@ -110,6 +109,16 @@ bibliographic:
     - openalex
     - clarivate
     - elsevier
+    - hal
+    - core
+    - doaj
+    - semantic_scholar
+    - istex
+    - datacite
+    - openaire
+    - zenodo
+    - pubmed
+    - pubag
   per_source_limit: 10
   timeout_seconds: 20
   max_retries: 2
@@ -126,6 +135,22 @@ bibliographic:
   clarivate_api_mode: starter
   clarivate_database: WOS
   clarivate_expanded_option_view: SR
+  hal_base_url: https://api.archives-ouvertes.fr/search
+  core_base_url: https://api.core.ac.uk/v3
+  core_api_key_env: CORE_API_KEY
+  doaj_base_url: https://doaj.org/api/search/articles
+  semantic_scholar_base_url: https://api.semanticscholar.org/graph/v1
+  semantic_scholar_api_key_env: SEMANTIC_SCHOLAR_API_KEY
+  istex_base_url: https://api.istex.fr
+  datacite_base_url: https://api.datacite.org
+  openaire_base_url: https://api.openaire.eu/graph/v3
+  zenodo_base_url: https://zenodo.org/api
+  pubmed_base_url: https://eutils.ncbi.nlm.nih.gov/entrez/eutils
+  pubmed_email: ""
+  pubag_base_url: https://search.nal.usda.gov/primaws/rest/pub/pnxs
+  opencitations_index_base_url: https://api.opencitations.net/index/v2
+  opencitations_meta_base_url: https://api.opencitations.net/meta/v1
+  opencitations_api_key_env: OPENCITATIONS_API_TOKEN
 
 harvest:
   enabled: false

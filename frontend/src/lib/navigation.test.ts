@@ -18,14 +18,16 @@ describe("navigation destinations", () => {
   it("keeps PDF documents inside the documentary database", () => {
     expect(librarySectionFromQuery("pdf")).toBe("pdf");
     expect(librarySectionFromQuery("unknown")).toBe("records");
-    expect(appDestinations.corpusActivity).toBe("/bibliotheque?section=pdf&tab=activity");
+    expect(appDestinations.corpusActivity).toBe(
+      "/bibliotheque?section=pdf&tab=activity&filter=attention",
+    );
   });
 
   it("routes corpus cards to the common corpus", () => {
     expect(corpusDestinations()).toEqual({
       articles: "/bibliotheque?section=pdf&tab=articles#articles",
       assistant: "/",
-      activity: "/bibliotheque?section=pdf&tab=activity",
+      activity: "/bibliotheque?section=pdf&tab=activity&filter=attention",
     });
   });
 

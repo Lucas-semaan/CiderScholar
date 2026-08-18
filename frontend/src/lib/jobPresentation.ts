@@ -23,7 +23,7 @@ export const jobStepLabels: Record<JobStep, string> = {
   validation: "Validation scientifique",
   persistence: "Enregistrement",
   backup: "Sauvegarde du corpus",
-  suggestions: "Import des suggestions",
+  suggestions: "Étape historique retirée",
   harvest: "Collecte bibliographique",
   index: "Indexation et contrôles",
   publish: "Publication du corpus",

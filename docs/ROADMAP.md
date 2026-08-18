@@ -18,8 +18,6 @@ personnels de l’équipe.
 - un RAG commun identique, préparé sur la machine administrateur et publié sur SharePoint ;
 - une copie de sécurité du corpus principal sur un drive protégé ;
 - des documents privés locaux séparés du corpus commun ;
-- des suggestions acceptant DOI, URL, PDF, référence manuelle et commentaire ;
-- une évaluation de pertinence ARGO immédiate, sans écran de modération ni suivi de statut ;
 - les clés bibliographiques dédiées à l’outil restent sur la machine administrateur ;
 - collecte hebdomadaire proposée au premier lancement administrateur après l’échéance ;
 - démonstration en présentiel depuis le seul poste administrateur.
@@ -65,7 +63,7 @@ implémentation ou une correction.
 
 | Phase | Vous / équipe | Code |
 |---|---|---|
-| Distribution et tests réels | `KEY-030`, `PKG-035`, `SUG-035`, `ADM-030`, `INS-024`, `INS-025`, `INS-029`, `INS-032`, `INS-033`, `INS-035` | Corriger uniquement les défauts que ces essais font apparaître. |
+| Distribution et tests réels | `KEY-030`, `PKG-035`, `ADM-030`, `INS-024`, `INS-025`, `INS-029`, `INS-032`, `INS-033`, `INS-035` | Corriger uniquement les défauts que ces essais font apparaître. |
 | Démonstration et pilote | `DEM-015`, `ROL-001` à `ROL-005`, `ROL-008` à `ROL-010` | `DEM-017`, `DEM-018`, `ROL-007`, après réception des rapports réels. |
 | CiderQA | `EVL-005` à `EVL-010` : constituer et faire valider le jeu réel | Exécuter les outils prêts d’`EVL-016` et `EVL-018`, puis corriger uniquement les défauts observés. |
 | Deep Research | Fournir les observations CiderQA pour `DRS-010`, le jeu complet pour `DRS-024`/`DRS-025` et un poste 8 Go pour `DRS-026` | Les gates et le mode inactif sont prêts ; exécuter les commandes puis corriger seulement les échecs réels. |
@@ -88,10 +86,9 @@ implémentation ou une correction.
    (`PKG-035`, `INS-029`, `INS-032`, `INS-033`, `INS-035`) :
    un profil Windows temporaire distinct, un poste 8 Go, un poste 16 Go et une personne indépendante.
    Pour chaque essai, conserver version, hash, RAM, résultat et défauts, sans donnée personnelle.
-4. **Exécuter les trois contrôles externes bornés** :
-   saisir localement une nouvelle clé sans jamais la transmettre (`KEY-030`), lancer une seule
-   suggestion publique/non sensible (`SUG-035`) et répéter la démonstration avec une seule génération
-   ARGO réelle (`DEM-015`).
+4. **Exécuter les deux contrôles externes bornés** :
+   saisir localement une nouvelle clé sans jamais la transmettre (`KEY-030`) et répéter la
+   démonstration avec une seule génération ARGO réelle (`DEM-015`).
 5. **Observer la maintenance**
    (`ADM-030`) :
    consigner quatre échéances hebdomadaires manuelles successives ; quatre exécutions rapprochées ou
@@ -153,13 +150,13 @@ lancement.
 Le corpus commun est un paquet versionné et non modifiable sur les postes utilisateurs. Les documents
 privés utilisent un stockage séparé. La recherche fusionne les deux espaces en conservant leur origine.
 
-SharePoint sert de canal de distribution pour l’installateur, les versions du corpus et les suggestions.
+SharePoint sert de canal de distribution pour l’installateur et les versions du corpus.
 La première version s’appuie sur un dossier SharePoint synchronisé localement par OneDrive. Elle
 n’intègre pas Microsoft Graph ni une nouvelle authentification Microsoft.
 
 La machine administrateur possède un profil local explicite. Elle seule collecte les sources
-bibliographiques, consomme les clés bibliographiques de l’outil, importe les suggestions retenues,
-construit une nouvelle version du corpus et la publie sur SharePoint.
+bibliographiques, consomme les clés bibliographiques de l’outil, construit une nouvelle version du
+corpus et la publie sur SharePoint.
 
 ## Règles pour le travail multi-agent
 
@@ -210,8 +207,7 @@ Réalisation : changement effectué dans les fichiers concernés et validé par 
 | M3 | Chats durables en arrière-plan | M1, M2 |
 | M4 | Corpus commun et documents privés séparés | M0 |
 | M5 | Paquets RAG et mises à jour SharePoint | M4 |
-| M6 | Suggestions automatiques via SharePoint | M1, M2, M5 |
-| M7 | Maintenance hebdomadaire administrateur | M5, M6 |
+| M7 | Maintenance hebdomadaire administrateur | M5 |
 | M8 | Installation Windows sans terminal | M2, M3, M5 |
 | M9 | Démonstration puis pilote équipe | M7, M8 |
 | M10 | Validité scientifique mesurée par CiderQA | M3, M4, M9 |
@@ -219,7 +215,7 @@ Réalisation : changement effectué dans les fichiers concernés et validé par 
 | M12 | Hypothèses et données expérimentales avec humain dans la boucle | M11 |
 
 Les lots `FMT-*`, `KEY-*` et `COR-*` peuvent commencer en parallèle. `JOB-*` peut avancer avec des
-clients ARGO simulés. `PKG-*` et `SUG-*` attendent la stabilisation du format de paquet. Les tests de
+clients ARGO simulés. `PKG-*` attend la stabilisation du format de paquet. Les tests de
 démonstration peuvent être préparés dès que les contrats API sont figés.
 Les tâches `EVL-*` précèdent toute promotion d’un nouveau pipeline scientifique. `DRS-*` réunit les
 briques full-text existantes derrière le chat durable. `DSC-*` ne commence qu’après validation du
@@ -242,7 +238,7 @@ mode Deep Research sur CiderQA et ne rend jamais l’exécution expérimentale a
 - [x] `ARC-006` Utiliser une clé ARGO personnelle par poste et par utilisateur Windows.
   Fini lorsque : le tutoriel ne demande ni `.env` ni partage de clé.
 - [x] `ARC-007` Utiliser SharePoint comme canal de distribution protégé.
-  Fini lorsque : installateur, corpus et suggestions possèdent des emplacements distincts.
+  Fini lorsque : installateur et corpus possèdent des emplacements distincts.
 - [x] `ARC-008` Faire de la machine administrateur la source d’autorité éditoriale.
   Fini lorsque : seule cette machine peut publier une version du corpus commun.
 - [x] `ARC-009` Conserver une sauvegarde du corpus principal sur un drive protégé.
@@ -782,9 +778,6 @@ mode Deep Research sur CiderQA et ne rend jamais l’exécution expérimentale a
 - [x] `COR-014` Conserver l’origine dans les citations et exports.
   Réalisation : la portée fait partie de chaque entrée bibliographique, préfixe les citations et références applicatives et est exportée en JSON ainsi qu'en champs BibTeX lisibles ; un test privé interdit toute mention de corpus commun.
   Dépendances : `COR-013`. Fini lorsque : une source privée n’est jamais présentée comme commune.
-- [x] `COR-015` Empêcher une suggestion implicite à partir d’un document privé.
-  Réalisation : une politique centrale distingue automatisme et action utilisateur explicite ; toute tentative automatique visant une source privée lève une erreur de confidentialité testée, alors qu'une confirmation explicite reste autorisée.
-  Dépendances : `COR-002`. Fini lorsque : seule une action explicite peut proposer le document.
 - [x] `COR-016` Ajouter l’import privé depuis l’interface.
   Réalisation : l'interface propose un espace `Documents privés` avec dépôt de PDF et analyse de dossier ; l'API dédiée applique les workflows existants à des paramètres dont PDF, cache d'extraction, SQLite et Qdrant pointent exclusivement vers `data/private`.
   Dépendances : `COR-003`, `COR-007`. Fini lorsque : le document n’atteint pas le stockage commun.
@@ -829,7 +822,7 @@ mode Deep Research sur CiderQA et ne rend jamais l’exécution expérimentale a
   Réalisation : le test applique réellement le profil 8 Go, vérifie un lot d'embeddings de 2 sur les deux portées et interdit l'ouverture simultanée des lecteurs commun et privé pendant la recherche fusionnée.
   Dépendances : `COR-026`. Fini lorsque : les composants lourds restent séquentiels.
 - [x] `COR-030` Documenter clairement ce qui est partagé et ce qui reste privé.
-  Réalisation : le guide d'isolation contient un tableau utilisateur comparant lecture, modification, chemins, mises à jour, sauvegarde, suggestions et étiquettes ; le README renvoie vers ce guide et les commandes privées vérifiées.
+  Réalisation : le guide d'isolation contient un tableau utilisateur comparant lecture, modification, chemins, mises à jour, sauvegarde et étiquettes ; le README renvoie vers ce guide et les commandes privées vérifiées.
   Dépendances : `COR-013` à `COR-025`. Fini lorsque : le guide utilisateur contient un tableau simple.
 
 ## M5 — paquet RAG commun et mise à jour SharePoint
@@ -867,8 +860,8 @@ mode Deep Research sur CiderQA et ne rend jamais l’exécution expérimentale a
 - [x] `PKG-011` Tester la construction deux fois à corpus identique.
   Réalisation : le même corpus est construit dans deux destinations et à deux dates différentes ; identifiant, liste/hashes d'artefacts et hash du ZIP restent identiques, seul l'horodatage éditorial varie.
   Dépendances : `PKG-010`. Fini lorsque : le contenu logique et les hashes sont déterministes.
-- [x] `PKG-012` Définir les dossiers SharePoint `installers`, `corpus`, `suggestions/inbox`, `archive`.
-  Réalisation : un layout typé crée uniquement ces quatre emplacements (avec le parent `suggestions`) et la documentation interdit clés, identifiants, conversations, privé, configuration et caches dans l'arborescence synchronisée.
+- [x] `PKG-012` Définir les dossiers SharePoint `installers`, `corpus` et `archive`.
+  Réalisation : un layout typé crée uniquement ces trois emplacements et la documentation interdit clés, identifiants, conversations, privé, configuration et caches dans l'arborescence synchronisée.
   Dépendances : `ARC-007`. Fini lorsque : aucun secret n’est placé dans ces dossiers.
 - [x] `PKG-013` Utiliser un chemin local synchronisé OneDrive/SharePoint dans la configuration.
   Réalisation : la section `distribution` ne contient qu'un chemin local synchronisé résolu depuis le fichier de configuration, un nom attendu et une cadence ; aucun champ Graph, jeton ou identifiant Microsoft n'existe.
@@ -946,149 +939,6 @@ mode Deep Research sur CiderQA et ne rend jamais l’exécution expérimentale a
   Ordonnancement : différé jusqu'à disponibilité d'un second profil Windows et d'une bibliothèque
   SharePoint réellement synchronisée ; les scénarios locaux automatisés restent validés.
 
-## M6 — suggestions documentaires et évaluation immédiate
-
-- [x] `SUG-001` Définir le schéma d’une suggestion avec UUID et version.
-  Dépendances : `PKG-012`. Fini lorsque : champs inconnus refusés.
-  Réalisation : `SuggestionDraft` porte UUID, version littérale et date dans un modèle Pydantic
-  `extra=forbid` ; le test refuse tout champ distant inconnu.
-- [x] `SUG-002` Ajouter les variantes DOI, URL, PDF et référence manuelle.
-  Dépendances : `SUG-001`. Fini lorsque : chaque variante a ses champs requis.
-  Réalisation : une union discriminée stricte définit quatre sources aux champs requis propres ; DOI
-  et URL sont normalisés par leurs validateurs, le PDF ne conserve qu'un nom interne.
-- [x] `SUG-003` Ajouter un commentaire scientifique facultatif borné.
-  Dépendances : `SUG-001`. Fini lorsque : il ne devient jamais une instruction système.
-  Réalisation : le commentaire est nettoyé et borné à 1 500 caractères, puis placé uniquement dans
-  l'enveloppe JSON explicitement déclarée non fiable du message utilisateur ARGO.
-- [x] `SUG-004` Normaliser et valider le DOI avant toute autre opération.
-  Dépendances : `SUG-002`. Fini lorsque : DOI invalide est refusé localement.
-  Réalisation : préfixes DOI connus, casse et ponctuation finale sont normalisés, puis une expression
-  complète refuse localement toute valeur invalide avant le workflow.
-- [x] `SUG-005` Valider URL HTTPS sans identifiants ni hôte local.
-  Dépendances : `SUG-002`. Fini lorsque : SSRF et schémas dangereux sont refusés.
-  Réalisation : le parseur impose HTTPS/443, interdit identifiants, localhost, `.local` et adresses IP
-  non publiques ; les tests couvrent loopback et métadonnées link-local sans appel réseau.
-- [x] `SUG-006` Ne pas télécharger automatiquement une URL sur le poste utilisateur.
-  Dépendances : `SUG-005`. Fini lorsque : l’URL reste une référence pour le traitement administrateur.
-  Réalisation : le workflow URL ne possède aucun client HTTP et transforme seulement titre, abstract
-  facultatif et référence HTTPS validée en contexte local.
-- [x] `SUG-007` Valider extension, signature PDF, taille et hash.
-  Dépendances : `SUG-002`. Fini lorsque : un faux PDF est refusé.
-  Réalisation : extension `.pdf`, en-tête `%PDF-`, taille configurable et SHA-256 sont contrôlés avant
-  extraction ; faux PDF, dépassement et hash modifié sont refusés.
-- [x] `SUG-008` Nettoyer le nom de fichier et générer un nom interne sûr.
-  Dépendances : `SUG-007`. Fini lorsque : aucun chemin utilisateur n’est conservé.
-  Réalisation : le nom original n'entre dans aucun modèle ni paquet ; un nom interne UUID conforme à
-  une expression fermée est généré avant toute écriture.
-- [x] `SUG-009` Extraire localement titre, DOI et abstract candidat si disponibles.
-  Dépendances : `SUG-004`, `SUG-007`. Fini lorsque : le PDF complet n’est pas envoyé à ARGO.
-  Réalisation : PyMuPDF et l'extracteur conservateur existant produisent localement titre, DOI,
-  abstract candidat et extrait textuel ; aucune donnée binaire n'est retournée.
-- [x] `SUG-010` Définir le contexte maximal envoyé à ARGO pour pertinence.
-  Dépendances : `SUG-009`. Fini lorsque : titre, métadonnées et texte borné suffisent.
-  Réalisation : le contexte ARGO est limité à 8 000 caractères configurables, avec titre 500 et
-  abstract 4 000 caractères, et le paquet transmis supprime même l'extrait de travail.
-- [x] `SUG-011` Neutraliser les instructions présentes dans document ou commentaire.
-  Dépendances : `SUG-003`, `SUG-010`. Fini lorsque : le prompt les traite comme données non fiables.
-  Réalisation : système et données sont séparés ; commentaire et texte sont délimités comme
-  `DONNÉES_NON_FIABLES` et le test d'injection exige qu'ils n'apparaissent jamais dans le système.
-- [x] `SUG-012` Définir un résultat ARGO structuré : pertinent, motif, thème et incertitude.
-  Dépendances : `FMT-014` à `FMT-020`. Fini lorsque : la sortie est Pydantic stricte.
-  Réalisation : `SuggestionArgoDecision` refuse les champs inconnus et borne pertinence, motif, thème,
-  incertitude et confiance ; ARGO reçoit son JSON Schema strict.
-- [x] `SUG-013` Interdire à ARGO d’inventer DOI ou métadonnées.
-  Dépendances : `SUG-012`. Fini lorsque : toute valeur vient de l’entrée validée.
-  Réalisation : la décision ARGO ne contient aucun DOI ni métadonnée ; un test refuse explicitement
-  un champ DOI inventé dans la sortie, les valeurs publiées viennent du contexte local.
-- [x] `SUG-014` Ajouter un seuil d’acceptation configurable et conservateur.
-  Dépendances : `SUG-012`. Fini lorsque : incertitude forte n’est pas automatiquement acceptée.
-  Réalisation : le seuil de confiance 0,80 est configurable ; pertinence fausse, score inférieur ou
-  incertitude forte empêchent le paquet, y compris avec une confiance élevée.
-- [x] `SUG-015` Appliquer les quotas ARGO personnels à cette évaluation.
-  Dépendances : `KEY-018` à `KEY-024`, `SUG-012`. Fini lorsque : suggestion et chat partagent le registre.
-  Réalisation : l'évaluation utilise `ArgoClient` sans registre alternatif ; celui-ci réserve donc la
-  requête dans la même base SQLite et la même politique de quota que chat et synthèse.
-- [x] `SUG-016` Afficher immédiatement acceptée, non retenue ou à réessayer.
-  Dépendances : `SUG-012` à `SUG-015`. Fini lorsque : aucun écran de suivi n’est nécessaire.
-  Réalisation : l'API renvoie immédiatement `accepted`, `not_retained` ou `retry`, avec message,
-  décision publique éventuelle et action Paramètres/réessai, sans statut distant.
-- [x] `SUG-017` Définir le paquet de suggestion sans clé ni données locales inutiles.
-  Dépendances : `SUG-001` à `SUG-016`. Fini lorsque : JSON, PDF éventuel et hashes sont suffisants.
-  Réalisation : `suggestion.json` strict contient source validée, contexte minimal sans extrait,
-  décision et artefact PDF éventuel hashé ; aucune clé, chemin original ou donnée de conversation.
-- [x] `SUG-018` Écrire le paquet dans un dossier temporaire local.
-  Dépendances : `SUG-017`. Fini lorsque : une interruption ne publie rien.
-  Réalisation : le paquet est finalisé sous `.tmp-<UUID>`, hashé, puis renommé atomiquement dans
-  l'outbox ; un temporaire interrompu n'est jamais transmis.
-- [x] `SUG-019` Vérifier que le PDF proposé est transmissible selon la confirmation utilisateur.
-  Dépendances : `SUG-007`. Fini lorsque : une case explicite est requise avant copie.
-  Réalisation : la route PDF exige littéralement la confirmation vraie avant lecture métier, et le
-  service refuse encore toute invocation sans consentement explicite.
-- [x] `SUG-020` Déplacer atomiquement le paquet vers `suggestions/inbox` SharePoint.
-  Dépendances : `PKG-012`, `SUG-018`, `SUG-019`. Fini lorsque : l’administrateur ne voit pas de paquet partiel.
-  Réalisation : la copie complète est hashée dans un répertoire `.s-*`, puis renommée vers l'UUID
-  seulement après vérification ; une collision différente est refusée.
-- [x] `SUG-021` Conserver une copie locale minimale du reçu sans statut distant.
-  Dépendances : `SUG-020`. Fini lorsque : seul ID, date et hash sont conservés.
-  Réalisation : après transmission, l'outbox est supprimée et les reçus ne contiennent exactement que
-  UUID, date et hash de paquet ; leur nom opaque sert d'index local.
-- [x] `SUG-022` Refuser un nouveau dépôt local identique par hash ou DOI.
-  Dépendances : `SUG-004`, `SUG-007`, `SUG-021`. Fini lorsque : un double clic ne duplique pas.
-  Réalisation : les clés DOI et hash PDF sont hachées localement pour détecter reçus et outbox avant
-  ARGO ; un test de double dépôt exige un unique appel évaluateur.
-- [x] `SUG-023` Créer le formulaire unique de suggestion dans la Base documentaire.
-  Dépendances : `SUG-001` à `SUG-016`. Fini lorsque : les quatre variantes sont accessibles.
-  Réalisation : une seule carte dans Base documentaire sélectionne DOI, URL, PDF ou référence
-  manuelle, partage commentaire/résultat immédiat et appelle exclusivement le client API typé.
-- [x] `SUG-024` Ajouter glisser-déposer PDF avec validation avant ARGO.
-  Dépendances : `SUG-007`, `SUG-023`. Fini lorsque : erreur de type est immédiate.
-  Réalisation : la zone clavier/cliquable accepte aussi le drop, contrôle extension, taille et cinq
-  octets de signature dans le navigateur ; trois tests frontend couvrent refus et acceptation.
-- [x] `SUG-025` Ajouter l’explication qu’une suggestion acceptée n’est pas encore dans le RAG commun.
-  Dépendances : `SUG-016`. Fini lorsque : l’utilisateur comprend le délai hebdomadaire.
-  Réalisation : le formulaire et le message de succès indiquent explicitement l'examen administrateur
-  hebdomadaire et l'absence d'intégration immédiate au RAG.
-- [x] `SUG-026` Ne pas créer de page de liste ou de suivi des suggestions.
-  Dépendances : `SUG-023`. Fini lorsque : seules soumission et confirmation existent.
-  Réalisation : seules deux routes POST de soumission existent ; GET `/api/suggestions` retourne 404
-  et l'interface ne comporte ni historique, ni poll, ni statut distant.
-- [x] `SUG-027` Tester suggestion DOI acceptée avec ARGO simulé.
-  Dépendances : `SUG-004`, `SUG-012`, `SUG-020`. Fini lorsque : le paquet est complet.
-  Réalisation : un évaluateur simulé accepte le DOI ; le test vérifie paquet JSON atomique, absence de
-  clé, outbox vidée et reçu minimal.
-- [x] `SUG-028` Tester URL dangereuse rejetée avant ARGO.
-  Dépendances : `SUG-005`. Fini lorsque : aucun réseau n’est contacté.
-  Réalisation : URL loopback rejetée par le modèle FastAPI avant le service ; un espion exige zéro
-  appel évaluateur, donc zéro réseau.
-- [x] `SUG-029` Tester faux PDF rejeté avant ARGO.
-  Dépendances : `SUG-007`. Fini lorsque : aucun fichier n’atteint SharePoint.
-  Réalisation : faux contenu PDF et consentement faux retournent 422 avant extraction/ARGO ; les tests
-  de workflow n'observent aucun paquet SharePoint.
-- [x] `SUG-030` Tester prompt injection dans commentaire et PDF.
-  Dépendances : `SUG-011`. Fini lorsque : elle ne change pas le schéma de décision.
-  Réalisation : une injection est confinée au message utilisateur délimité, absente du système, et un
-  champ DOI ajouté à la décision ARGO est refusé par Pydantic.
-- [x] `SUG-031` Tester SharePoint indisponible après acceptation ARGO.
-  Dépendances : `SUG-018`, `SUG-020`. Fini lorsque : le paquet local peut être renvoyé plus tard.
-  Réalisation : une acceptation simulée avec dossier absent renvoie `retry` et conserve exactement un
-  paquet local complet, ensuite transmissible lorsque le dossier réapparaît.
-- [x] `SUG-032` Ajouter reprise des paquets locaux non transmis au prochain lancement.
-  Dépendances : `SUG-031`. Fini lorsque : aucun double dépôt n’est créé.
-  Réalisation : le lifespan réessaie les outbox complètes ; la transmission idempotente crée un seul
-  dossier distant puis le second passage retourne zéro.
-- [x] `SUG-033` Tester absence de clé ARGO pendant une suggestion.
-  Dépendances : `KEY-007`, `SUG-012`. Fini lorsque : l’utilisateur est dirigé vers Paramètres.
-  Réalisation : sans clé DPAPI, l'API renvoie immédiatement `retry`, action `settings` et un message
-  contenant Paramètres ; l'UI affiche un lien direct vers cette page.
-- [x] `SUG-034` Documenter droits, transmission et absence de suivi.
-  Dépendances : `SUG-019`, `SUG-025`, `SUG-026`. Fini lorsque : le consentement est clair.
-  Réalisation : le guide utilisateur détaille résultats immédiats, contexte ARGO, paquet SharePoint,
-  droits de copie PDF, reçu minimal, absence de suivi et conduite à tenir par type d'indisponibilité.
-- [ ] `SUG-035` Effectuer un test réel borné d’une suggestion non sensible.
-  Dépendances : `SUG-001` à `SUG-034`. Fini lorsque : ARGO et dépôt SharePoint sont conformes.
-  Ordonnancement : différé avec `KEY-030` et `PKG-035` jusqu'à disponibilité simultanée d'une clé ARGO
-  réelle autorisée et d'un dossier SharePoint synchronisé ; aucun appel externe n'est simulé comme réel.
-
 ## M7 — maintenance hebdomadaire sur la machine administrateur
 
 - [x] `ADM-001` Ajouter un profil local `admin` non distribué aux utilisateurs.
@@ -1131,30 +981,6 @@ mode Deep Research sur CiderQA et ne rend jamais l’exécution expérimentale a
   Dépendances : `ADM-009`. Fini lorsque : le hash correspond.
   Réalisation : l'archive validée est copiée vers le drive protégé puis relue ; son SHA-256 doit être
   strictement identique avant que le pipeline poursuive.
-- [x] `ADM-011` Scanner les nouveaux paquets SharePoint complets.
-  Dépendances : `SUG-020`, `ADM-007`. Fini lorsque : paquets partiels sont ignorés.
-  Réalisation : le scanner traite uniquement les dossiers finaux contenant manifeste et charge utile,
-  et ignore toute écriture temporaire ou incomplète préfixée par un point.
-- [x] `ADM-012` Vérifier manifestes, hashes et schémas des suggestions.
-  Dépendances : `ADM-011`. Fini lorsque : une corruption est archivée sans import.
-  Réalisation : modèles stricts, identité du paquet et hashes sont revérifiés avant accès au contenu ;
-  les paquets invalides vont dans l'archive `corrupt` sans import.
-- [x] `ADM-013` Dédupliquer suggestions par DOI, URL normalisée et hash PDF.
-  Dépendances : `ADM-012`. Fini lorsque : plusieurs utilisateurs ne créent pas plusieurs notices.
-  Réalisation : un index des DOI, URL normalisées et SHA-256 PDF du corpus et de la bibliothèque
-  commune classe les doublons avant toute mutation.
-- [x] `ADM-014` Revalider localement les décisions ARGO reçues avant import.
-  Dépendances : `ADM-012`. Fini lorsque : IDs, métadonnées et décision sont cohérents.
-  Réalisation : identité, métadonnées, décision ARGO et seuil de confiance sont recalculés localement ;
-  toute incohérence classe la suggestion comme rejetée.
-- [x] `ADM-015` Importer automatiquement les suggestions pertinentes.
-  Dépendances : `ADM-013`, `ADM-014`. Fini lorsque : aucune interface de modération n’est requise.
-  Réalisation : un PDF pertinent emprunte l'ingestion commune et une référence pertinente le magasin
-  bibliographique, sans écran de modération ni action interactive.
-- [x] `ADM-016` Archiver les suggestions importées ou rejetées hors inbox.
-  Dépendances : `ADM-015`. Fini lorsque : l’inbox ne rejoue pas les mêmes paquets.
-  Réalisation : chaque paquet final est déplacé atomiquement vers une archive datée `imported`,
-  `duplicate`, `rejected` ou `corrupt`, hors de l'inbox.
 - [x] `ADM-017` Exécuter la collecte bibliographique configurée.
   Dépendances : `ADM-002`, `ADM-007`. Fini lorsque : quotas et délais actuels sont conservés.
   Réalisation : la maintenance réutilise `CiderPilotHarvester` et sa configuration existante, après
@@ -1163,10 +989,10 @@ mode Deep Research sur CiderQA et ne rend jamais l’exécution expérimentale a
   Dépendances : `ADM-002`. Fini lorsque : le toggle est absent sur les postes utilisateurs.
   Réalisation : backend et interface exigent tous deux le profil local administrateur ; le toggle est
   absent du HTML utilisateur et le worker ignore toute demande forgée côté utilisateur.
-- [x] `ADM-019` Dédupliquer les résultats collectés avec suggestions et corpus existant.
-  Dépendances : `ADM-013`, `ADM-017`. Fini lorsque : DOI est prioritaire.
+- [x] `ADM-019` Dédupliquer les résultats collectés avec le corpus existant.
+  Dépendances : `ADM-017`. Fini lorsque : DOI est prioritaire.
   Réalisation : le magasin de collecte fusionne en priorité par DOI normalisé, puis par URL et identité
-  de secours, y compris les notices issues des suggestions déjà importées.
+  de secours.
 - [x] `ADM-020` Appliquer filtre de pertinence et archive des rejets.
   Dépendances : `ADM-017`, `ADM-019`. Fini lorsque : les invariants actuels restent vrais.
   Réalisation : le filtre de pertinence existant est conservé et son nettoyage archive les rejets avec
@@ -1176,7 +1002,7 @@ mode Deep Research sur CiderQA et ne rend jamais l’exécution expérimentale a
   Réalisation : les sélecteurs ne transmettent que chunks communs et abstracts acceptés sans vecteur ;
   le moteur E5 n'est construit que si cette liste non vide existe.
 - [x] `ADM-022` Vérifier cohérence SQLite/Qdrant après maintenance.
-  Dépendances : `ADM-015`, `ADM-021`. Fini lorsque : toute incohérence bloque la publication.
+  Dépendances : `ADM-021`. Fini lorsque : toute incohérence bloque la publication.
   Réalisation : la validation compare les comptes SQLite attendus aux points Qdrant communs et bloque
   la suite avant construction ou publication au moindre écart.
 - [x] `ADM-023` Construire un nouveau paquet de corpus.
@@ -1204,7 +1030,7 @@ mode Deep Research sur CiderQA et ne rend jamais l’exécution expérimentale a
   Réalisation : avant publication, toute exception revérifie la sauvegarde puis restaure atomiquement
   le corpus commun ; données privées et corpus actif antérieur restent intacts.
 - [x] `ADM-029` Tester une maintenance complète avec fournisseurs et ARGO simulés.
-  Dépendances : `ADM-001` à `ADM-028`. Fini lorsque : une version SharePoint simulée est publiée.
+  Dépendances : `ADM-001` à `ADM-010`, `ADM-017` à `ADM-028`. Fini lorsque : une version SharePoint simulée est publiée.
   Réalisation : le test bout en bout couvre verrou, étapes, publication simulée, rapport, succès,
   interruption, rollback et reprise jusqu'à une version finale publiée.
 - [ ] `ADM-030` Observer quatre cycles manuels avant de considérer le workflow stable.
@@ -1413,18 +1239,14 @@ mode Deep Research sur CiderQA et ne rend jamais l’exécution expérimentale a
   Réalisation : l’activation d’un corpus commun préparé conserve bit à bit toutes les empreintes du
   répertoire privé tout en rendant le nouveau contenu commun actif et l’ancien réversible.
   Dépendances : `PKG-027`, `PKG-028`. Fini lorsque : le privé reste intact.
-- [x] `DEM-013` Créer le parcours E2E suggestion PDF.
-  Réalisation : un PDF explicitement confirmé est validé, renommé sans fuite du nom privé puis livré
-  atomiquement comme paquet complet dans l’inbox SharePoint simulée.
-  Dépendances : `SUG-027` à `SUG-032`. Fini lorsque : le paquet arrive dans l’inbox simulée.
 - [x] `DEM-014` Créer le parcours E2E quota atteint puis reprise.
   Réalisation : le quota local replace le même travail en file jusqu’à l’heure persistée sans consommer
   de tentative ; le worker le reprend ensuite et persiste la réponse sans état d’échec.
   Dépendances : `UI-025`. Fini lorsque : le travail n’échoue pas.
 - [ ] `DEM-015` Répéter la démonstration avec ARGO réel et une seule génération bornée.
-  Ordonnancement : les huit parcours simulés sont verts, mais aucune clé ARGO réelle n’est disponible
+  Ordonnancement : les sept parcours simulés sont verts, mais aucune clé ARGO réelle n’est disponible
   dans cette session ; la génération réelle ne sera ni inventée ni déclenchée sans ce secret utilisateur.
-  Dépendances : `DEM-001` à `DEM-014`. Fini lorsque : un rapport daté est conforme.
+  Dépendances : `DEM-001` à `DEM-012`, `DEM-014`. Fini lorsque : un rapport daté est conforme.
 - [x] `DEM-016` Tester la procédure de repli si ARGO est indisponible.
   Réalisation : un test provoque l’indisponibilité de la sonde, vérifie le blocage sans réponse ni
   détail fournisseur et verrouille les deux mentions honnêtes du runbook ; trois tests ciblés passent.

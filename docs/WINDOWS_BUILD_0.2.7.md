@@ -24,7 +24,7 @@ La matrice `DEM-007` à `DEM-014` a été rejouée après installation :
 
 Les contrats couverts comprennent la prose scientifique, le format liste explicite, la persistance
 dans le chat d'origine, la reprise après redémarrage, les origines commune/privée, la mise à jour du
-corpus, la suggestion PDF et la reprise après quota.
+corpus et la reprise après quota.
 
 ## Parcours réel sur l'installation 0.2.7 avant la recompilation finale
 

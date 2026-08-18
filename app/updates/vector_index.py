@@ -287,7 +287,10 @@ def index_bibliographic_abstracts(
     recreate: bool = False,
     retry_failed: bool = True,
     raise_on_error: bool = True,
+    max_batches: int | None = None,
 ) -> BibliographicIndexReport:
+    if max_batches is not None and max_batches <= 0:
+        raise ValueError("max_batches must be positive when provided")
     started = perf_counter()
     indexed = 0
     failed = 0
@@ -312,8 +315,11 @@ def index_bibliographic_abstracts(
         pruned = index.delete(sorted(prunable_ids))
         batch_size = settings.embeddings.batch_size
         while rows := store.pending_abstracts(limit=5000, retry_failed=retry_failed):
+            if max_batches is not None and batches >= max_batches:
+                break
             batch = rows[:batch_size]
             record_ids = [str(row["id"]) for row in batch]
+            record_content_hashes = {str(row["id"]): str(row["content_hash"]) for row in batch}
             texts = [f"{row['title']}\n{str(row['abstract'])[:12000]}" for row in batch]
             try:
                 vectors = backend.encode_documents(texts)
@@ -322,12 +328,14 @@ def index_bibliographic_abstracts(
                     vectors=vectors,
                     vector_dimension=backend.dimension,
                 )
-                store.update_embedding_status(record_ids, "indexed")
-                indexed += len(record_ids)
+                indexed += store.update_embedding_status_if_unchanged(
+                    record_content_hashes, "indexed"
+                )
                 batches += 1
             except Exception as exc:
-                store.update_embedding_status(record_ids, "failed")
-                failed += len(record_ids)
+                failed += store.update_embedding_status_if_unchanged(
+                    record_content_hashes, "failed"
+                )
                 error_type = type(exc).__name__
                 error_message = str(exc)[:1000]
                 if raise_on_error:

@@ -391,7 +391,7 @@ def test_manifest_blocks_semantic_configuration_drift_and_building_state(setting
         with pytest.raises(IndexGenerationCompatibilityError, match="chunk_target_tokens"):
             assert_index_generation_ready(index)
 
-        settings.ingestion.target_tokens = 500
+        settings.ingestion.target_tokens = 420
         mark_index_generation_building(index)
         with pytest.raises(IndexGenerationIntegrityError, match="not ready"):
             assert_index_generation_ready(index)

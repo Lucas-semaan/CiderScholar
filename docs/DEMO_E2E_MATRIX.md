@@ -14,7 +14,6 @@ Depuis la racine du dépôt :
   tests/test_pilot_rag.py `
   tests/test_multi_corpus.py `
   tests/test_corpus_updates.py `
-  tests/test_suggestion_workflow.py `
   tests/test_job_worker.py
 
 Set-Location frontend
@@ -35,7 +34,6 @@ rapport : le test en défaut est la preuve à conserver.
 | `DEM-010` | Redémarrage et reprise | `durableChatFlow.test.ts` | Le travail actif est relu puis suivi ; la requête d’envoi reste unique. |
 | `DEM-011` | Sources commune et privée | `test_lexical_search_reads_common_then_private_and_marks_every_hit` et `sourcePresentation.test.ts` | Chaque résultat porte son origine et les libellés les distinguent. |
 | `DEM-012` | Mise à jour du corpus commun | `test_common_directory_swap_preserves_every_private_hash` | Tous les hash du corpus privé sont identiques avant et après l’activation. |
-| `DEM-013` | Suggestion d’un PDF | `test_pdf_package_uses_validated_hash_and_safe_internal_name` | Un paquet validé arrive atomiquement dans l’inbox simulée avec un nom interne sûr. |
 | `DEM-014` | Quota puis reprise | `test_local_quota_keeps_job_queued_until_persisted_retry_time` | Le travail reste en file sans tentative consommée, puis réussit à l’heure persistée. |
 
 ## Vérification visuelle locale
@@ -50,9 +48,7 @@ sur un profil de démonstration sans donnée sensible :
 3. Afficher ensemble un résultat commun et un résultat privé ; vérifier leurs badges sans ouvrir le
    contenu privé devant le public.
 4. Activer un paquet de corpus de test et comparer les empreintes privées consignées avant/après.
-5. Soumettre un PDF public de test après confirmation explicite et vérifier uniquement la présence du
-   paquet dans l’inbox simulée.
-6. Simuler le quota local, constater l’état « en attente », avancer jusqu’à l’heure de reprise et
+5. Simuler le quota local, constater l’état « en attente », avancer jusqu’à l’heure de reprise et
    vérifier que le même travail termine sans état d’échec.
 
 La répétition locale ne remplace pas `DEM-015`, qui exige une génération ARGO réelle et bornée.

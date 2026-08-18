@@ -13,7 +13,18 @@ from app.corpora import LocalProfile, load_local_profile
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("provider", choices=("openalex", "elsevier", "clarivate", "istex"))
+    parser.add_argument(
+        "provider",
+        choices=(
+            "openalex",
+            "elsevier",
+            "clarivate",
+            "istex",
+            "core",
+            "semantic_scholar",
+            "opencitations",
+        ),
+    )
     parser.add_argument("--delete", action="store_true")
     arguments = parser.parse_args(argv)
     profile = load_local_profile()

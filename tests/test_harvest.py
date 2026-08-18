@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from contextlib import closing
 from datetime import UTC, datetime
@@ -12,12 +13,14 @@ from app.updates.harvest import (
     CIDER_BULK_QUERY_WAVES,
     CIDER_PILOT_THEMES,
     CIDER_QUERY_WAVES,
+    AbstractBackfillReport,
     BibliographicHarvestStore,
     CiderAbstractBackfiller,
     CiderBulkHarvester,
     CiderPilotHarvester,
     HarvestNotDue,
     assess_cider_relevance,
+    assess_cider_relevance_across_themes,
 )
 from app.updates.harvest_queries import (
     CIDER_EXPANDED_QUERY_WAVES,
@@ -106,6 +109,81 @@ def test_store_merges_sources_prefers_longer_abstract_and_indexes_fts(settings) 
     assert stored["embedding_status"] == "pending"
     assert store.statistics()["records"] == 1
     assert not store.is_due(active, now=completed)
+
+
+def test_store_recovers_interrupted_run_without_discarding_hits(settings) -> None:
+    active = _active_settings(settings)
+    database = Database(active.paths.database_path)
+    database.initialize()
+    store = BibliographicHarvestStore(database)
+    run_id, _ = store.start_run(
+        active,
+        themes={"microbiologie": "cider yeast"},
+        sources=["openalex"],
+    )
+    store.upsert_hit(
+        run_id=run_id,
+        theme="microbiologie",
+        rank=1,
+        record=BibliographicRecord(
+            source="OpenAlex",
+            source_id="W-INTERRUPTED",
+            title="Cider yeast recovery",
+            authors=["Ada Test"],
+            abstract="A relevant abstract about cider fermentation yeast.",
+            publication_year=2024,
+            doi="10.1000/interrupted-cider",
+        ),
+    )
+
+    report = store.recover_interrupted_run(
+        run_id=run_id,
+        reason="collector process exited before its final acknowledgement",
+        completed_at=datetime.now(UTC),
+    )
+
+    with database.connect() as connection:
+        row = connection.execute(
+            """
+            SELECT state, unique_record_count, accepted_abstract_count, errors
+            FROM bibliographic_harvest_runs
+            WHERE id = ?
+            """,
+            (run_id,),
+        ).fetchone()
+    assert report["state"] == "partial"
+    assert report["unique_record_count"] == 1
+    assert row["state"] == "partial"
+    assert row["unique_record_count"] == 1
+    assert row["accepted_abstract_count"] == 1
+    assert json.loads(row["errors"])[-1]["error_type"] == "InterruptedHarvestRecovered"
+
+
+def test_store_refuses_to_recover_a_completed_run(settings) -> None:
+    active = _active_settings(settings)
+    database = Database(active.paths.database_path)
+    database.initialize()
+    store = BibliographicHarvestStore(database)
+    run_id, _ = store.start_run(
+        active,
+        themes={"microbiologie": "cider yeast"},
+        sources=["openalex"],
+    )
+    completed_at = datetime.now(UTC)
+    store.finish_run(
+        run_id=run_id,
+        state="completed",
+        raw_record_count=0,
+        errors=[],
+        completed_at=completed_at,
+    )
+
+    with pytest.raises(ValueError, match="is not running"):
+        store.recover_interrupted_run(
+            run_id=run_id,
+            reason="must not overwrite a completed run",
+            completed_at=completed_at,
+        )
 
 
 def test_store_uses_doi_before_title_fallback_and_browses_all_statuses(settings) -> None:
@@ -227,6 +305,48 @@ def test_store_merges_normalized_title_when_doi_enrichment_arrives(settings) -> 
     assert enriched_id == provisional_id
     stored = store.records_by_ids([provisional_id])[provisional_id]
     assert stored["doi"] == "10.1000/biogenic"
+    assert store.browse_records()["total"] == 1
+
+
+def test_store_deduplicates_doi_less_titles_through_the_canonical_key(settings) -> None:
+    active = _active_settings(settings)
+    database = Database(active.paths.database_path)
+    database.initialize()
+    store = BibliographicHarvestStore(database)
+    run_id, _ = store.start_run(
+        active,
+        themes={"microbiologie": "cider bacteria"},
+        sources=["Aureli"],
+    )
+    first_id, duplicate_id = store.upsert_hits(
+        run_id=run_id,
+        hits=[
+            (
+                "microbiologie",
+                1,
+                BibliographicRecord(
+                    source="Aureli",
+                    source_id="PNX-1",
+                    title="Biogenic amines in French ciders",
+                    abstract="Cider bacteria and biogenic amines during fermentation.",
+                    publication_year=2011,
+                ),
+            ),
+            (
+                "microbiologie",
+                2,
+                BibliographicRecord(
+                    source="Aureli",
+                    source_id="PNX-2",
+                    title="Biogenic amines in French ciders.",
+                    abstract="A longer abstract on cider bacteria and biogenic amines.",
+                    publication_year=2011,
+                ),
+            ),
+        ],
+    )
+
+    assert duplicate_id == first_id
     assert store.browse_records()["total"] == 1
 
 
@@ -416,6 +536,146 @@ def test_abstractless_records_are_rejected_and_purged_after_enrichment(settings)
     assert statistics["latest_run"]["accepted_abstract_count"] == 1
 
 
+def test_abstractless_cleanup_preserves_an_explicit_manual_admission(settings) -> None:
+    active = _active_settings(settings)
+    database = Database(active.paths.database_path)
+    database.initialize()
+    store = BibliographicHarvestStore(database)
+    run_id, _ = store.start_run(
+        active,
+        themes={"microbiologie": "cider yeast"},
+        sources=["local"],
+    )
+    record_id = store.upsert_hit(
+        run_id=run_id,
+        theme="microbiologie",
+        rank=1,
+        record=BibliographicRecord(
+            source="local",
+            source_id="manual-full-text",
+            title="Cider yeast ecology full-text record",
+            doi="10.1000/manual-full-text",
+        ),
+    )
+    with database.transaction() as connection:
+        connection.execute(
+            "UPDATE bibliographic_records SET manual_decision = 'accepted' WHERE id = ?",
+            (record_id,),
+        )
+
+    assert store.reject_abstractless_records() == 0
+    assert store.records_by_ids([record_id])[record_id]["relevance_status"] == "accepted"
+
+
+def test_global_doi_less_review_excludes_only_automatic_abstracts(settings) -> None:
+    active = _active_settings(settings)
+    database = Database(active.paths.database_path)
+    database.initialize()
+    store = BibliographicHarvestStore(database)
+    run_id, _ = store.start_run(
+        active,
+        themes={"aromes_procede": "cider"},
+        sources=["local"],
+    )
+    automatic_id = store.upsert_hit(
+        run_id=run_id,
+        theme="aromes_procede",
+        rank=1,
+        record=BibliographicRecord(
+            source="local",
+            source_id="automatic-doi-less",
+            title="Cider sensory fermentation quality",
+            abstract="Cider fermentation changed volatile aroma and sensory quality.",
+        ),
+    )
+
+    assert store.review_doi_less_abstracts() == 1
+    with closing(database.connect()) as connection:
+        status = connection.execute(
+            "SELECT relevance_status FROM bibliographic_records WHERE id = ?",
+            (automatic_id,),
+        ).fetchone()[0]
+    assert status == "review"
+
+
+def test_run_evidence_cleanup_is_scoped_and_preserves_review_candidates(settings) -> None:
+    active = _active_settings(settings)
+    database = Database(active.paths.database_path)
+    database.initialize()
+    store = BibliographicHarvestStore(database)
+    first_run, _ = store.start_run(
+        active,
+        themes={"aromes_procede": "cider"},
+        sources=["Aureli"],
+    )
+    second_run, _ = store.start_run(
+        active,
+        themes={"aromes_procede": "cider"},
+        sources=["Aureli"],
+    )
+    missing_abstract_id = store.upsert_hit(
+        run_id=first_run,
+        theme="aromes_procede",
+        rank=1,
+        record=BibliographicRecord(
+            source="Aureli",
+            source_id="missing-abstract",
+            title="Cider fermentation process and quality",
+            doi="10.1000/missing-abstract",
+        ),
+    )
+    missing_doi_id = store.upsert_hit(
+        run_id=first_run,
+        theme="aromes_procede",
+        rank=2,
+        record=BibliographicRecord(
+            source="Aureli",
+            source_id="missing-doi",
+            title="Apple cider sensory fermentation quality study",
+            abstract="Cider fermentation controls aroma and sensory quality.",
+        ),
+    )
+    other_run_id = store.upsert_hit(
+        run_id=second_run,
+        theme="aromes_procede",
+        rank=1,
+        record=BibliographicRecord(
+            source="Aureli",
+            source_id="other-run",
+            title="Cider fermentation process in another study",
+            doi="10.1000/other-run",
+        ),
+    )
+
+    assert store.reject_run_abstractless_records(first_run) == 1
+    assert store.review_run_doi_less_abstracts(first_run) == 1
+    with closing(database.connect()) as connection:
+        statuses = {
+            str(row["id"]): str(row["relevance_status"])
+            for row in connection.execute("SELECT id, relevance_status FROM bibliographic_records")
+        }
+
+    assert statuses[missing_abstract_id] == "rejected"
+    assert statuses[missing_doi_id] == "review"
+    assert statuses[other_run_id] == "accepted"
+
+
+def test_cross_theme_assessment_selects_the_strongest_scientific_theme() -> None:
+    record = BibliographicRecord(
+        source="Aureli",
+        source_id="theme-selection",
+        title="Cider fermentation with non-Saccharomyces yeasts",
+        abstract="Microbial succession shapes aroma during alcoholic fermentation.",
+        doi="10.1000/theme-selection",
+    )
+
+    theme, assessment = assess_cider_relevance_across_themes(record)
+
+    assert theme == "microbiologie"
+    assert assessment.status == "accepted"
+    assert assessment.score == 1.0
+
+
 def test_rejected_archive_preserves_a_historical_doi_when_new_hit_omits_it(settings) -> None:
     active = _active_settings(settings)
     database = Database(active.paths.database_path)
@@ -467,6 +727,11 @@ def test_rejected_archive_preserves_a_historical_doi_when_new_hit_omits_it(setti
             "A computer vision metric evaluates generated image captions.",
         ),
         (
+            "Cider: An Event-Driven Continuous Integration Server",
+            "A modular event-driven server integrates development tools through a "
+            "communication platform and governs the development process.",
+        ),
+        (
             "Analysis of aroma compounds of commercial cider vinegars",
             "Electronic nose analysis of apple cider vinegars.",
         ),
@@ -511,8 +776,76 @@ def test_rejected_archive_preserves_a_historical_doi_when_new_hit_omits_it(setti
             "Guava juice was fermented into a fruit cider.",
         ),
         (
-            "Impact of fermentation on a Lychee-Pineapple functional cider",
+            "Impact of fermentation on a Lychee–Pineapple functional cider",
             "The non-apple fruit beverage was evaluated for bioactive compounds.",
+        ),
+        (
+            "Khảo sát các điều kiện lên men cider lêkima",
+            "Canistel juice was fermented under controlled biochemical conditions.",
+        ),
+        (
+            "A Climate Intervention Dynamical Emulator (CIDER) for scenario exploration",
+            "The emulator maps climate intervention scenario space.",
+        ),
+        (
+            "CIDER: Boosting Memory-Disaggregated Key-Value Stores",
+            "A database system uses pessimistic synchronization.",
+        ),
+        (
+            "GUI-CIDER: Mid-training GUI Agents via Causal Internalization",
+            "Software agents learn from density-aware exemplars.",
+        ),
+        (
+            "Cider as a Sign: Interpretations of Shaker Spirits and Spirituality",
+            "A historical analysis of religious communities.",
+        ),
+        (
+            "Consumption profiles, consumer experience and quality claims of cider",
+            "A marketing analysis studies consumer preferences.",
+        ),
+        (
+            "Stability of topical formulations enriched with apple pomace extract",
+            "Cosmetic emulsions were assessed for topical skin application.",
+        ),
+        (
+            "Asturian cider in Madrid? Linguistic identity and multilingual signage",
+            "Restaurant signs were studied as markers of regional identity.",
+        ),
+        (
+            "The uniqueness of one apple: producer perspectives of hard cider",
+            "Interviews examined producer identities and business perspectives.",
+        ),
+        (
+            "Implicit reaction vs explicit emotional response: PDO apple cider",
+            "Consumers reacted to protected designation of origin labels.",
+        ),
+        (
+            "Natural fermentation of sap from the cider gum Eucalyptus gunnii",
+            "Microbial communities in fermented tree sap were characterized.",
+        ),
+        (
+            "Cosmeceutical potency of functional ripe buni cider",
+            "The non-apple drink was evaluated in a topical cosmetic application.",
+        ),
+        (
+            "Hospital admissions for alcohol-related liver disease after cider regulation",
+            "A retrospective clinical cohort examined heavy drinkers.",
+        ),
+        (
+            "Back Cover: Determination of sugars in hard ciders and apple juice",
+            "This item reproduces the journal back cover.",
+        ),
+        (
+            "Forecasting purchasing quantity of apples for juice drink production",
+            "A company procurement forecast estimated purchasing quantity.",
+        ),
+        (
+            "Research and extension needs of U.S. hard cider producers",
+            "A producer survey described business needs.",
+        ),
+        (
+            "Le renouvellement d’un cluster basé sur la proximité organisée",
+            "Une étude économique porte sur un cluster cidricole.",
         ),
         (
             "Modelling detrital cosmogenic nuclides in CIDRE V2.0",
@@ -521,6 +854,22 @@ def test_rejected_archive_preserves_a_historical_doi_when_new_hit_omits_it(setti
         (
             "Broken bones and apple brandy during the COVID-19 pandemic",
             "General practitioners discussed resilience with at-risk patients.",
+        ),
+        (
+            "UV Light Reveals Jurassic Shell Colour Patterns in Calvados, France",
+            "An archaeological fossil site in the Calvados department was studied.",
+        ),
+        (
+            "Diversificacion productiva cafe-plantas ornamentales en La Sidra",
+            "A regional development study in La Sidra examined ornamental plants.",
+        ),
+        (
+            "Making good cider out of bad apples: signaling boosts cooperation",
+            "A game-theory study examined expectations and would-be free riders.",
+        ),
+        (
+            "Puzzles: Cider in Your Ear, Continuing Dilemma, and More",
+            "This economics column presents several recreational puzzles.",
         ),
     ],
 )
@@ -549,6 +898,93 @@ def test_relevance_gate_keeps_a_concise_legitimate_cider_article() -> None:
             publication_year=2024,
         ),
         "proteines",
+    )
+
+    assert assessment.status == "accepted"
+
+
+def test_relevance_gate_keeps_calvados_with_explicit_spirit_context() -> None:
+    assessment = assess_cider_relevance(
+        BibliographicRecord(
+            source="test",
+            source_id="calvados-spirit",
+            title="Volatile aroma compounds during oak ageing of Calvados",
+            abstract="Apple brandy distillation and barrel maturation changed ester composition.",
+            publication_year=2024,
+        ),
+        "calvados_eau_vie",
+    )
+
+    assert assessment.status == "accepted"
+
+
+@pytest.mark.parametrize(
+    ("title", "abstract", "theme"),
+    [
+        (
+            "Inactivation of Cryptosporidium parvum oocysts in cider by flash pasteurization",
+            "Flash pasteurization improved the microbiological safety of fermented cider.",
+            "jus_pomme",
+        ),
+        (
+            "Tetrad-forming Cocci in Ciders",
+            "Bacterial isolates from cider fermentation were characterized.",
+            "microbiologie",
+        ),
+        (
+            "Filtration of cider",
+            "The membrane filtration process clarified the finished beverage.",
+            "jus_pomme",
+        ),
+        (
+            "Determination of monosaccharides in cider by liquid chromatography",
+            "The HPLC method quantified sugars in finished ciders.",
+            "biochimie",
+        ),
+        (
+            "Influence of Fatty Acids on Foaming Properties of Cider",
+            "Fatty-acid composition changed the foam properties of cider.",
+            "proteines",
+        ),
+        (
+            "Bioconversion of apple pomace with black soldier fly larvae",
+            "Larval bioconversion characterized the processing of apple pomace.",
+            "microbiologie",
+        ),
+        (
+            "Essai de microfiltration du cidre",
+            "La microfiltration a été appliquée au cidre fini.",
+            "jus_pomme",
+        ),
+        (
+            "Control de plagas del manzano de sidra por aves silvestres",
+            "El control biológico protege los manzanos destinados a la sidra.",
+            "jus_pomme",
+        ),
+        (
+            "Valorización biotecnológica de residuos de elaboración de sidra de manzana",
+            "Los residuos de Malus domestica se transformaron mediante un proceso biotecnológico.",
+            "aromes_procede",
+        ),
+        (
+            "Potencial de una variedad para el procesamiento de suco e vinho seco de maçã",
+            "O suco clarificado e o vinho seco de maçã foram caracterizados.",
+            "jus_pomme",
+        ),
+    ],
+)
+def test_relevance_gate_keeps_concise_technical_cider_titles(
+    title: str, abstract: str, theme: str
+) -> None:
+    assessment = assess_cider_relevance(
+        BibliographicRecord(
+            source="test",
+            source_id=title,
+            title=title,
+            abstract=abstract,
+            publication_year=2024,
+        ),
+        theme,
     )
 
     assert assessment.status == "accepted"
@@ -647,6 +1083,7 @@ def test_harvester_is_bounded_by_free_openalex_budget_and_weekly_cadence(
                     source_id=f"W{self.calls}",
                     title=f"Cider pilot {self.calls}",
                     abstract=f"Abstract for {query}",
+                    doi=f"10.1000/cider-pilot-{self.calls}",
                 )
             ]
 
@@ -826,6 +1263,106 @@ def test_bulk_harvest_stops_when_new_accepted_abstract_target_is_reached(
     assert report.new_accepted_abstracts >= 2
     assert len(report.harvest_runs) == 1
     assert report.harvest_runs[0].themes == list(CIDER_BULK_QUERY_WAVES[0])
+
+
+def test_bulk_harvest_stops_after_two_completely_failed_provider_runs(
+    settings, monkeypatch
+) -> None:
+    active = _active_settings(settings)
+    active.bibliographic.sources = ["crossref"]
+    database = Database(active.paths.database_path)
+    database.initialize()
+
+    class ForbiddenCrossref:
+        def __init__(self, _settings) -> None:
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args) -> None:
+            pass
+
+        def search(self, query: str, limit: int, *, offset: int = 0):
+            raise RuntimeError("provider returned HTTP 403")
+
+    monkeypatch.setattr("app.updates.harvest.CLIENTS", {"crossref": ForbiddenCrossref})
+
+    report = CiderBulkHarvester(active, database).run(
+        target_new_accepted_abstracts=10,
+        page_size=2,
+        max_runs=5,
+        profile="cider_provider_failure_test",
+    )
+
+    assert report.stop_reason == "no_progress"
+    assert report.new_accepted_abstracts == 0
+    assert len(report.harvest_runs) == 2
+    assert report.backfill_runs == []
+    assert all(run.raw_record_count == 0 and run.errors for run in report.harvest_runs)
+
+
+def test_bulk_harvest_suspends_backfill_after_two_zero_yield_batches(settings, monkeypatch) -> None:
+    active = _active_settings(settings)
+    active.bibliographic.sources = ["crossref"]
+    database = Database(active.paths.database_path)
+    database.initialize()
+
+    class AbstractlessCrossref:
+        calls = 0
+
+        def __init__(self, _settings) -> None:
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args) -> None:
+            pass
+
+        def search(self, query: str, limit: int, *, offset: int = 0):
+            type(self).calls += 1
+            value = type(self).calls
+            return [
+                BibliographicRecord(
+                    source="Crossref",
+                    source_id=f"abstractless-{value}",
+                    title=f"Cider fermentation study {value}",
+                    doi=f"10.1000/abstractless-{value}",
+                )
+            ]
+
+    class ZeroYieldBackfiller:
+        calls = 0
+
+        def __init__(self, _settings, _database) -> None:
+            pass
+
+        def run(self, *, limit: int = 100) -> AbstractBackfillReport:
+            type(self).calls += 1
+            return AbstractBackfillReport(
+                run_id=None,
+                state="completed",
+                candidates=limit,
+                matched_records=limit,
+                abstracts_added=0,
+                errors=[],
+            )
+
+    monkeypatch.setattr("app.updates.harvest.CLIENTS", {"crossref": AbstractlessCrossref})
+    monkeypatch.setattr("app.updates.harvest.CiderAbstractBackfiller", ZeroYieldBackfiller)
+
+    report = CiderBulkHarvester(active, database).run(
+        target_new_accepted_abstracts=10,
+        page_size=1,
+        max_runs=5,
+        profile="cider_backfill_saturation_test",
+    )
+
+    assert report.stop_reason == "max_runs"
+    assert len(report.harvest_runs) == 5
+    assert len(report.backfill_runs) == 2
+    assert ZeroYieldBackfiller.calls == 2
 
 
 def test_backfill_adds_openalex_abstract_to_an_accepted_doi(settings, monkeypatch) -> None:

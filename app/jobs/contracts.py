@@ -71,6 +71,7 @@ class JobStep(StrEnum):
     WAITING = "waiting"
     PLANNING = "planning"
     BACKUP = "backup"
+    # Compatibility only: old persisted maintenance jobs may still contain this value.
     SUGGESTIONS = "suggestions"
     HARVEST = "harvest"
     INDEX = "index"
@@ -105,7 +106,7 @@ JOB_STEP_LABELS: dict[JobStep, str] = {
     JobStep.VALIDATION: "Validation scientifique",
     JobStep.PERSISTENCE: "Enregistrement du résultat",
     JobStep.BACKUP: "Sauvegarde du corpus",
-    JobStep.SUGGESTIONS: "Import des suggestions",
+    JobStep.SUGGESTIONS: "Étape historique retirée",
     JobStep.HARVEST: "Collecte bibliographique",
     JobStep.INDEX: "Indexation et contrôles",
     JobStep.PUBLISH: "Publication du corpus",

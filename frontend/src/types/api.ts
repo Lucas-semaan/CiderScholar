@@ -165,25 +165,6 @@ export interface OnboardingStatus {
   };
 }
 
-export type SuggestionReferenceSource =
-  | { kind: "doi"; doi: string; title?: string; abstract?: string }
-  | { kind: "url"; url: string; title?: string; abstract?: string }
-  | { kind: "manual"; title: string; reference: string; doi?: string; abstract?: string };
-
-export interface SuggestionSubmissionResult {
-  suggestion_id: string;
-  state: "accepted" | "not_retained" | "retry";
-  message: string;
-  action: "none" | "settings" | "retry";
-  decision: {
-    relevant: boolean;
-    reason: string;
-    theme: string | null;
-    uncertainty: "low" | "medium" | "high";
-    confidence: number;
-  } | null;
-}
-
 export interface ArgoKeyStatus {
   configured: boolean;
 }
@@ -296,7 +277,6 @@ export interface LibraryStatistics {
   documents: number;
   full_texts: number;
   abstract_only: number;
-  searchable: number;
 }
 
 export interface LibrarySummary {

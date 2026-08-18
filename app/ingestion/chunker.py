@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass
+from typing import Protocol
 
 from app.ingestion.pdf_extractor import PageText
 from app.models.chunk import Chunk
@@ -33,6 +34,22 @@ SECTION_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
 
 def estimate_tokens(text: str) -> int:
     return len(TOKEN_PATTERN.findall(text))
+
+
+class TokenBudget(Protocol):
+    def count(self, text: str) -> int: ...
+
+    def split(self, text: str, max_tokens: int) -> Iterable[str]: ...
+
+
+class RegexTokenBudget:
+    """Lightweight fallback used by isolated unit tests, never by PDF ingestion."""
+
+    def count(self, text: str) -> int:
+        return estimate_tokens(text)
+
+    def split(self, text: str, max_tokens: int) -> Iterator[str]:
+        yield from _split_long_sentence(text, max_tokens)
 
 
 @dataclass(slots=True)
@@ -86,12 +103,17 @@ class ScientificChunker:
         target_tokens: int = 500,
         max_tokens: int = 750,
         overlap_tokens: int = 80,
+        token_budget: TokenBudget | None = None,
     ) -> None:
         if not 0 <= overlap_tokens < target_tokens <= max_tokens:
             raise ValueError("expected 0 <= overlap < target <= max")
         self.target_tokens = target_tokens
         self.max_tokens = max_tokens
         self.overlap_tokens = overlap_tokens
+        self.token_budget = token_budget or RegexTokenBudget()
+
+    def _measure(self, units: Sequence[_Unit]) -> int:
+        return self.token_budget.count(" ".join(unit.text for unit in units))
 
     def _units(self, pages: Sequence[PageText]) -> list[_Unit]:
         units: list[_Unit] = []
@@ -123,13 +145,13 @@ class ScientificChunker:
                     cleaned = sentence.strip()
                     if not cleaned:
                         continue
-                    for part in _split_long_sentence(cleaned, self.max_tokens):
+                    for part in self.token_budget.split(cleaned, self.max_tokens):
                         units.append(
                             _Unit(
                                 page=page.page_number,
                                 section=paragraph_section,
                                 text=part,
-                                tokens=estimate_tokens(part),
+                                tokens=self.token_budget.count(part),
                             )
                         )
         return units
@@ -152,19 +174,18 @@ class ScientificChunker:
                         page_end=max(unit.page for unit in current),
                         chunk_index=len(chunks),
                         text=text,
-                        token_count=estimate_tokens(text),
+                        token_count=self.token_budget.count(text),
                     )
                 )
             if keep_overlap and current and self.overlap_tokens:
                 tail: list[_Unit] = []
-                tail_tokens = 0
                 for unit in reversed(current):
-                    if tail_tokens + unit.tokens > self.overlap_tokens:
+                    candidate = [unit, *tail]
+                    if self._measure(candidate) > self.overlap_tokens:
                         break
-                    tail.insert(0, unit)
-                    tail_tokens += unit.tokens
+                    tail = candidate
                 current = tail
-                token_count = tail_tokens
+                token_count = self._measure(tail) if tail else 0
             else:
                 current = []
                 token_count = 0
@@ -177,14 +198,16 @@ class ScientificChunker:
             )
             if boundary:
                 flush(keep_overlap=False)
-            elif current and token_count + unit.tokens > self.max_tokens:
+            elif current and self._measure([*current, unit]) > self.max_tokens:
                 flush(keep_overlap=True)
-                if current and token_count + unit.tokens > self.max_tokens:
+                if current and self._measure([*current, unit]) > self.max_tokens:
                     current = []
                     token_count = 0
 
             current.append(unit)
-            token_count += unit.tokens
+            token_count = self._measure(current)
+            if token_count > self.max_tokens:
+                raise ValueError("chunk exceeds the configured exact token budget")
             has_new_content = True
 
             if token_count >= self.target_tokens:

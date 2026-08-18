@@ -101,6 +101,8 @@ variables utilisateur Windows :
 [Environment]::SetEnvironmentVariable("OPENALEX_KEY", "<clé-optionnelle>", "User")
 [Environment]::SetEnvironmentVariable("CLARIVATE_API_KEY", "<clé>", "User")
 [Environment]::SetEnvironmentVariable("ELSEVIER_KEY", "<clé>", "User")
+[Environment]::SetEnvironmentVariable("CORE_API_KEY", "<clé-optionnelle>", "User")
+[Environment]::SetEnvironmentVariable("SEMANTIC_SCHOLAR_API_KEY", "<clé-optionnelle>", "User")
 ```
 
 Ouvrir un nouveau terminal après modification. ARGO est l’unique moteur génératif. Pour les sources bibliographiques externes, activer `app.allow_bibliographic_apis` ainsi que `bibliographic.enabled`. OpenAlex reste configuré en mode gratuit pour la collecte pilote.
@@ -109,6 +111,11 @@ Cette procédure est réservée au développement. Dans la version pilote distri
 collera uniquement sa propre clé ARGO dans l’écran d’accueil. L’application la vérifiera, puis la
 chiffrera pour son compte Windows avec DPAPI. Aucun utilisateur final ne devra ouvrir PowerShell,
 modifier `.env` ou recevoir les clés bibliographiques de l’administrateur.
+
+Pour l'exploitation administrateur, préférer le coffre DPAPI local aux variables utilisateur
+persistantes : `python -m scripts.set_admin_bibliographic_key core` ou
+`semantic_scholar` (et `istex` pour son jeton de texte intégral). La saisie est masquée et la valeur
+n'est hydratée que dans le processus autorisé.
 
 ARGO ne reçoit que la question et les passages bornés nécessaires à la génération. Les fournisseurs bibliographiques ne reçoivent que la requête de recherche, jamais un PDF local.
 
@@ -167,6 +174,9 @@ l’ouverture via `GET /api/corpus/{article_id}/pdf`. Les commandes d’exploita
 .\.venv\Scripts\python.exe -m scripts.harvest_cider_bulk --target 1000 --page-size 50
 .\.venv\Scripts\python.exe -m scripts.harvest_cider_bulk --target 500 --query-set materials
 .\.venv\Scripts\python.exe -m scripts.harvest_cider_bulk --target 100 --query-set microbiology
+.\.venv\Scripts\python.exe -m scripts.harvest_aureli_cider --dry-run --limit 200 --start-year 2026 --end-year 2026
+.\.venv\Scripts\python.exe -m scripts.harvest_aureli_cider --limit 10000 --run-dir data\exports\aureli-cider-apply
+.\.venv\Scripts\python.exe -m scripts.harvest_web_discovery --engines bing duckduckgo brave yahoo --max-results 40000 --run-dir data\exports\web-discovery
 .\.venv\Scripts\python.exe -m scripts.audit_microbiology_full_text --target 100
 .\.venv\Scripts\python.exe -m scripts.import_ifpc_publications --bibliography-pages 2
 ```
@@ -218,6 +228,12 @@ d’exploitation est donc : une preuve locale provient soit des fragments d’un
 abstract accepté portant un DOI vérifié. Le niveau de preuve reste affiché pour ne pas confondre les
 deux.
 
+La collecte Aureli locale et son protocole de reprise, de sauvegarde et d'audit sont décrits dans
+[`docs/AURELI_HARVEST.md`](docs/AURELI_HARVEST.md).
+
+L’expansion locale de tous les thèmes et fournisseurs jusqu’à saturation est décrite dans
+[`docs/CORPUS_EXPANSION.md`](docs/CORPUS_EXPANSION.md).
+
 ## Publications IFPC et auteurs ciblés
 
 `import_ifpc_publications` importe le catalogue officiel des cahiers techniques IFPC, contrôle le
@@ -246,6 +262,6 @@ Les règles complètes sont dans [`AGENTS.md`](AGENTS.md). Les données locales,
 
 ## Confidentialité et sauvegarde
 
-Ne jamais remplacer `127.0.0.1` par `0.0.0.0` sur une machine contenant des documents scientifiques. Le [guide du corpus commun](docs/CORPUS_ISOLATION.md) décrit son stockage et sa mise à jour. Le guide [OneDrive / SharePoint](docs/SHAREPOINT_DISTRIBUTION.md) explique la sélection du dossier utilisateur ainsi que la publication et le rollback administrateur ; le guide [proposer un document](docs/DOCUMENT_SUGGESTIONS.md) précise les droits et les données transmises. Pour une sauvegarde vérifiée, arrêter les traitements lourds puis exécuter `python scripts/backup_corpus.py` ; la restauration correspondante remplace atomiquement `data/common` en conservant la version précédente.
+Ne jamais remplacer `127.0.0.1` par `0.0.0.0` sur une machine contenant des documents scientifiques. Le [guide du corpus commun](docs/CORPUS_ISOLATION.md) décrit son stockage et sa mise à jour. Le guide [OneDrive / SharePoint](docs/SHAREPOINT_DISTRIBUTION.md) explique la sélection du dossier utilisateur ainsi que la publication et le rollback administrateur. Les documents ajoutés depuis l’interface sont directement adoptés par le corpus local après validation technique, déduplication et indexation. Pour une sauvegarde vérifiée, arrêter les traitements lourds puis exécuter `python scripts/backup_corpus.py` ; la restauration correspondante remplace atomiquement `data/common` en conservant la version précédente.
 
 Le projet est distribué sous licence AGPL-3.0-only.

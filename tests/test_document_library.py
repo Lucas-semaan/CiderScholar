@@ -100,7 +100,6 @@ def test_document_library_merges_doi_and_searches_pdf_text(settings) -> None:
         "documents": 2,
         "full_texts": 1,
         "abstract_only": 1,
-        "searchable": 2,
     }
     assert summary["filters"]["themes"] == ["cidre", "fermentation"]
 

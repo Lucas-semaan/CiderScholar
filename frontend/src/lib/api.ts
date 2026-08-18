@@ -20,8 +20,6 @@ import type {
   SystemDiagnostics,
   SynthesisDetail,
   SynthesisQuery,
-  SuggestionReferenceSource,
-  SuggestionSubmissionResult,
 } from "@/types/api";
 
 export class ApiError extends Error {
@@ -238,35 +236,6 @@ export const api = {
         "/api/corpus-updates/rollback-on-restart",
         { confirmed: true },
       ),
-  },
-  suggestions: {
-    submitReference: (source: SuggestionReferenceSource, scientificComment: string) =>
-      post<SuggestionSubmissionResult>("/api/suggestions", {
-        source,
-        scientific_comment: scientificComment || null,
-      }),
-    submitPdf: (
-      file: File,
-      scientificComment: string,
-      confirmed: boolean,
-      metadata: {
-        title?: string | undefined;
-        doi?: string | undefined;
-        abstract?: string | undefined;
-      },
-    ) => {
-      const body = new FormData();
-      body.append("file", file);
-      body.append("scientific_comment", scientificComment);
-      body.append("transmit_pdf_confirmed", String(confirmed));
-      if (metadata.title) body.append("title", metadata.title);
-      if (metadata.doi) body.append("doi", metadata.doi);
-      if (metadata.abstract) body.append("abstract", metadata.abstract);
-      return request<SuggestionSubmissionResult>("/api/suggestions/pdf", {
-        method: "POST",
-        body,
-      });
-    },
   },
   adminMaintenance: {
     status: () => request<MaintenanceSchedule>("/api/admin/maintenance"),

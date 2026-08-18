@@ -16,7 +16,7 @@ export function SessionSettingsCard({ busy, onSave, settings }: SessionSettingsC
   const retrieval = settings.retrieval;
 
   return (
-    <Card>
+    <Card className="w-full xl:max-w-2xl">
       <CardHeader>
         <h2 className="font-bold text-slate-900">Configuration de session</h2>
         <p className="mt-1 text-xs text-slate-500">
@@ -31,7 +31,7 @@ export function SessionSettingsCard({ busy, onSave, settings }: SessionSettingsC
       </CardHeader>
       <CardBody>
         <form
-          className="grid gap-5 sm:grid-cols-2"
+          className="grid gap-x-4 gap-y-5 sm:grid-cols-2"
           key={retrieval.default_article_count}
           onSubmit={onSave}
         >
@@ -92,7 +92,7 @@ export function SessionSettingsCard({ busy, onSave, settings }: SessionSettingsC
               type="number"
             />
           </Field>
-          <div className="flex items-end sm:justify-end">
+          <div className="flex items-end pt-1 sm:col-span-2 sm:justify-end">
             <Button className="w-full sm:w-auto" loading={busy} type="submit">
               <Save aria-hidden="true" className="size-4" />
               Appliquer

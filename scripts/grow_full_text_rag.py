@@ -13,7 +13,7 @@ from typing import Any
 
 from app.admin.secrets import AdminBibliographicKeyVault
 from app.config import load_settings
-from app.corpora import CorpusScope, load_local_profile, settings_for_corpus
+from app.corpora import CorpusScope, LocalProfile, load_local_profile, settings_for_corpus
 from app.database.sqlite import Database
 from app.updates.full_text import FullTextHarvestService, FullTextStore
 from app.updates.harvest import CIDER_BULK_QUERY_WAVES, CiderBulkHarvester
@@ -55,10 +55,12 @@ def main(argv: list[str] | None = None) -> int:
         raise ValueError("target-pdfs must be positive")
 
     settings = settings_for_corpus(load_settings(arguments.config), CorpusScope.COMMON)
-    AdminBibliographicKeyVault(
-        settings,
-        load_local_profile(),
-    ).hydrate_process_environment()
+    # A manual growth cycle must not depend on the background scheduler being
+    # enabled in the desktop profile.
+    settings.harvest.enabled = True
+    profile = load_local_profile()
+    if profile is LocalProfile.ADMIN:
+        AdminBibliographicKeyVault(settings, profile).hydrate_process_environment()
     settings.paths.create()
     database = Database(settings.paths.database_path)
     database.initialize()

@@ -27,15 +27,6 @@ Statut : accepté pour le pilote.
 - une mise à jour est téléchargée, vérifiée puis activée atomiquement au redémarrage ;
 - le corpus commun est traité comme non modifiable sur les postes utilisateurs.
 
-## Suggestions
-
-- un utilisateur peut proposer un DOI, une URL, un PDF, une référence manuelle et un commentaire ;
-- la pertinence cidricole est évaluée immédiatement avec sa propre clé ARGO après les contrôles locaux ;
-- une suggestion retenue est déposée dans l’espace SharePoint d’entrée ;
-- la machine administrateur importe les suggestions admissibles lors de la maintenance hebdomadaire ;
-- les PDF proposés peuvent être transmis à l’administrateur et intégrés si leurs droits le permettent ;
-- tout PDF effectivement intégré est automatiquement indexé dans la même opération ciblée.
-
 ## Administration
 
 - le rôle administrateur est activé uniquement par la configuration locale de la machine principale ;

@@ -24,7 +24,6 @@ from app.api.jobs import router as jobs_router
 from app.api.library import router as library_router
 from app.api.onboarding import router as onboarding_router
 from app.api.publisher_access import router as publisher_access_router
-from app.api.suggestions import router as suggestions_router
 from app.api.synthesis import router as synthesis_router
 from app.api.system import router as system_router
 from app.config import Settings, configured_secret_names, load_settings
@@ -37,7 +36,6 @@ from app.corpus_packages.checks import refresh_corpus_update_if_due
 from app.database.sqlite import Database
 from app.desktop.app_updates import check_application_update
 from app.secrets import hydrate_user_environment
-from app.suggestions.packaging import retry_pending_packages
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -60,7 +58,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         common_corpus_database.initialize()
         application.state.application_update = check_application_update(resolved_settings)
         refresh_corpus_update_if_due(resolved_settings)
-        retry_pending_packages(resolved_settings)
         yield
 
     application = FastAPI(
@@ -93,7 +90,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     application.include_router(onboarding_router)
     application.include_router(publisher_access_router)
     application.include_router(synthesis_router)
-    application.include_router(suggestions_router)
     mount_frontend(application)
     return application
 

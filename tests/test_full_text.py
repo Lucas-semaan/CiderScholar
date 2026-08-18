@@ -188,6 +188,7 @@ def test_istex_download_uses_bearer_token(settings, monkeypatch, tmp_path) -> No
     downloaded = FullTextDownloader(settings).download(candidate)
 
     assert downloaded.path.is_file()
+    assert downloaded.path.is_relative_to(settings.paths.common_pdf_dir)
     assert captured_headers["Authorization"] == "Bearer test-token"
 
 

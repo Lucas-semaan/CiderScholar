@@ -8,15 +8,25 @@ from time import perf_counter
 from app.config import Settings
 from app.updates.base import OfficialBibliographicClient
 from app.updates.clarivate import ClarivateClient
+from app.updates.core import CoreClient
 from app.updates.crossref import CrossrefClient
+from app.updates.datacite import DataCiteClient
+from app.updates.doaj import DoajClient
 from app.updates.elsevier import ElsevierClient
 from app.updates.europe_pmc import EuropePmcClient
+from app.updates.hal import HalClient
+from app.updates.istex import IstexClient
 from app.updates.models import (
     BibliographicRecord,
     BibliographicSearchReport,
     BibliographicSourceError,
 )
+from app.updates.openaire import OpenAireClient
 from app.updates.openalex import OpenAlexClient
+from app.updates.pubag import PubAgClient
+from app.updates.pubmed import PubMedClient
+from app.updates.semantic_scholar import SemanticScholarClient
+from app.updates.zenodo import ZenodoClient
 
 type ClientType = type[OfficialBibliographicClient]
 CLIENTS: dict[str, ClientType] = {
@@ -25,6 +35,16 @@ CLIENTS: dict[str, ClientType] = {
     "openalex": OpenAlexClient,
     "clarivate": ClarivateClient,
     "elsevier": ElsevierClient,
+    "hal": HalClient,
+    "core": CoreClient,
+    "doaj": DoajClient,
+    "semantic_scholar": SemanticScholarClient,
+    "istex": IstexClient,
+    "datacite": DataCiteClient,
+    "openaire": OpenAireClient,
+    "zenodo": ZenodoClient,
+    "pubmed": PubMedClient,
+    "pubag": PubAgClient,
 }
 TITLE_TOKEN = re.compile(r"[^a-z0-9]+")
 

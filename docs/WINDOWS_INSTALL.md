@@ -53,9 +53,14 @@ documents restent locaux ; seuls les passages bornés nécessaires à la génér
 [Environment]::SetEnvironmentVariable("OPENALEX_KEY", "<clé-optionnelle>", "User")
 [Environment]::SetEnvironmentVariable("CLARIVATE_API_KEY", "<clé>", "User")
 [Environment]::SetEnvironmentVariable("ELSEVIER_KEY", "<clé>", "User")
+[Environment]::SetEnvironmentVariable("CORE_API_KEY", "<clé-optionnelle>", "User")
+[Environment]::SetEnvironmentVariable("SEMANTIC_SCHOLAR_API_KEY", "<clé-optionnelle>", "User")
 ```
 
 Fermer puis rouvrir le terminal. Ne jamais ajouter ces valeurs à `config.yaml`.
+Sur le profil administrateur, le coffre DPAPI local est préférable pour CORE, Semantic Scholar et
+ISTEX : exécuter `python -m scripts.set_admin_bibliographic_key <provider>` et saisir la valeur dans
+l'invite masquée.
 
 ## Build et lancement
 

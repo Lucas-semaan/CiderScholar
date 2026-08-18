@@ -5,7 +5,6 @@ from __future__ import annotations
 import gc
 import hashlib
 import logging
-import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -22,6 +21,14 @@ from app.desktop.model_integrity import (
     ModelIntegrityError,
     verify_model_manifest,
 )
+from app.ingestion.token_budget import (
+    LocalEmbeddingTokenBudget,
+    local_model_path,
+    prepare_prefixed_texts,
+)
+from app.ingestion.token_budget import (
+    model_storage_name as model_storage_name,
+)
 from app.memory import MemoryGuard, MemoryLimitError
 
 LOGGER = logging.getLogger(__name__)
@@ -29,23 +36,6 @@ LOGGER = logging.getLogger(__name__)
 
 class LocalEmbeddingModelNotFoundError(FileNotFoundError):
     """Raised instead of silently contacting a model registry."""
-
-
-def model_storage_name(model_name: str) -> str:
-    """Map a registry identifier to one deterministic local directory name."""
-
-    source = model_name.strip()
-    if any(part in {"", ".", ".."} for part in re.split(r"[/\\]", source)):
-        raise ValueError("invalid embedding model name")
-    normalized = re.sub(r"[^A-Za-z0-9._-]+", "--", source)
-    if not normalized or normalized in {".", ".."}:
-        raise ValueError("invalid embedding model name")
-    return normalized
-
-
-def local_model_path(settings: Settings, model_name: str | None = None) -> Path:
-    selected = model_name or settings.embeddings.model_name
-    return settings.paths.models_dir / model_storage_name(selected)
 
 
 def _model_revision(root: Path) -> str:
@@ -101,18 +91,6 @@ def verify_local_embedding_model(
     return True
 
 
-def prepare_prefixed_texts(texts: Sequence[str], prefix: str) -> list[str]:
-    """Normalize whitespace and apply the E5 task prefix exactly once."""
-
-    prepared: list[str] = []
-    for text in texts:
-        normalized = " ".join(text.split()).strip()
-        if not normalized:
-            raise ValueError("cannot embed empty text")
-        prepared.append(normalized if normalized.startswith(prefix) else f"{prefix}{normalized}")
-    return prepared
-
-
 class EmbeddingBackend(Protocol):
     @property
     def model_name(self) -> str: ...
@@ -147,6 +125,7 @@ class SentenceTransformerBackend:
         )
         self._model: Any | None = None
         self._dimension: int | None = None
+        self._document_budget: LocalEmbeddingTokenBudget | None = None
         self.require_model_manifest = require_model_manifest
 
     @property
@@ -221,6 +200,21 @@ class SentenceTransformerBackend:
 
     def encode_documents(self, texts: Sequence[str]) -> Any:
         return self._encode(texts, self.settings.embeddings.passage_prefix)
+
+    def validate_document_lengths(self, texts: Sequence[str]) -> None:
+        if self._document_budget is None:
+            self._document_budget = LocalEmbeddingTokenBudget(
+                self.path / "tokenizer.json",
+                prefix=self.settings.embeddings.passage_prefix,
+                max_tokens=self.settings.embeddings.max_sequence_length,
+            )
+        for position, text in enumerate(texts):
+            count = self._document_budget.count(text)
+            if count > self.settings.embeddings.max_sequence_length:
+                raise ValueError(
+                    f"embedding document {position} has {count} tokens; "
+                    f"maximum is {self.settings.embeddings.max_sequence_length}"
+                )
 
     def encode_queries(self, texts: Sequence[str]) -> Any:
         return self._encode(texts, self.settings.embeddings.query_prefix)
@@ -329,6 +323,9 @@ class EmbeddingBatchProcessor:
                 self.memory.check("embedding batch")
                 self.database.update_embedding_status(chunk_ids, "processing")
                 try:
+                    validator = getattr(self.backend, "validate_document_lengths", None)
+                    if validator is not None:
+                        validator([str(row["text"]) for row in rows])
                     vectors = self.backend.encode_documents([str(row["text"]) for row in rows])
                     vector_rows, vector_dimension = _matrix_shape(vectors)
                     if vector_rows != len(rows) or vector_dimension != self.backend.dimension:

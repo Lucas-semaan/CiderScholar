@@ -1385,7 +1385,10 @@ class FullTextDownloader:
         self.config = settings.full_text
 
     def download(self, candidate: FullTextCandidate) -> DownloadedFullText:
-        destination_dir = self.settings.paths.pdf_dir / "full-text" / candidate.source
+        # Provider PDFs are scientific corpus assets, even when this service
+        # is invoked by a legacy reconciliation workflow.  Keep them beside
+        # native JATS/TEI/text assets instead of reviving data/pdf.
+        destination_dir = self.settings.paths.common_pdf_dir / "full-text" / candidate.source
         destination_dir.mkdir(parents=True, exist_ok=True)
         stem = hashlib.sha256(candidate.doi.encode("utf-8")).hexdigest()[:24]
         destination = destination_dir / f"{stem}.pdf"

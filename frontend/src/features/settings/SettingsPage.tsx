@@ -230,7 +230,7 @@ export function SettingsPage() {
         onSave={replaceArgoKey}
         onTest={testArgoKey}
       />
-      <div className="grid gap-6 xl:grid-cols-[1.2fr_.8fr]">
+      <div className="grid items-start gap-6 xl:grid-cols-[minmax(0,42rem)_minmax(18rem,1fr)]">
         <SessionSettingsCard busy={busy === "save"} onSave={save} settings={settings} />
         <SettingsStatusCards
           busy={busy}

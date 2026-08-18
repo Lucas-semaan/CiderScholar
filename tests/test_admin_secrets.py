@@ -80,3 +80,25 @@ def test_administrator_vault_hydrates_istex_token(
 
     assert secret_module.os.environ[variable] == "istex-token"
     assert "istex-token" not in vault.paths()[3].read_text(encoding="ascii")
+
+
+def test_administrator_vault_hydrates_optional_repository_keys(
+    settings,
+    fake_dpapi,
+    monkeypatch,
+) -> None:
+    vault = AdminBibliographicKeyVault(settings, LocalProfile.ADMIN)
+    vault.save("core", "core-token")
+    vault.save("semantic_scholar", "semantic-token")
+    monkeypatch.delenv(settings.bibliographic.core_api_key_env, raising=False)
+    monkeypatch.delenv(settings.bibliographic.semantic_scholar_api_key_env, raising=False)
+
+    vault.hydrate_process_environment()
+
+    assert secret_module.os.environ[settings.bibliographic.core_api_key_env] == "core-token"
+    assert (
+        secret_module.os.environ[settings.bibliographic.semantic_scholar_api_key_env]
+        == "semantic-token"
+    )
+    assert "core-token" not in vault.paths()[4].read_text(encoding="ascii")
+    assert "semantic-token" not in vault.paths()[5].read_text(encoding="ascii")

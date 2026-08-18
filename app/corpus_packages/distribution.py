@@ -13,7 +13,6 @@ class DistributionPaths:
     root: Path
     installers: Path
     corpus: Path
-    suggestions_inbox: Path
     archive: Path
 
 
@@ -27,7 +26,6 @@ def distribution_paths(root: Path) -> DistributionPaths:
         root=resolved,
         installers=resolved / "installers",
         corpus=resolved / "corpus",
-        suggestions_inbox=resolved / "suggestions" / "inbox",
         archive=resolved / "archive",
     )
 
@@ -39,7 +37,6 @@ def create_distribution_layout(root: Path) -> DistributionPaths:
     for directory in (
         paths.installers,
         paths.corpus,
-        paths.suggestions_inbox,
         paths.archive,
     ):
         directory.mkdir(parents=True, exist_ok=True)

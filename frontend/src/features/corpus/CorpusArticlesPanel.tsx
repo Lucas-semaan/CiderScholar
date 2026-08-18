@@ -59,7 +59,7 @@ export function CorpusArticlesPanel({
         </CardBody>
       ) : (
         <div className="overflow-x-auto">
-          <table className="w-full min-w-[900px] text-left text-sm">
+          <table className="w-full min-w-[980px] text-left text-sm">
             <thead className="bg-slate-50 text-xs uppercase tracking-wide text-slate-500">
               <tr>
                 <th className="px-5 py-3 font-semibold">Article</th>
@@ -67,7 +67,9 @@ export function CorpusArticlesPanel({
                 <th className="px-4 py-3 font-semibold">Statut</th>
                 <th className="px-4 py-3 font-semibold">Index</th>
                 <th className="px-4 py-3 font-semibold">DOI</th>
-                <th className="px-5 py-3 text-right font-semibold">Actions</th>
+                <th className="sticky right-0 w-64 bg-slate-50 px-5 py-3 text-right font-semibold shadow-[-8px_0_12px_-12px_rgb(15_23_42_/_0.25)]">
+                  Actions
+                </th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
@@ -121,7 +123,7 @@ function CorpusArticleRow({
   const indexed = article.indexed_chunk_count ?? 0;
   const coverage = Math.round((indexed / Math.max(article.chunk_count, 1)) * 100);
   return (
-    <tr className="transition hover:bg-forest-50/40">
+    <tr className="group transition hover:bg-forest-50/40">
       <td className="max-w-md px-5 py-4">
         <p className="font-semibold text-slate-900">{article.title}</p>
         <p className="mt-1 truncate text-xs text-slate-500">
@@ -150,24 +152,30 @@ function CorpusArticleRow({
       <td className="max-w-44 truncate px-4 py-4 font-mono text-xs text-slate-500">
         {article.doi ?? "—"}
       </td>
-      <td className="px-5 py-4">
-        <div className="flex justify-end gap-1">
+      <td className="sticky right-0 bg-white px-5 py-4 shadow-[-8px_0_12px_-12px_rgb(15_23_42_/_0.35)] transition group-hover:bg-forest-50/40">
+        <div className="flex justify-end gap-2">
           <Button
             aria-label={`Réindexer ${article.title}`}
-            className="size-9 p-0"
+            className="shrink-0"
             loading={busy === `reindex-${article.id}`}
             onClick={() => onReindex(article)}
+            size="icon"
+            title={`R\u00e9indexer ${article.title}`}
             variant="ghost"
           >
             <RefreshCw aria-hidden="true" className="size-4" />
+            <span className="sr-only">{"R\u00e9indexer"}</span>
           </Button>
           <Button
             aria-label={`Supprimer ${article.title}`}
-            className="size-9 p-0 text-red-600 hover:bg-red-50"
+            className="shrink-0 text-red-600 hover:bg-red-50"
             onClick={() => onDelete(article)}
+            size="icon"
+            title={`Supprimer ${article.title}`}
             variant="ghost"
           >
             <Trash2 aria-hidden="true" className="size-4" />
+            <span className="sr-only">Supprimer</span>
           </Button>
         </div>
       </td>

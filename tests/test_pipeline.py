@@ -3,7 +3,10 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from app.database.sqlite import Database
+from app.ingestion.chunker import RegexTokenBudget
 from app.ingestion.pdf_extractor import (
     ElementTextRelation,
     ExtractedDocument,
@@ -13,6 +16,16 @@ from app.ingestion.pdf_extractor import (
     TableCell,
 )
 from app.ingestion.pipeline import IngestionPipeline, PdfCatalogMetadata
+
+TEST_TOKEN_BUDGET = RegexTokenBudget()
+
+
+@pytest.fixture(autouse=True)
+def exact_token_budget_stub(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "app.ingestion.pipeline.LocalEmbeddingTokenBudget.from_settings",
+        lambda _settings: TEST_TOKEN_BUDGET,
+    )
 
 
 class FakeExtractor:
@@ -230,6 +243,7 @@ def test_pipeline_applies_trusted_catalog_metadata(settings, tmp_path: Path) -> 
     assert article["journal"] == "Pomme à Cidre"
     assert article["publication_year"] == 2025
     assert article["source"] == "IFPC"
+    assert article["validation_status"] == "validated"
 
 
 def test_pipeline_detects_same_doi_across_different_pdf_files(settings, tmp_path: Path) -> None:

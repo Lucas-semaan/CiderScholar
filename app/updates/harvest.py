@@ -8,8 +8,8 @@ import json
 import re
 import unicodedata
 import uuid
-from collections.abc import Callable
-from contextlib import closing
+from collections.abc import Callable, Iterable
+from contextlib import closing, nullcontext
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
@@ -25,6 +25,9 @@ from app.updates.service import CLIENTS
 
 MISSING_ABSTRACT_REASON = (
     "Abstract unavailable after DOI enrichment; excluded from the usable corpus."
+)
+MISSING_DOI_REASON = (
+    "Verified DOI unavailable; retained for review but excluded from the usable corpus."
 )
 
 CIDER_PILOT_THEMES: dict[str, str] = {
@@ -152,13 +155,16 @@ OPENALEX_SEARCH_COST_USD = 0.001
 TITLE_KEY = re.compile(r"[^a-z0-9]+")
 DOMAIN_PATTERN = re.compile(r"\b(ciders?|cidres?|cidricoles?|sidras?|calvados|pommeau)\b")
 APPLE_BEVERAGE_PATTERN = re.compile(
-    r"\b(?:apple (?:juice|must|wine|brandy|beverage)|fermented apple|apple based beverage)\b"
+    r"\b(?:apple (?:juice|must|wine|brandy|beverage)|fermented apple|apple based beverage|"
+    r"(?:suco|vinho|mosto)(?: [a-z]+){0,3} de macas?)\b"
 )
 APPLE_MATERIAL_PATTERN = re.compile(
     r"\b(?:apple (?:fruit|fruits|cultivars?|varieties|pomace|pulp|peels?|skins?|seeds?|"
     r"press cake|processing by-?products?|raw materials?)|pomace from apples?)\b"
 )
-TRUE_APPLE_PATTERN = re.compile(r"\b(?:apples?|pommes?|malus (?:x )?domestica|malus pumila)\b")
+TRUE_APPLE_PATTERN = re.compile(
+    r"\b(?:apples?|pommes?|manzanas?|manzanos?|malus (?:x )?domestica|malus pumila)\b"
+)
 FALSE_APPLE_PATTERN = re.compile(
     r"\b(?:cashew|sugar|custard|star|wood|elephant|rose|wax|water|monkey|pond|"
     r"kei|velvet|mangrove)[ -]+apples?\b|\bapple[ -]rings?\b"
@@ -167,13 +173,15 @@ HEALTH_ONLY_PATTERN = re.compile(
     r"\b(cancer|carcin|rats?|mice|mouse|epithelial|neurodegener|gut health|"
     r"antidiabetic|blood lipids?|cholesterol|obesity|cytotoxicity|home remedy|"
     r"antiacne|acne creams?|postoperative|patients?|general practitioners?|"
-    r"covid(?: 19)?|pandemic)\b"
+    r"pregnan[a-z]*|hospitals?|admissions?|liver disease|alcohol related harms?|"
+    r"heavy drinkers?|platelets?|cosmeceutical|covid(?: 19)?|pandemic)\b"
 )
 VINEGAR_PATTERN = re.compile(r"\b(?:vinegars?|vinaigres?)\b")
 NON_APPLE_FRUIT_PATTERN = re.compile(
-    r"\b(?:apricot|banana|blackberry|blueberry|cashew|cherry|coconut|cranberry|"
+    r"\b(?:apricot|banana|blackberry|blueberry|buni|canistel|cashew|cherry|coconut|"
+    r"cranberry|"
     r"dragon fruit|elderberry|gooseberry|guava|kiwi|lychee|mango|orange|peach|"
-    r"pear|pineapple|plum|pomegranate|raspberry|strawberry)\b"
+    r"pear|pineapple|plum|pomegranate|raspberry|strawberry|eggfruit|lekima)\b"
 )
 NON_APPLE_ADDITION_PATTERN = re.compile(
     r"\b(?:add(?:ed|ition)|blend(?:ed|ing|s)?|extracts?|fortif[a-z]*|supplement[a-z]*)\b"
@@ -186,12 +194,52 @@ OFF_TOPIC_TITLE_PATTERN = re.compile(
     r"automation tool|traffic flow|(?:un)?signalized intersections?|roundabouts?|"
     r"sequence ensemble relationships?|interaction networks? in human diseases|"
     r"willingness to pay|marketing activities|cider sales|socioeconomics?|whigs?|"
+    r"consumption profiles?|consumer experience|quality claims?|"
+    r"shaker spirits?|spirituality|topical formulations?|cosmetic[a-z]*|"
+    r"linguistic identity|multilingual signage|producer perspectives?|"
+    r"implicit reaction|explicit emotional response|"
+    r"good cider out of bad apples|"
+    r"purchasing quantity|research and extension needs?|back cover|cider gum|"
+    r"alcohol availability intervention|cluster based on|cluster base sur|"
     r"hard cider campaign|last hurrah|manual labour|cosmogenic nuclides?|"
-    r"landscape evolution|detrital cosmogenic|resilience and sensemaking)\b"
+    r"climate intervention|dynamical emulator|key value stores?|gui agents?|"
+    r"continuous integration|landscape evolution|detrital cosmogenic|"
+    r"resilience and sensemaking)\b"
 )
 NON_BEVERAGE_ABSTRACT_PATTERN = re.compile(
     r"\b(?:database systems?|query processing|computer vision|software|algorithm|"
-    r"image captions?|traffic intersections?|human diseases)\b"
+    r"image captions?|traffic intersections?|human diseases|climate intervention|"
+    r"scenario space|key value stores?|gui agents?)\b"
+)
+BEVERAGE_CONTEXT_PATTERN = re.compile(
+    r"\b(?:apples?|pommes?|juice|must|pomace|beverages?|ferment[a-z]*|yeasts?|"
+    r"bacter[a-z]*|microb[a-z]*|polyphenol[a-z]*|phenolic[a-z]*|tannin[a-z]*|"
+    r"nitrogen|sensory|aroma[a-z]*|volatile[a-z]*|alcohol|ethanol|pressing|"
+    r"clarif[a-z]*|distill[a-z]*|cultivars?|orchards?|cidres?|sidras?|calvados|"
+    r"pommeau)\b"
+)
+STRONG_TECHNICAL_CONTEXT_PATTERN = re.compile(
+    r"\b(?:apples?|pommes?|juice|must|pomace|beverages?|drinks?|ferment[a-z]*|yeasts?|"
+    r"bacter[a-z]*|microb[a-z]*|polyphenol[a-z]*|phenolic[a-z]*|tannin[a-z]*|"
+    r"nitrogen|sensory|aroma[a-z]*|volatile[a-z]*|alcohol|ethanol|pressing|"
+    r"clarif[a-z]*|distill[a-z]*|brewing|winemaking|brandy|spirits?|cultivars?|"
+    r"orchards?|pectin[a-z]*|pasteur[a-z]*|matur[a-z]*|ageing|aging|quality|"
+    r"processing|production|microfiltrat[a-z]*|filtrat[a-z]*|analyt[a-z]*|chimi[a-z]*|"
+    r"acides?|sucres?|"
+    r"levures?|bacteries?|aromes?|qualite|vieillissement|transformation|"
+    r"determin[a-z]*|quantif[a-z]*|measur[a-z]*|characteri[sz][a-z]*|"
+    r"chromatograph[a-z]*|hplc|spectr[a-z]*|isotop[a-z]*|esters?|fatty acids?|"
+    r"acids?|acidos?|monosaccharides?|proanthocyanidin[a-z]*|sulphit[a-z]*|"
+    r"sulfit[a-z]*|foam[a-z]*|acoustic[a-z]*|equilibr[a-z]*|bottl[a-z]*|"
+    r"proces[a-z]*|elabor[a-z]*|producci[a-z]*|biotecnolog[a-z]*|residuos?|"
+    r"valoriz[a-z]*|plagas?|dimension[a-z]*|control)\b"
+)
+SOCIAL_OR_GEOGRAPHIC_OFF_TOPIC_PATTERN = re.compile(
+    r"\b(?:archaeolog[a-z]*|neolithic|neolithique|jurassic|guerre|war|"
+    r"deuil|medecins?|medical|prophylaxis|prophylaxie|thrombo[a-z]*|"
+    r"free riders?|signaling expectations?|culinary identities|puzzles?|"
+    r"politic[a-z]*|electoral|linguistic identity|sector analysis|analyse du secteur|"
+    r"product diversification|diversificacion productiva)\b"
 )
 THEME_PATTERNS: dict[str, re.Pattern[str]] = {
     "biochimie": re.compile(
@@ -229,7 +277,8 @@ THEME_PATTERNS: dict[str, re.Pattern[str]] = {
     ),
     "aromes_procede": re.compile(
         r"\b(?:aroma[a-z]*|volatile[a-z]*|sensory|flavou?r[a-z]*|process[a-z]*|"
-        r"production|ferment[a-z]*|quality)\b"
+        r"production|ferment[a-z]*|quality|proces[a-z]*|elabor[a-z]*|"
+        r"producci[a-z]*|calidad)\b"
     ),
 }
 
@@ -392,6 +441,12 @@ def _folded_text(value: str | None) -> str:
     """Case-fold text while preserving punctuation needed by exact domain rules."""
 
     normalized = unicodedata.normalize("NFKD", value or "").casefold()
+    normalized = "".join(
+        " "
+        if ord(character) > 127 and unicodedata.category(character)[0] in {"P", "S"}
+        else character
+        for character in normalized
+    )
     return normalized.encode("ascii", "ignore").decode("ascii")
 
 
@@ -422,7 +477,7 @@ def _is_non_apple_cider_title(title: str) -> bool:
                     return True
             elif cider.end() <= fruit.start():
                 between = title[cider.end() : fruit.start()]
-                if NON_APPLE_SOURCE_PATTERN.search(between):
+                if not between.strip() or NON_APPLE_SOURCE_PATTERN.search(between):
                     return True
     return False
 
@@ -436,18 +491,24 @@ def assess_cider_relevance(
     title = _searchable_text(record.title)
     abstract = _searchable_text(record.abstract)
     theme_pattern = THEME_PATTERNS.get(theme, re.compile(r"a^"))
-    title_domain = bool(
-        DOMAIN_PATTERN.search(title)
-        or APPLE_BEVERAGE_PATTERN.search(title)
-        or APPLE_MATERIAL_PATTERN.search(title)
-    )
-    abstract_domain = bool(
-        DOMAIN_PATTERN.search(abstract)
-        or APPLE_BEVERAGE_PATTERN.search(abstract)
-        or APPLE_MATERIAL_PATTERN.search(abstract)
-    )
+    combined = f"{title} {abstract}"
     title_theme = bool(theme_pattern.search(title))
     abstract_theme = bool(theme_pattern.search(abstract))
+    strong_technical_context = bool(
+        STRONG_TECHNICAL_CONTEXT_PATTERN.search(combined) or title_theme or abstract_theme
+    )
+    title_direct_domain = bool(DOMAIN_PATTERN.search(title))
+    abstract_direct_domain = bool(DOMAIN_PATTERN.search(abstract))
+    title_domain = bool(
+        APPLE_BEVERAGE_PATTERN.search(title)
+        or APPLE_MATERIAL_PATTERN.search(title)
+        or (title_direct_domain and strong_technical_context)
+    )
+    abstract_domain = bool(
+        APPLE_BEVERAGE_PATTERN.search(abstract)
+        or APPLE_MATERIAL_PATTERN.search(abstract)
+        or (abstract_direct_domain and strong_technical_context)
+    )
 
     score = 0.0
     reasons: list[str] = []
@@ -469,8 +530,18 @@ def assess_cider_relevance(
     false_apple = bool(FALSE_APPLE_PATTERN.search(_folded_text(record.title)))
     non_apple_cider = _is_non_apple_cider_title(title)
     off_topic = bool(OFF_TOPIC_TITLE_PATTERN.search(title))
-    acronym_title = bool(re.match(r"^CID[Ee]R(?::|$)", record.title.strip())) or title == "cider"
-    non_beverage_acronym = acronym_title and bool(NON_BEVERAGE_ABSTRACT_PATTERN.search(abstract))
+    acronym_title = bool(re.match(r"^cider(?::|$)", title)) or title == "cider"
+    uppercase_acronym = bool(re.search(r"\bCIDER\b", record.title))
+    beverage_context = bool(BEVERAGE_CONTEXT_PATTERN.search(f"{title} {abstract}"))
+    non_beverage_acronym = (acronym_title or uppercase_acronym) and (
+        bool(NON_BEVERAGE_ABSTRACT_PATTERN.search(abstract)) or not beverage_context
+    )
+    domain_without_technical_context = bool(title_direct_domain or abstract_direct_domain) and not (
+        strong_technical_context
+        or APPLE_BEVERAGE_PATTERN.search(combined)
+        or APPLE_MATERIAL_PATTERN.search(combined)
+    )
+    social_or_geographic_off_topic = bool(SOCIAL_OR_GEOGRAPHIC_OFF_TOPIC_PATTERN.search(title))
     if health_only:
         score -= 0.40
         reasons.append("orientation santé hors conception cidricole")
@@ -489,6 +560,12 @@ def assess_cider_relevance(
     if off_topic or non_beverage_acronym:
         score -= 0.70
         reasons.append("homonyme ou orientation non alimentaire hors périmètre")
+    if domain_without_technical_context:
+        score -= 0.70
+        reasons.append("terme cidricole sans contexte technique de boisson ou de pomme")
+    if social_or_geographic_off_topic:
+        score -= 0.70
+        reasons.append("orientation sociale, historique, géographique ou médicale hors périmètre")
     score = round(min(max(score, 0.0), 1.0), 3)
     excluded_orientation = (
         health_only
@@ -498,6 +575,8 @@ def assess_cider_relevance(
         or non_apple_cider
         or off_topic
         or non_beverage_acronym
+        or domain_without_technical_context
+        or social_or_geographic_off_topic
     )
     if excluded_orientation:
         status: Literal["accepted", "review", "rejected"] = "rejected"
@@ -511,6 +590,23 @@ def assess_cider_relevance(
         status=status,
         score=score,
         reason="; ".join(reasons) or "aucun ancrage cidricole détecté",
+    )
+
+
+def assess_cider_relevance_across_themes(
+    record: BibliographicRecord,
+    themes: Iterable[str] | None = None,
+) -> tuple[str, RelevanceAssessment]:
+    """Select the strongest deterministic cider-theme assessment for a record."""
+
+    theme_names = tuple(themes or CIDER_PILOT_THEMES)
+    if not theme_names:
+        raise ValueError("at least one cider relevance theme is required")
+    assessed = [(theme, assess_cider_relevance(record, theme)) for theme in theme_names]
+    status_order = {"rejected": 0, "review": 1, "accepted": 2}
+    return max(
+        assessed,
+        key=lambda item: (item[1].score, status_order[item[1].status]),
     )
 
 
@@ -691,12 +787,16 @@ class BibliographicHarvestStore:
         theme: str,
         rank: int,
         record: BibliographicRecord,
+        _connection: Any | None = None,
     ) -> str | None:
         if self.doi_exclusions.is_excluded(record.doi):
             return None
         canonical_key = _canonical_key(record)
         assessment = assess_cider_relevance(record, theme)
-        with self.database.transaction() as connection:
+        transaction = (
+            nullcontext(_connection) if _connection is not None else self.database.transaction()
+        )
+        with transaction as connection:
             existing = connection.execute(
                 """
                 SELECT * FROM bibliographic_records
@@ -729,24 +829,19 @@ class BibliographicHarvestStore:
                     canonical_key,
                 ),
             ).fetchone()
-            if existing is None and record.publication_year is not None:
-                candidates = connection.execute(
+            if existing is None and record.publication_year is not None and record.doi is not None:
+                provisional_key = (
+                    f"title:{_canonical_title_key(record.title)}:{record.publication_year}"
+                )
+                existing = connection.execute(
                     """
                     SELECT * FROM bibliographic_records
-                    WHERE publication_year = ?
-                      AND (? IS NULL OR doi IS NULL)
+                    WHERE canonical_key = ? AND doi IS NULL
                     ORDER BY created_at, id
+                    LIMIT 1
                     """,
-                    (record.publication_year, record.doi),
-                ).fetchall()
-                title_key = _canonical_title_key(record.title)
-                matches = [
-                    candidate
-                    for candidate in candidates
-                    if _canonical_title_key(str(candidate["title"])) == title_key
-                ]
-                if len(matches) == 1 or (record.doi is not None and matches):
-                    existing = matches[0]
+                    (provisional_key,),
+                ).fetchone()
             if existing is None:
                 record_id = str(
                     uuid.uuid5(
@@ -847,6 +942,26 @@ class BibliographicHarvestStore:
             )
             self._refresh_record_relevance(connection, record_id)
         return record_id
+
+    def upsert_hits(
+        self,
+        *,
+        run_id: str,
+        hits: Iterable[tuple[str, int, BibliographicRecord]],
+    ) -> list[str | None]:
+        """Persist one fetched page atomically with a single SQLite transaction."""
+
+        with self.database.transaction() as connection:
+            return [
+                self.upsert_hit(
+                    run_id=run_id,
+                    theme=theme,
+                    rank=rank,
+                    record=record,
+                    _connection=connection,
+                )
+                for theme, rank, record in hits
+            ]
 
     @staticmethod
     def _refresh_record_relevance(
@@ -1274,6 +1389,83 @@ class BibliographicHarvestStore:
                 ),
             )
         return unique_count, abstract_count, accepted_count, accepted_abstract_count
+
+    def recover_interrupted_run(
+        self,
+        *,
+        run_id: str,
+        reason: str,
+        completed_at: datetime,
+    ) -> dict[str, Any]:
+        """Close one explicitly selected run interrupted before ``finish_run``.
+
+        This operation is intentionally opt-in and only accepts a run that is still
+        marked ``running``.  Its persisted hits remain authoritative: a run with at
+        least one hit becomes ``partial``; an empty run becomes ``failed``.
+        """
+
+        normalized_reason = reason.strip()
+        if not normalized_reason:
+            raise ValueError("interrupted harvest recovery reason is required")
+        with closing(self.database.connect()) as connection:
+            row = connection.execute(
+                """
+                SELECT state, raw_record_count, errors, started_at
+                FROM bibliographic_harvest_runs
+                WHERE id = ?
+                """,
+                (run_id,),
+            ).fetchone()
+        if row is None:
+            raise ValueError(f"unknown bibliographic harvest run: {run_id}")
+        if str(row["state"]) != "running":
+            raise ValueError(f"bibliographic harvest run is not running: {run_id}")
+
+        errors: list[dict[str, str]] = []
+        try:
+            existing_errors = json.loads(str(row["errors"] or "[]"))
+        except json.JSONDecodeError:
+            existing_errors = []
+        if isinstance(existing_errors, list):
+            errors.extend(error for error in existing_errors if isinstance(error, dict))
+        errors.append(
+            {
+                "source": "campaign_recovery",
+                "theme": "all",
+                "error_type": "InterruptedHarvestRecovered",
+                "message": normalized_reason,
+            }
+        )
+
+        raw_record_count = int(row["raw_record_count"] or 0)
+        with closing(self.database.connect()) as connection:
+            hit_count = int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM bibliographic_harvest_hits WHERE run_id = ?",
+                    (run_id,),
+                ).fetchone()[0]
+                or 0
+            )
+        recovered_state: Literal["partial", "failed"] = "partial" if hit_count else "failed"
+        unique_count, abstract_count, accepted_count, accepted_abstract_count = self.finish_run(
+            run_id=run_id,
+            state=recovered_state,
+            raw_record_count=raw_record_count,
+            errors=errors,
+            completed_at=completed_at,
+        )
+        return {
+            "run_id": run_id,
+            "state": recovered_state,
+            "started_at": str(row["started_at"]),
+            "completed_at": completed_at.isoformat(),
+            "raw_record_count": raw_record_count,
+            "unique_record_count": unique_count,
+            "abstract_record_count": abstract_count,
+            "accepted_record_count": accepted_count,
+            "accepted_abstract_count": accepted_abstract_count,
+            "reason": normalized_reason,
+        }
 
     def statistics(self) -> dict[str, Any]:
         with closing(self.database.connect()) as connection:
@@ -1775,7 +1967,8 @@ class BibliographicHarvestStore:
                     """
                     SELECT id
                     FROM bibliographic_records
-                    WHERE abstract IS NULL OR trim(abstract) = ''
+                    WHERE (abstract IS NULL OR trim(abstract) = '')
+                      AND manual_decision IS NULL
                     ORDER BY id
                     """
                 )
@@ -1802,6 +1995,122 @@ class BibliographicHarvestStore:
                 """,
                 (MISSING_ABSTRACT_REASON, *record_ids),
             )
+            self._refresh_run_acceptance_counts(connection)
+        return len(record_ids)
+
+    def reject_run_abstractless_records(self, run_id: str) -> int:
+        """Reject only abstractless automatic hits from one collection run.
+
+        This scoped variant lets a large resumable campaign clean up its own
+        unusable notices without silently changing another run or a manual
+        admission decision.
+        """
+
+        with self.database.transaction() as connection:
+            record_ids = [
+                str(row["id"])
+                for row in connection.execute(
+                    """
+                    SELECT DISTINCT r.id
+                    FROM bibliographic_records AS r
+                    JOIN bibliographic_harvest_hits AS h ON h.record_id = r.id
+                    WHERE h.run_id = ?
+                      AND (r.abstract IS NULL OR trim(r.abstract) = '')
+                      AND r.manual_decision IS NULL
+                    ORDER BY r.id
+                    """,
+                    (run_id,),
+                )
+            ]
+            if not record_ids:
+                return 0
+            placeholders = ",".join("?" for _ in record_ids)
+            connection.execute(
+                f"""
+                UPDATE bibliographic_harvest_hits
+                SET relevance_status = 'rejected', relevance_score = 0.0,
+                    relevance_reason = ?
+                WHERE run_id = ? AND record_id IN ({placeholders})
+                """,
+                (MISSING_ABSTRACT_REASON, run_id, *record_ids),
+            )
+            for record_id in record_ids:
+                self._refresh_record_relevance(connection, record_id)
+            self._refresh_run_acceptance_counts(connection)
+        return len(record_ids)
+
+    def review_run_doi_less_abstracts(self, run_id: str) -> int:
+        """Keep DOI-less abstracts auditable but outside the accepted corpus."""
+
+        with self.database.transaction() as connection:
+            record_ids = [
+                str(row["id"])
+                for row in connection.execute(
+                    """
+                    SELECT DISTINCT r.id
+                    FROM bibliographic_records AS r
+                    JOIN bibliographic_harvest_hits AS h ON h.record_id = r.id
+                    WHERE h.run_id = ?
+                      AND h.relevance_status = 'accepted'
+                      AND r.abstract IS NOT NULL AND trim(r.abstract) != ''
+                      AND r.doi IS NULL
+                      AND r.manual_decision IS NULL
+                    ORDER BY r.id
+                    """,
+                    (run_id,),
+                )
+            ]
+            if not record_ids:
+                return 0
+            placeholders = ",".join("?" for _ in record_ids)
+            connection.execute(
+                f"""
+                UPDATE bibliographic_harvest_hits
+                SET relevance_status = 'review',
+                    relevance_reason = relevance_reason || '; ' || ?
+                WHERE run_id = ? AND record_id IN ({placeholders})
+                """,
+                (MISSING_DOI_REASON, run_id, *record_ids),
+            )
+            for record_id in record_ids:
+                self._refresh_record_relevance(connection, record_id)
+            self._refresh_run_acceptance_counts(connection)
+        return len(record_ids)
+
+    def review_doi_less_abstracts(self) -> int:
+        """Keep every automatic DOI-less abstract outside the accepted corpus."""
+
+        with self.database.transaction() as connection:
+            record_ids = [
+                str(row["id"])
+                for row in connection.execute(
+                    """
+                    SELECT DISTINCT r.id
+                    FROM bibliographic_records AS r
+                    JOIN bibliographic_harvest_hits AS h ON h.record_id = r.id
+                    WHERE h.relevance_status = 'accepted'
+                      AND r.abstract IS NOT NULL AND trim(r.abstract) != ''
+                      AND r.doi IS NULL
+                      AND r.manual_decision IS NULL
+                    ORDER BY r.id
+                    """
+                )
+            ]
+            if not record_ids:
+                return 0
+            placeholders = ",".join("?" for _ in record_ids)
+            connection.execute(
+                f"""
+                UPDATE bibliographic_harvest_hits
+                SET relevance_status = 'review',
+                    relevance_reason = relevance_reason || '; ' || ?
+                WHERE relevance_status = 'accepted'
+                  AND record_id IN ({placeholders})
+                """,
+                (MISSING_DOI_REASON, *record_ids),
+            )
+            for record_id in record_ids:
+                self._refresh_record_relevance(connection, record_id)
             self._refresh_run_acceptance_counts(connection)
         return len(record_ids)
 
@@ -2009,7 +2318,7 @@ class BibliographicHarvestStore:
             records = list(
                 connection.execute(
                     """
-                    SELECT id, title, abstract, doi, embedding_status, updated_at
+                    SELECT id, title, abstract, doi, content_hash, embedding_status, updated_at
                     FROM bibliographic_records
                     WHERE relevance_status = 'accepted'
                       AND abstract IS NOT NULL
@@ -2039,23 +2348,64 @@ class BibliographicHarvestStore:
     ) -> int:
         if not record_ids:
             return 0
-        placeholders = ",".join("?" for _ in record_ids)
-        predicate = ""
-        parameters: list[object] = [status, *record_ids]
-        if exclude_current:
-            predicate = " AND embedding_status != ?"
-            parameters.append(status)
-        if only_current is not None:
-            predicate = " AND embedding_status = ?"
-            parameters.append(only_current)
+        # SQLite builds with the common 999-variable limit cannot update a
+        # mature bibliographic corpus in one IN clause.  This is also used by
+        # the incremental indexer while a harvest is adding records.
+        batch_size = 900
+        updated = 0
         with closing(self.database.connect()) as connection, connection:
-            cursor = connection.execute(
-                "UPDATE bibliographic_records SET embedding_status = ?, "
-                "updated_at = CURRENT_TIMESTAMP "
-                f"WHERE id IN ({placeholders}){predicate}",
-                parameters,
-            )
-            return int(cursor.rowcount)
+            for offset in range(0, len(record_ids), batch_size):
+                record_id_batch = record_ids[offset : offset + batch_size]
+                placeholders = ",".join("?" for _ in record_id_batch)
+                predicate = ""
+                parameters: list[object] = [status, *record_id_batch]
+                if exclude_current:
+                    predicate = " AND embedding_status != ?"
+                    parameters.append(status)
+                if only_current is not None:
+                    predicate = " AND embedding_status = ?"
+                    parameters.append(only_current)
+                cursor = connection.execute(
+                    "UPDATE bibliographic_records SET embedding_status = ?, "
+                    "updated_at = CURRENT_TIMESTAMP "
+                    f"WHERE id IN ({placeholders}){predicate}",
+                    parameters,
+                )
+                updated += int(cursor.rowcount)
+        return updated
+
+    def update_embedding_status_if_unchanged(
+        self,
+        record_content_hashes: dict[str, str],
+        status: str,
+    ) -> int:
+        """Advance only records whose embedded content is still current.
+
+        Harvesting and vectorization may run concurrently.  A vector produced
+        from an older abstract must never mark a subsequently enriched record
+        as indexed (or failed): the later content remains pending for the
+        next incremental pass instead.
+        """
+
+        if not record_content_hashes:
+            return 0
+        if status not in {"indexed", "failed"}:
+            raise ValueError("conditional bibliographic status must be indexed or failed")
+        updated = 0
+        with closing(self.database.connect()) as connection, connection:
+            for record_id, content_hash in record_content_hashes.items():
+                cursor = connection.execute(
+                    """
+                    UPDATE bibliographic_records
+                    SET embedding_status = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ? AND content_hash = ?
+                      AND relevance_status = 'accepted'
+                      AND abstract IS NOT NULL AND trim(abstract) != ''
+                    """,
+                    (status, record_id, content_hash),
+                )
+                updated += int(cursor.rowcount)
+        return updated
 
 
 def _verified_normalized_doi(value: object) -> str | None:
@@ -2205,6 +2555,19 @@ class CiderPilotHarvester:
             errors=errors,
             completed_at=completed_at,
         )
+        if self.store.review_run_doi_less_abstracts(run_id):
+            (
+                unique_count,
+                abstract_count,
+                accepted_count,
+                accepted_abstract_count,
+            ) = self.store.finish_run(
+                run_id=run_id,
+                state=state,
+                raw_record_count=raw_count,
+                errors=errors,
+                completed_at=completed_at,
+            )
         return BibliographicHarvestReport(
             run_id=run_id,
             state=state,
@@ -2387,6 +2750,9 @@ class CiderBulkHarvester:
         harvest_runs: list[BibliographicHarvestReport] = []
         backfill_runs: list[AbstractBackfillReport] = []
         no_progress_runs = 0
+        empty_error_runs = 0
+        backfill_no_progress_runs = 0
+        backfill_enabled = True
         stop_reason: Literal["target_reached", "max_runs", "no_progress"] = "max_runs"
 
         for run_number in range(1, max_runs + 1):
@@ -2407,13 +2773,32 @@ class CiderBulkHarvester:
                     f"new={after_harvest - baseline} state={harvest.state}"
                 )
 
-            if after_harvest - baseline < target_new_accepted_abstracts:
+            if harvest.raw_record_count == 0 and harvest.errors:
+                empty_error_runs += 1
+            else:
+                empty_error_runs = 0
+            if empty_error_runs >= 2:
+                stop_reason = "no_progress"
+                break
+
+            if (
+                backfill_enabled
+                and harvest.raw_record_count > 0
+                and after_harvest - baseline < target_new_accepted_abstracts
+            ):
                 backfill = CiderAbstractBackfiller(active, self.database).run(limit=100)
                 backfill_runs.append(backfill)
+                if backfill.abstracts_added:
+                    backfill_no_progress_runs = 0
+                elif backfill.state != "skipped":
+                    backfill_no_progress_runs += 1
+                    if backfill_no_progress_runs >= 2:
+                        backfill_enabled = False
                 if progress is not None:
                     progress(
                         f"backfill={backfill.state} candidates={backfill.candidates} "
-                        f"abstracts_added={backfill.abstracts_added}"
+                        f"abstracts_added={backfill.abstracts_added} "
+                        f"enabled={backfill_enabled}"
                     )
 
             current = self.store.statistics()["abstracts"]

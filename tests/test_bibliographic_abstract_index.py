@@ -197,6 +197,79 @@ def test_abstract_index_retries_only_failed_eligible_records(settings) -> None:
     assert verify_bibliographic_abstract_index(common, store).verified is True
 
 
+def test_abstract_changed_during_embedding_remains_pending_for_incremental_retry(settings) -> None:
+    """A concurrent harvest cannot permanently acknowledge a stale vector."""
+
+    common = settings_for_corpus(settings, CorpusScope.COMMON)
+    store, doi = _store_with_eligible_and_excluded_records(settings)
+    database = Database(common.paths.database_path)
+
+    class UpdatingBackend(_Backend):
+        def encode_documents(self, texts):
+            with database.transaction() as connection:
+                connection.execute(
+                    """
+                    UPDATE bibliographic_records
+                    SET abstract = ?, content_hash = ?, embedding_status = 'pending'
+                    WHERE doi = ?
+                    """,
+                    (
+                        "Cider yeast fermentation evidence enriched during indexing.",
+                        "f" * 64,
+                        doi,
+                    ),
+                )
+            return super().encode_documents(texts)
+
+    stale = index_bibliographic_abstracts(
+        common,
+        store,
+        UpdatingBackend(common.embeddings.model_name),
+        close_backend=False,
+        retry_failed=False,
+        max_batches=1,
+    )
+    assert stale.records_indexed == 0
+    assert store.pending_abstracts(limit=10, retry_failed=False)
+
+    resumed = index_bibliographic_abstracts(
+        common,
+        store,
+        _Backend(common.embeddings.model_name),
+        close_backend=False,
+        retry_failed=False,
+    )
+    assert resumed.records_indexed == 1
+    assert verify_bibliographic_abstract_index(common, store).verified is True
+
+
+def test_abstract_index_can_limit_a_pass_to_one_batch(settings) -> None:
+    common = settings_for_corpus(settings, CorpusScope.COMMON)
+    store, _ = _store_with_eligible_and_excluded_records(settings)
+    with Database(common.paths.database_path).transaction() as connection:
+        connection.execute("UPDATE bibliographic_records SET relevance_status = 'accepted'")
+
+    report = index_bibliographic_abstracts(
+        common,
+        store,
+        _Backend(common.embeddings.model_name),
+        close_backend=False,
+        recreate=True,
+        max_batches=1,
+    )
+    assert report.batches_completed == 1
+    assert report.records_indexed == 1
+
+
+def test_embedding_status_sync_batches_large_identifier_sets(settings) -> None:
+    store, _ = _store_with_eligible_and_excluded_records(settings)
+
+    # The common SQLite variable limit is 999.  Nonexistent rows are enough to
+    # exercise the parameter batching without inflating the fixture corpus.
+    record_ids = [f"missing-record-{index}" for index in range(1_001)]
+    assert store._set_embedding_status(record_ids, "not_applicable") == 0
+
+
 def test_recreate_removes_points_that_became_ineligible_on_windows(settings) -> None:
     common = settings_for_corpus(settings, CorpusScope.COMMON)
     database = Database(common.paths.database_path)

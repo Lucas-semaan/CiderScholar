@@ -377,6 +377,20 @@ def test_synchronous_chatbot_route_is_removed(settings) -> None:
     assert response.status_code == 405
 
 
+def test_document_suggestion_routes_are_removed(settings) -> None:
+    with TestClient(create_app(settings)) as client:
+        listing = client.get("/api/suggestions")
+        reference = client.post(
+            "/api/suggestions",
+            json={"source": {"kind": "doi", "doi": "10.1000/retired"}},
+        )
+        pdf = client.post("/api/suggestions/pdf")
+
+    assert listing.status_code == 404
+    assert reference.status_code == 405
+    assert pdf.status_code == 405
+
+
 def test_chatbot_conversation_history_can_be_managed_and_reloaded(settings) -> None:
     with TestClient(create_app(settings)) as client:
         created = client.post("/api/chatbot/conversations", json={"title": "Levures et arômes"})

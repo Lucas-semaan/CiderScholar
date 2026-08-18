@@ -132,6 +132,19 @@ def _copy_pdf(source: Path, destination_root: Path, sha256: str) -> Path:
     return destination
 
 
+def _copytree_without_overwrite(source: Path, destination: Path) -> None:
+    """Copy legacy caches while preserving every already-present target file."""
+
+    for item in source.rglob("*"):
+        relative = item.relative_to(source)
+        target = destination / relative
+        if item.is_dir():
+            target.mkdir(parents=True, exist_ok=True)
+        elif item.is_file() and not target.exists():
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(item, target)
+
+
 def _insert_rows(connection, table: str, columns: tuple[str, ...], rows) -> None:
     if not rows:
         return
@@ -316,9 +329,15 @@ def migrate_legacy_corpus(
     """Copy only corpus-owned records and assets, leaving the legacy source intact."""
 
     authorize_corpus_mutation(CorpusScope.COMMON, profile)
-    legacy = Database(settings.paths.database_path)
     common_paths = corpus_paths(settings, CorpusScope.COMMON)
     common = Database(common_paths.database_path)
+    legacy_path = settings.paths.database_path
+    if legacy_path.resolve() == common.path.resolve():
+        # The active configuration may already have been switched to the
+        # common corpus. Keep the former location discoverable for the
+        # explicit, additive migration instead of making that switch lossy.
+        legacy_path = settings.paths.data_dir / "database" / common_paths.database_path.name
+    legacy = Database(legacy_path)
     if legacy.path.resolve() == common.path.resolve():
         raise CorpusMigrationError("legacy and common databases must be different")
     if not legacy.path.is_file():
@@ -355,18 +374,16 @@ def migrate_legacy_corpus(
         abstracts_skipped_full_text,
     ) = _migrate_legacy_abstracts(legacy, common)
 
-    if settings.paths.extracted_dir.is_dir():
-        shutil.copytree(
-            settings.paths.extracted_dir,
-            common_paths.extracted_dir,
-            dirs_exist_ok=True,
-        )
-    if settings.paths.qdrant_dir.is_dir():
-        shutil.copytree(
-            settings.paths.qdrant_dir,
-            common_paths.qdrant_dir,
-            dirs_exist_ok=True,
-        )
+    legacy_extracted_dir = settings.paths.extracted_dir
+    if legacy_extracted_dir.resolve() == common_paths.extracted_dir.resolve():
+        legacy_extracted_dir = settings.paths.data_dir / "extracted"
+    if legacy_extracted_dir.is_dir():
+        _copytree_without_overwrite(legacy_extracted_dir, common_paths.extracted_dir)
+    legacy_qdrant_dir = settings.paths.qdrant_dir
+    if legacy_qdrant_dir.resolve() == common_paths.qdrant_dir.resolve():
+        legacy_qdrant_dir = settings.paths.data_dir / "qdrant"
+    if legacy_qdrant_dir.is_dir():
+        _copytree_without_overwrite(legacy_qdrant_dir, common_paths.qdrant_dir)
 
     target_articles = _rows(common, "articles", ARTICLE_COLUMNS)
     target_chunks = _rows(common, "chunks", CHUNK_COLUMNS)

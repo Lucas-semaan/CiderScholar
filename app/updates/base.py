@@ -42,6 +42,7 @@ class OfficialBibliographicClient:
     source_id: ClassVar[str]
     source_label: ClassVar[str]
     api_key_environment_attribute: ClassVar[str | None] = None
+    minimum_request_delay_seconds: ClassVar[float] = 0.0
 
     def __init__(
         self,
@@ -79,7 +80,8 @@ class OfficialBibliographicClient:
         return bool(os.environ.get(environment_name, "").strip())
 
     def _pace(self) -> None:
-        remaining = self._last_request_at + self.config.request_delay_seconds - time.monotonic()
+        delay = max(self.config.request_delay_seconds, self.minimum_request_delay_seconds)
+        remaining = self._last_request_at + delay - time.monotonic()
         if remaining > 0:
             time.sleep(remaining)
         self._last_request_at = time.monotonic()
@@ -91,6 +93,33 @@ class OfficialBibliographicClient:
         params: Mapping[str, str | int | float],
         headers: Mapping[str, str] | None = None,
     ) -> dict[str, Any]:
+        response = self._get_response(url, params=params, headers=headers)
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise BibliographicApiError(f"{self.source_label} returned invalid JSON") from exc
+        if not isinstance(payload, dict):
+            raise BibliographicApiError(
+                f"{self.source_label} returned an unexpected JSON structure"
+            )
+        return payload
+
+    def _get_text(
+        self,
+        url: str,
+        *,
+        params: Mapping[str, str | int | float],
+        headers: Mapping[str, str] | None = None,
+    ) -> str:
+        return self._get_response(url, params=params, headers=headers).text
+
+    def _get_response(
+        self,
+        url: str,
+        *,
+        params: Mapping[str, str | int | float],
+        headers: Mapping[str, str] | None = None,
+    ) -> httpx.Response:
         attempts = self.config.max_retries + 1
         last_error: Exception | None = None
         for attempt in range(attempts):
@@ -125,15 +154,7 @@ class OfficialBibliographicClient:
                 raise BibliographicApiError(
                     f"{self.source_label} returned HTTP {response.status_code}"
                 )
-            try:
-                payload = response.json()
-            except ValueError as exc:
-                raise BibliographicApiError(f"{self.source_label} returned invalid JSON") from exc
-            if not isinstance(payload, dict):
-                raise BibliographicApiError(
-                    f"{self.source_label} returned an unexpected JSON structure"
-                )
-            return payload
+            return response
         if isinstance(last_error, httpx.TimeoutException):
             raise BibliographicApiDeferred(
                 f"{self.source_label} timed out after {attempts} attempt(s)",

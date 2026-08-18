@@ -25,6 +25,15 @@ def test_paths_cannot_escape_data_directory(tmp_path: Path) -> None:
         paths.resolved(tmp_path)
 
 
+def test_default_scientific_paths_are_the_common_corpus() -> None:
+    paths = PathConfig()
+
+    assert paths.pdf_dir == paths.common_pdf_dir
+    assert paths.extracted_dir == paths.common_extracted_dir
+    assert paths.qdrant_dir == paths.common_qdrant_dir
+    assert paths.database_path == paths.scientific_database_path
+
+
 def test_retrieval_weights_are_validated() -> None:
     with pytest.raises(ValidationError, match="weights must add up"):
         Settings.model_validate(
@@ -61,6 +70,22 @@ def test_distribution_uses_only_a_local_synchronized_path(tmp_path: Path) -> Non
     assert "graph" not in settings.distribution.model_dump(mode="json")
     with pytest.raises(ValidationError, match="synchronized_root"):
         Settings.model_validate({"distribution": {"enabled": True}})
+
+
+def test_retired_proposal_settings_do_not_block_existing_desktop_config(tmp_path: Path) -> None:
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        "suggestions:\n"
+        "  maximum_pdf_bytes: 26214400\n"
+        "ingestion:\n"
+        "  local_import_validation_status: awaiting_validation\n",
+        encoding="utf-8",
+    )
+
+    settings = load_settings(config)
+
+    assert not hasattr(settings, "suggestions")
+    assert not hasattr(settings.ingestion, "local_import_validation_status")
 
 
 def test_article_ranking_weights_are_validated() -> None:

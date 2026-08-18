@@ -388,14 +388,11 @@ def test_sharepoint_layout_contains_only_distribution_directories(tmp_path) -> N
 
     assert paths.installers.is_dir()
     assert paths.corpus.is_dir()
-    assert paths.suggestions_inbox.is_dir()
     assert paths.archive.is_dir()
     assert {path.relative_to(paths.root).as_posix() for path in paths.root.rglob("*")} == {
         "archive",
         "corpus",
         "installers",
-        "suggestions",
-        "suggestions/inbox",
     }
     assert not any(path.is_file() for path in paths.root.rglob("*"))
 

@@ -39,10 +39,12 @@ export function CorpusPage({ embedded = false }: { embedded?: boolean }) {
   const [queuedJob, setQueuedJob] = useState<DurableJob | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<CorpusArticle | null>(null);
   const tab = corpusTabFromQuery(searchParams.get("tab"));
+  const attentionOnly = searchParams.get("filter") === "attention";
   const selectTab = (nextTab: CorpusTab) =>
     setSearchParams((previous) => {
       const next = new URLSearchParams(previous);
       next.set("tab", nextTab);
+      next.delete("filter");
       return next;
     });
   const runAction = useCallback(
@@ -247,6 +249,7 @@ export function CorpusPage({ embedded = false }: { embedded?: boolean }) {
       )}
       {tab === "activity" && (
         <CorpusActivityPanel
+          attentionOnly={attentionOnly}
           jobs={data.jobs}
           retryFailed={retryFailed}
           setRetryFailed={setRetryFailed}

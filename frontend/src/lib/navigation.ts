@@ -6,7 +6,7 @@ export const appDestinations = {
   documentaryRecords: "/bibliotheque",
   localPdfs: "/bibliotheque?section=pdf&tab=articles",
   savedAnalyses: "/syntheses",
-  corpusActivity: "/bibliotheque?section=pdf&tab=activity",
+  corpusActivity: "/bibliotheque?section=pdf&tab=activity&filter=attention",
 } as const;
 
 export function corpusDestinations() {

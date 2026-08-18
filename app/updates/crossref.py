@@ -3,8 +3,13 @@
 from __future__ import annotations
 
 from typing import Any
+from urllib.parse import quote
 
-from app.updates.base import OfficialBibliographicClient
+from app.updates.base import (
+    BibliographicApiDeferred,
+    BibliographicApiError,
+    OfficialBibliographicClient,
+)
 from app.updates.models import (
     BibliographicRecord,
     clean_text,
@@ -50,6 +55,39 @@ class CrossrefClient(OfficialBibliographicClient):
                 records.append(self._record(item))
             except ValueError:
                 continue
+        return records
+
+    def lookup_dois(self, dois: list[str]) -> list[BibliographicRecord]:
+        """Resolve up to 100 normalized DOI values through exact Crossref work endpoints."""
+
+        normalized = list(
+            dict.fromkeys(doi for value in dois if (doi := normalize_doi(value)) is not None)
+        )
+        if len(normalized) > 100:
+            raise ValueError("Crossref DOI lookup accepts at most 100 DOI values")
+        records: list[BibliographicRecord] = []
+        for doi in normalized:
+            try:
+                payload = self._get_json(
+                    f"{self.config.crossref_base_url}/works/{quote(doi, safe='')}",
+                    params=(
+                        {"mailto": self.config.crossref_email} if self.config.crossref_email else {}
+                    ),
+                    headers={"User-Agent": self._user_agent()},
+                )
+            except BibliographicApiDeferred:
+                raise
+            except BibliographicApiError:
+                continue
+            item = payload.get("message")
+            if not isinstance(item, dict):
+                continue
+            try:
+                record = self._record(item)
+            except ValueError:
+                continue
+            if record.doi == doi:
+                records.append(record)
         return records
 
     def _user_agent(self) -> str:
