@@ -48,6 +48,23 @@ describe("RecordDetailBody", () => {
     expect(markup).toContain("Article de revue");
     expect(markup).toContain("Journal scientifique");
   });
+
+  it("keeps a metadata-only lead outside the scientific evidence corpus", () => {
+    const metadataOnly = {
+      ...record,
+      abstract: null,
+      document_type: "metadata_only" as const,
+    };
+    const markup = renderToStaticMarkup(
+      createElement(RecordDetailBody, {
+        onReviewed: () => undefined,
+        record: metadataOnly,
+      }),
+    );
+
+    expect(markup).toContain("Aucun abstract ni texte intégral");
+    expect(markup).toContain("n’alimente pas le RAG scientifique");
+  });
 });
 
 describe("RecordDetail", () => {

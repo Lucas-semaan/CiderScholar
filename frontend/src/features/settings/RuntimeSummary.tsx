@@ -1,14 +1,25 @@
-import { BrainCircuit, Cpu, Database, KeyRound, type LucideIcon } from "lucide-react";
+import { BrainCircuit, Cpu, Database, KeyRound, Network, type LucideIcon } from "lucide-react";
 
 import { Card, CardBody } from "@/components/ui/Card";
-import type { RuntimeSettings } from "@/types/api";
+import type { LlmProviderProfile, RuntimeSettings } from "@/types/api";
 
-export function RuntimeSummary({ settings }: { settings: RuntimeSettings }) {
+export function RuntimeSummary({
+  settings,
+  provider,
+}: {
+  settings: RuntimeSettings;
+  provider: LlmProviderProfile | undefined;
+}) {
   const cards: Array<{ icon: LucideIcon; label: string; value: string }> = [
     {
       icon: BrainCircuit,
       label: "Génération",
-      value: `${settings.llm_provider.toUpperCase()} · ${settings.llm_model}`,
+      value: `${provider?.label ?? settings.llm_provider.toUpperCase()} · ${settings.llm_model}`,
+    },
+    {
+      icon: Network,
+      label: "Endpoint actif",
+      value: provider?.base_url ?? "Non disponible",
     },
     {
       icon: Cpu,
@@ -26,7 +37,7 @@ export function RuntimeSummary({ settings }: { settings: RuntimeSettings }) {
   return (
     <section
       aria-label="Environnement d’exécution"
-      className="grid gap-4 md:grid-cols-2 xl:grid-cols-4"
+      className="grid gap-4 md:grid-cols-2 xl:grid-cols-5"
     >
       {cards.map(({ icon: Icon, label, value }) => (
         <Card key={label}>

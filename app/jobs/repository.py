@@ -1388,7 +1388,7 @@ class JobRepository:
                     JobState.QUEUED.value,
                     retry_timestamp,
                     JobErrorKind.QUOTA.value,
-                    "Quota ARGO personnel atteint ; reprise automatique planifiée.",
+                    "Quota du fournisseur LLM atteint ; reprise automatique planifiée.",
                     deferred_timestamp,
                     str(job_id),
                 ),

@@ -10,6 +10,10 @@ import type {
   LibraryRecordsResponse,
   LibraryReviewDecisionResponse,
   LibrarySummary,
+  LlmProviderConnectionStatus,
+  LlmProviderId,
+  LlmProviderProfile,
+  LlmProvidersResponse,
   MaintenanceSchedule,
   OnboardingStatus,
   Overview,
@@ -67,7 +71,7 @@ export interface LibraryRecordFilters {
   theme: string;
   source: string;
   abstract: "all" | "with" | "without";
-  availability: "all" | "full_text" | "abstract_only";
+  availability: "all" | "full_text" | "abstract_only" | "metadata_only";
   limit: number;
   offset: number;
 }
@@ -113,6 +117,23 @@ export const api = {
       }),
     remove: () => request<ArgoKeyStatus>("/api/argo-key", { method: "DELETE" }),
     test: () => post<ArgoConnectionStatus>("/api/argo-key/test", {}),
+  },
+  llmProviders: {
+    list: () => request<LlmProvidersResponse>("/api/llm-providers"),
+    save: (provider: LlmProviderId, payload: { key?: string; base_url?: string; model?: string }) =>
+      request<LlmProviderProfile>(`/api/llm-providers/${provider}`, {
+        method: "PUT",
+        body: JSON.stringify(payload),
+      }),
+    remove: (provider: LlmProviderId) =>
+      request<LlmProviderProfile>(`/api/llm-providers/${provider}`, { method: "DELETE" }),
+    test: (provider: LlmProviderId) =>
+      post<LlmProviderConnectionStatus>(`/api/llm-providers/${provider}/test`, {}),
+    activate: (provider: LlmProviderId) =>
+      request<LlmProviderProfile>("/api/llm-providers/active", {
+        method: "PUT",
+        body: JSON.stringify({ provider }),
+      }),
   },
   chatbot: {
     conversations: () =>

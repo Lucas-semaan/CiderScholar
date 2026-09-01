@@ -18,6 +18,7 @@ from app.llm.contracts import (
     GenerationMetrics,
     GenerationResponse,
 )
+from app.llm.providers import active_llm_model
 from app.llm.response_language import (
     output_language_name,
     question_language,
@@ -987,7 +988,7 @@ class HierarchicalSynthesisService:
 
         self.database.start_synthesis_run(
             query_id=query_id,
-            model_version=self.settings.argo.model,
+            model_version=active_llm_model(self.settings),
             reset=not resume,
         )
         metrics: list[GenerationMetrics] = []

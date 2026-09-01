@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 from dataclasses import asdict
 from typing import Annotated, Any
 
@@ -21,7 +20,7 @@ from app.deep_research.promotion import deep_research_availability
 from app.desktop.app_updates import check_application_update
 from app.desktop.supervisor import request_shutdown
 from app.diagnostics import build_runtime_diagnostics
-from app.llm.argo_key import ArgoKeyStore
+from app.llm.providers import LlmProviderStore
 from app.memory_profiles import recommend_memory_profile
 from app.publisher_access.credentials import PublisherCredentialStore
 from app.services.document_library import document_library_summary
@@ -114,6 +113,7 @@ def shutdown_application(
 
 
 def runtime_payload(settings: Settings) -> dict[str, Any]:
+    llm_profile = LlmProviderStore(settings).active_profile()
     memory = recommend_memory_profile(settings)
     corpus_update_check = refresh_corpus_update_if_due(settings)
     corpus_update = corpus_update_check.comparison
@@ -122,11 +122,11 @@ def runtime_payload(settings: Settings) -> dict[str, Any]:
     return {
         "offline_mode": settings.app.offline_mode,
         "bibliographic_apis": settings.app.allow_bibliographic_apis,
-        "llm_provider": "argo",
-        "llm_model": settings.argo.model,
-        "llm_key_configured": (
-            ArgoKeyStore(settings).configured() or bool(os.environ.get(settings.argo.api_key_env))
-        ),
+        "llm_provider": llm_profile.id,
+        "llm_provider_label": llm_profile.label,
+        "llm_endpoint": llm_profile.base_url,
+        "llm_model": llm_profile.model,
+        "llm_key_configured": llm_profile.key_configured,
         "embedding_model": settings.embeddings.model_name,
         "embedding_device": settings.embeddings.device,
         "embedding_batch_size": settings.embeddings.batch_size,

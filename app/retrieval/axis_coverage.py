@@ -26,6 +26,41 @@ class AxisCoveragePool:
     axis_ranks: dict[str, dict[str, int]]
 
 
+def _merge_ranked_chunks(primary: RankedArticle, complementary: RankedArticle) -> RankedArticle:
+    """Keep axis-specific chunks for one physical article without changing its authority."""
+
+    if primary.article_id != complementary.article_id:
+        # Distinct local manifestations can share a DOI. Their chunk identifiers belong to
+        # different SQLite articles and must never be mixed.
+        return primary
+    page_by_chunk = {
+        chunk_id: primary.page_ranges[index]
+        for index, chunk_id in enumerate(primary.top_chunk_ids)
+        if index < len(primary.page_ranges)
+    }
+    merged_ids = list(primary.top_chunk_ids)
+    for index, chunk_id in enumerate(complementary.top_chunk_ids):
+        if chunk_id in page_by_chunk or len(merged_ids) >= 8:
+            continue
+        merged_ids.append(chunk_id)
+        page_by_chunk[chunk_id] = (
+            complementary.page_ranges[index] if index < len(complementary.page_ranges) else ""
+        )
+    if merged_ids == primary.top_chunk_ids:
+        return primary
+    return primary.model_copy(
+        update={
+            "top_chunk_ids": merged_ids,
+            "page_ranges": [page_by_chunk[chunk_id] for chunk_id in merged_ids],
+            "matched_chunk_count": max(
+                primary.matched_chunk_count,
+                complementary.matched_chunk_count,
+                len(merged_ids),
+            ),
+        }
+    )
+
+
 def merge_axis_rankings(
     global_articles: Sequence[RankedArticle],
     axis_articles: Mapping[str, Sequence[RankedArticle]],
@@ -57,6 +92,8 @@ def merge_axis_rankings(
             if key not in retained:
                 retained[key] = article
                 order.append(key)
+            else:
+                retained[key] = _merge_ranked_chunks(retained[key], article)
         axis_ranks[axis_key] = ranks
 
     return AxisCoveragePool(

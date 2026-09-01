@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from pydantic import BaseModel, ConfigDict
 
 from app.config import Settings
-from app.llm.argo_client import ArgoHealth
 from app.secrets import DpapiFileSecretStore
+
+if TYPE_CHECKING:
+    from app.llm.argo_client import ArgoHealth
 
 ARGO_SECRET_RELATIVE_PATH = Path("secrets") / "argo-key.dpapi"
 MAX_ARGO_KEY_CHARACTERS = 4096

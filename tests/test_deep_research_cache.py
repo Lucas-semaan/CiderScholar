@@ -64,6 +64,14 @@ def test_cache_signature_rejects_fabricated_key() -> None:
         DeepResearchCacheSignature.model_validate(valid)
 
 
+def test_previous_retrieval_semantics_cache_schema_is_rejected() -> None:
+    stale = _signature().model_dump()
+    stale["schema_version"] = 3
+
+    with pytest.raises(ValidationError):
+        DeepResearchCacheSignature.model_validate(stale)
+
+
 def test_cache_entry_rejects_signature_mismatch(settings) -> None:
     cache = DeepResearchResponseCache(settings, settings.paths.cache_dir / "responses")
     expected = _signature()

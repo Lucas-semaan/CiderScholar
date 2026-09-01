@@ -86,6 +86,7 @@ class ArticleRankingResponse(BaseModel):
     query_variant_count: int = Field(default=1, ge=1)
     lexical_candidate_count: int = Field(default=0, ge=0)
     dense_candidate_count: int = Field(default=0, ge=0)
+    vector_query_count: int = Field(default=0, ge=0)
     rrf_unique_candidate_count: int = Field(default=0, ge=0)
     vector_search_degraded: bool = False
     articles: list[RankedArticle]
@@ -430,6 +431,9 @@ class ArticleRankingService:
         lexical_mode: QueryMode = "any",
         article_ids: Sequence[str] | None = None,
         sections: Sequence[str] | None = None,
+        max_vector_query_variants: int | None = None,
+        candidate_limit: int | None = None,
+        prefix_matching: bool | None = None,
     ) -> ArticleRankingResponse:
         if self.hybrid is None:
             raise RuntimeError("hybrid search service is required for search")
@@ -450,10 +454,19 @@ class ArticleRankingService:
             query,
             query_variants=query_variants,
             limit=hybrid_limit,
-            candidate_limit=max(hybrid_limit, self.settings.retrieval.hybrid_candidate_limit),
+            candidate_limit=max(
+                hybrid_limit,
+                (
+                    self.settings.retrieval.hybrid_candidate_limit
+                    if candidate_limit is None
+                    else candidate_limit
+                ),
+            ),
             lexical_mode=lexical_mode,
+            prefix_matching=prefix_matching,
             article_ids=article_ids,
             sections=sections,
+            max_vector_query_variants=max_vector_query_variants,
         )
         response = self.rank_candidates(
             query,
@@ -469,6 +482,7 @@ class ArticleRankingService:
                 "query_variant_count": len(hybrid_response.queries),
                 "lexical_candidate_count": hybrid_response.lexical_candidates,
                 "dense_candidate_count": hybrid_response.vector_candidates,
+                "vector_query_count": hybrid_response.vector_query_count,
                 "rrf_unique_candidate_count": hybrid_response.unique_candidates,
                 "vector_search_degraded": hybrid_response.vector_search_degraded,
             }

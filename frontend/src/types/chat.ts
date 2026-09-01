@@ -131,6 +131,9 @@ export interface ChatbotRetrievalTrace {
     | "semantic_filter"
     | "llm_context";
   query_variant_count: number;
+  vector_query_count: number;
+  cache_hit_count: number;
+  cache_miss_count: number;
   lexical_candidate_count: number;
   dense_candidate_count: number;
   rrf_unique_candidate_count: number;
@@ -139,6 +142,10 @@ export interface ChatbotRetrievalTrace {
   post_rerank_candidate_count: number;
   selected_article_count: number;
   selected_passage_count: number;
+  selected_full_text_article_count?: number;
+  selected_full_text_passage_count?: number;
+  selected_abstract_article_count?: number;
+  selected_abstract_passage_count?: number;
   rejection_counts: Record<string, number>;
   vector_search_degraded: boolean;
 }
@@ -153,6 +160,9 @@ export interface ScientificGenerationTrace {
   correction_temperature: number | null;
   prompt_tokens: number;
   completion_tokens: number;
+  validation_codes: string[];
+  presented_evidence_count: number;
+  cited_evidence_count: number;
 }
 
 export interface ChatbotResponse {
@@ -169,8 +179,14 @@ export interface ChatbotResponse {
   completion_tokens: number;
   duration_seconds: number;
   generation_status?:
-    "generated" | "partial_generated" | "abstained" | "extractive_fallback" | "diagnostic_only";
+    | "generated"
+    | "partial_generated"
+    | "abstained"
+    | "extractive_fallback"
+    | "diagnostic_only"
+    | "validation_failed";
   diagnostic_code?: string | null;
+  diagnostic_codes?: string[];
   interaction_mode: "research" | "conversation";
   answer_effort?: AnswerEffort;
   timings?: ChatbotTiming[];

@@ -22,7 +22,7 @@ describe("API client", () => {
       theme: "biochimie",
       source: "openalex",
       abstract: "with",
-      availability: "full_text",
+      availability: "metadata_only",
       limit: 25,
       offset: 50,
     });
@@ -31,7 +31,7 @@ describe("API client", () => {
     expect(requestedUrl).toContain("query=polyph%C3%A9nols+cidre");
     expect(requestedUrl).toContain("statuses=accepted%2Creview");
     expect(requestedUrl).toContain("theme=biochimie");
-    expect(requestedUrl).toContain("availability=full_text");
+    expect(requestedUrl).toContain("availability=metadata_only");
   });
 
   it("turns backend failures into typed errors", async () => {
@@ -106,6 +106,45 @@ describe("API client", () => {
         method: "PUT",
         body: JSON.stringify({ key: "personal-token" }),
       }),
+    );
+  });
+
+  it("uses neutral provider routes without exposing a key in reads or activation", async () => {
+    const fetchMock = vi.fn().mockImplementation(() =>
+      Promise.resolve(
+        new Response(JSON.stringify({ active_provider: "custom", providers: [] }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await api.llmProviders.list();
+    await api.llmProviders.save("custom", {
+      base_url: "https://llm.example.test/v1",
+      key: "personal-token",
+      model: "my-model",
+    });
+    await api.llmProviders.activate("custom");
+
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+      "/api/llm-providers",
+      "/api/llm-providers/custom",
+      "/api/llm-providers/active",
+    ]);
+    expect(fetchMock.mock.calls[1]?.[1]).toEqual(
+      expect.objectContaining({
+        method: "PUT",
+        body: JSON.stringify({
+          base_url: "https://llm.example.test/v1",
+          key: "personal-token",
+          model: "my-model",
+        }),
+      }),
+    );
+    expect(fetchMock.mock.calls[2]?.[1]).toEqual(
+      expect.objectContaining({ method: "PUT", body: JSON.stringify({ provider: "custom" }) }),
     );
   });
 

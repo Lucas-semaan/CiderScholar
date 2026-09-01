@@ -35,6 +35,34 @@ const timingLabels: Record<string, string> = {
   argo_generation: "Génération et validation ARGO",
 };
 
+const diagnosticLabels: Record<string, string> = {
+  empty_answerable_statements: "Réponse scientifique vide",
+  missing_required_evidence: "Preuves pertinentes non toutes intégrées",
+  missing_contextual_introduction: "Introduction contextuelle manquante",
+  paragraph_too_short: "Paragraphes insuffisamment développés",
+  synthesis_too_short: "Synthèse insuffisamment développée",
+  invalid_response_style: "Typologie de réponse non conforme",
+  invalid_prose_structure: "Structure rédactionnelle non conforme",
+  invalid_evidence_reference: "Référence de preuve invalide",
+  evidence_id_leak: "Identifiant interne exposé",
+  unsupported_evidence_grade: "Niveau de preuve non admissible",
+  missing_indirect_evidence_label: "Portée indirecte à expliciter",
+  unsupported_numeric_claim: "Valeur numérique non étayée",
+  unsupported_causal_claim: "Causalité non étayée",
+  unsupported_evaluative_claim: "Qualification non étayée",
+  unsupported_safety_claim: "Interprétation de sécurité non étayée",
+  unsupported_normative_claim: "Conclusion normative non étayée",
+  language_mismatch: "Langue de réponse non conforme",
+  internal_process_leak: "Détail interne présent dans la réponse",
+  missing_documented_facet: "Dimension documentée manquante",
+  prompt_budget_exceeded: "Contexte scientifique trop volumineux",
+  invalid_direct_answer_count: "Structure de réponse directe non conforme",
+  invalid_schema: "Réponse structurée invalide",
+  question_integrity: "Question altérée pendant la génération",
+  unusable_output: "Sortie du modèle inutilisable",
+  unknown: "Cause précise indéterminée",
+};
+
 export function ChatMessage({
   message,
   onFeedback,
@@ -45,6 +73,10 @@ export function ChatMessage({
   const assistant = message.role === "assistant";
   const terminalNotice = message.terminalNotice;
   const response = message.response;
+  const llmContextTrace = response?.retrieval_traces
+    ?.slice()
+    .reverse()
+    .find((trace) => trace.stage === "llm_context");
 
   return (
     <article
@@ -77,7 +109,12 @@ export function ChatMessage({
             <Badge tone={terminalNotice.state === "cancelled" ? "neutral" : "warning"}>
               {terminalNotice.state === "cancelled" ? "Traitement annulé" : "Réponse bloquée"}
             </Badge>
-            {terminalNotice.diagnostic_code && <Badge>{terminalNotice.diagnostic_code}</Badge>}
+            {terminalNotice.diagnostic_code && (
+              <Badge>
+                {diagnosticLabels[terminalNotice.diagnostic_code] ??
+                  "Diagnostic technique disponible"}
+              </Badge>
+            )}
           </div>
         )}
 
@@ -96,9 +133,34 @@ export function ChatMessage({
               {response.generation_status === "diagnostic_only" && (
                 <Badge tone="warning">Diagnostic sans synthèse</Badge>
               )}
-              {response.generation_status !== "generated" && response.diagnostic_code && (
-                <Badge>{response.diagnostic_code}</Badge>
+              {response.generation_status === "validation_failed" && (
+                <Badge tone="warning">Synthèse non validée</Badge>
               )}
+              {llmContextTrace && response.generation_status === "validation_failed" && (
+                <Badge tone="warning">
+                  Documents retrouvés, non cités ·{" "}
+                  {formatNumber(llmContextTrace.selected_full_text_article_count ?? 0)} texte(s)
+                  intégral(aux),{" "}
+                  {formatNumber(llmContextTrace.selected_full_text_passage_count ?? 0)} passage(s),{" "}
+                  {formatNumber(llmContextTrace.selected_abstract_article_count ?? 0)} abstract(s)
+                </Badge>
+              )}
+              {llmContextTrace && response.generation_status !== "validation_failed" && (
+                <Badge tone="info">
+                  Contexte scientifique ·{" "}
+                  {formatNumber(llmContextTrace.selected_full_text_article_count ?? 0)} texte(s)
+                  intégral(aux),{" "}
+                  {formatNumber(llmContextTrace.selected_abstract_article_count ?? 0)} abstract(s)
+                </Badge>
+              )}
+              {(
+                response.diagnostic_codes ??
+                (response.diagnostic_code ? [response.diagnostic_code] : [])
+              ).map((code) => (
+                <Badge key={code}>
+                  {diagnosticLabels[code] ?? "Diagnostic technique disponible"}
+                </Badge>
+              ))}
               {response.reused_previous_sources ? (
                 <Badge tone="accent">
                   <MessageCircleMore aria-hidden="true" className="size-3" />

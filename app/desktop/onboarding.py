@@ -25,6 +25,7 @@ from app.desktop.user_config import (
 )
 from app.ingestion.embeddings import local_model_path
 from app.llm.argo_key import ArgoKeyStore
+from app.llm.providers import LlmProviderStore
 from app.memory_profiles import MemoryProfileName, recommend_memory_profile
 
 BUNDLED_CORPUS_MARKER = ".ciderscholar-bundled-corpus"
@@ -78,7 +79,13 @@ def onboarding_status(settings: Settings) -> OnboardingStatus:
     bundled_version = _bundled_corpus_version(settings)
     corpus_version = installed.corpus_version if installed is not None else bundled_version
     corpus_ready = corpus_version is not None
-    argo_ready = ArgoKeyStore(settings).configured()
+    llm_store = LlmProviderStore(settings)
+    active_profile = llm_store.active_profile()
+    argo_ready = (
+        ArgoKeyStore(settings).configured()
+        if active_profile.id == "argo"
+        else active_profile.key_configured
+    )
     memory = recommend_memory_profile(settings)
     memory_ready = settings.memory.profile in {profile.value for profile in MemoryProfileName}
     requirements = (model_ready, corpus_ready, argo_ready, memory_ready)

@@ -126,8 +126,8 @@ class ChatbotFacetDraft(BaseModel):
     label: str = Field(min_length=1, max_length=200)
     query: str = Field(min_length=1, max_length=4_000)
     answer_markdown: str = Field(min_length=1, max_length=30_000)
-    cited_evidence_ids: list[str] = Field(default_factory=list, max_length=64)
-    source_record_ids: list[str] = Field(default_factory=list, max_length=64)
+    cited_evidence_ids: list[str] = Field(default_factory=list)
+    source_record_ids: list[str] = Field(default_factory=list)
 
 
 class ChatbotEvaluationTrace(BaseModel):
@@ -188,6 +188,9 @@ class ChatbotRetrievalTrace(BaseModel):
         "llm_context",
     ]
     query_variant_count: int = Field(default=0, ge=0)
+    vector_query_count: int = Field(default=0, ge=0)
+    cache_hit_count: int = Field(default=0, ge=0)
+    cache_miss_count: int = Field(default=0, ge=0)
     lexical_candidate_count: int = Field(default=0, ge=0)
     dense_candidate_count: int = Field(default=0, ge=0)
     rrf_unique_candidate_count: int = Field(default=0, ge=0)
@@ -196,11 +199,25 @@ class ChatbotRetrievalTrace(BaseModel):
     post_rerank_candidate_count: int = Field(default=0, ge=0)
     selected_article_count: int = Field(default=0, ge=0)
     selected_passage_count: int = Field(default=0, ge=0)
+    selected_full_text_article_count: int = Field(default=0, ge=0)
+    selected_full_text_passage_count: int = Field(default=0, ge=0)
+    selected_abstract_article_count: int = Field(default=0, ge=0)
+    selected_abstract_passage_count: int = Field(default=0, ge=0)
     rejection_counts: dict[str, int] = Field(default_factory=dict)
     vector_search_degraded: bool = False
 
     @model_validator(mode="after")
     def validate_rejection_counts(self) -> ChatbotRetrievalTrace:
+        if (
+            self.selected_full_text_article_count + self.selected_abstract_article_count
+            > self.selected_article_count
+        ):
+            raise ValueError("evidence-level article counts cannot exceed selected articles")
+        if (
+            self.selected_full_text_passage_count + self.selected_abstract_passage_count
+            > self.selected_passage_count
+        ):
+            raise ValueError("evidence-level passage counts cannot exceed selected passages")
         for reason, count in self.rejection_counts.items():
             if not re.fullmatch(r"[a-z0-9_]{1,80}", reason):
                 raise ValueError("retrieval rejection reasons must be stable codes")
@@ -229,9 +246,16 @@ class ScientificGenerationTrace(BaseModel):
     correction_temperature: float | None = Field(default=None, ge=0.0, le=0.2)
     prompt_tokens: int = Field(ge=0)
     completion_tokens: int = Field(ge=0)
+    validation_codes: list[str] = Field(default_factory=list, max_length=32)
+    presented_evidence_count: int = Field(default=0, ge=0)
+    cited_evidence_count: int = Field(default=0, ge=0)
 
     @model_validator(mode="after")
     def coherent_attempts(self) -> ScientificGenerationTrace:
+        if any(not re.fullmatch(r"[a-z0-9_]{1,100}", code) for code in self.validation_codes):
+            raise ValueError("generation validation codes must be stable identifiers")
+        if self.cited_evidence_count > self.presented_evidence_count:
+            raise ValueError("cited evidence cannot exceed presented evidence")
         if self.phase == "deterministic_abstention":
             if (
                 any(
@@ -246,6 +270,20 @@ class ScientificGenerationTrace(BaseModel):
                 or self.correction_temperature is not None
             ):
                 raise ValueError("deterministic abstention cannot report model usage")
+            return self
+        if self.outcome == "failed" and self.request_count == 0:
+            if (
+                any(
+                    (
+                        self.validation_retries,
+                        self.length_retries,
+                        self.prompt_tokens,
+                        self.completion_tokens,
+                    )
+                )
+                or self.correction_temperature is not None
+            ):
+                raise ValueError("a pre-request generation failure cannot report model usage")
             return self
         minimum_requests = 1 + self.validation_retries + self.length_retries
         if self.request_count < minimum_requests:
@@ -276,8 +314,10 @@ class ChatbotResult(BaseModel):
         "abstained",
         "extractive_fallback",
         "diagnostic_only",
+        "validation_failed",
     ] = "generated"
     diagnostic_code: str | None = Field(default=None, max_length=100)
+    diagnostic_codes: list[str] = Field(default_factory=list, max_length=32)
     interaction_mode: Literal["research", "conversation"] = "research"
     reused_previous_sources: bool = False
     facet_drafts: list[ChatbotFacetDraft] = Field(default_factory=list, max_length=12)
@@ -297,3 +337,13 @@ class ChatbotResult(BaseModel):
         """Read historical persisted answers without exposing the legacy field again."""
 
         return migrate_legacy_answer_effort(values)
+
+    @model_validator(mode="after")
+    def validate_diagnostic_codes(self) -> ChatbotResult:
+        if any(not re.fullmatch(r"[a-z0-9_]{1,100}", code) for code in self.diagnostic_codes):
+            raise ValueError("chatbot diagnostic codes must be stable identifiers")
+        if self.diagnostic_code and not self.diagnostic_codes:
+            self.diagnostic_codes = [self.diagnostic_code]
+        if self.diagnostic_codes and self.diagnostic_code is None:
+            self.diagnostic_code = self.diagnostic_codes[0]
+        return self

@@ -38,9 +38,13 @@ router = APIRouter(prefix="/api/chatbot", tags=["chatbot"])
 
 def _with_active_jobs(database: Database, conversation: dict[str, Any]) -> dict[str, Any]:
     conversation_id = UUID(conversation["id"])
+    repository = JobRepository(database.path)
+    # The API remains available in development if a separately launched worker exits.
+    # Recovering expired leases here prevents the conversation from reporting a dead
+    # worker as an indefinitely active scientific search.
+    repository.recover_expired_leases()
     active_jobs = [
-        job.to_public().model_dump(mode="json")
-        for job in JobRepository(database.path).list_active(conversation_id)
+        job.to_public().model_dump(mode="json") for job in repository.list_active(conversation_id)
     ]
     return {
         **conversation,

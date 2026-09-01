@@ -21,7 +21,7 @@ def health(request: Request) -> dict[str, object]:
 
 @router.get("/health/llm")
 def llm_health(request: Request) -> JSONResponse:
-    """Probe ARGO model access without generating text."""
+    """Probe the active LLM model without generating text."""
 
     with ArgoClient(request.app.state.settings) as client:
         result = client.health()

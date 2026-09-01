@@ -13,7 +13,11 @@ from app.retrieval.hybrid_search import (
     reciprocal_rank_fusion,
 )
 from app.retrieval.lexical_search import LexicalSearchService
-from app.retrieval.vector_search import QdrantLocalIndex, VectorSearchService
+from app.retrieval.vector_search import (
+    QdrantLocalIndex,
+    VectorSearchService,
+    clear_query_vector_cache,
+)
 
 
 class FixedQueryBackend:
@@ -22,8 +26,10 @@ class FixedQueryBackend:
 
     def __init__(self) -> None:
         self.closed = False
+        self.query_calls: list[list[str]] = []
 
     def encode_queries(self, texts: Sequence[str]) -> list[list[float]]:
+        self.query_calls.append(list(texts))
         return [[1.0, 0.0] for _ in texts]
 
     def encode_documents(self, texts: Sequence[str]) -> list[list[float]]:
@@ -235,6 +241,57 @@ def test_hybrid_query_variants_are_deduplicated_and_bounded(settings) -> None:
             hybrid.search("one", query_variants=["two", "three"])
         with pytest.raises(ValueError, match="cannot be empty"):
             hybrid.search("  ")
+    finally:
+        hybrid.close()
+
+
+def test_hybrid_vector_budget_keeps_lexical_variants(settings) -> None:
+    clear_query_vector_cache()
+    database = Database(settings.paths.database_path)
+    database.initialize()
+    chunk_ids = _seed_hybrid_database(database)
+    backend = FixedQueryBackend()
+    index = QdrantLocalIndex(
+        settings, model_name=backend.model_name, collection_name="vector_budget"
+    )
+    index.upsert(
+        EmbeddedChunkBatch(
+            chunk_ids=tuple(chunk_ids),
+            article_ids=("article-a", "article-a", "article-b"),
+            sections=("Results", "Discussion", "Results"),
+            page_starts=(2, 3, 5),
+            page_ends=(2, 3, 5),
+            vectors=((1.0, 0.0), (0.0, 1.0), (0.9, 0.1)),
+            model_name=backend.model_name,
+            vector_dimension=2,
+        )
+    )
+    hybrid = HybridSearchService(
+        settings,
+        database,
+        LexicalSearchService(settings, database),
+        VectorSearchService(database, backend, index),
+    )
+    try:
+        response = hybrid.search(
+            "temperature fermentation",
+            query_variants=["aroma concentration"],
+            max_vector_query_variants=1,
+        )
+        assert response.queries == ["temperature fermentation", "aroma concentration"]
+        assert response.vector_query_count == 1
+        assert len(backend.query_calls) == 1
+        assert response.lexical_candidates == 3
+        assert "lexical:1" in response.results[0].source_ranks
+        lexical_only = hybrid.search(
+            "temperature fermentation",
+            query_variants=["aroma concentration"],
+            max_vector_query_variants=0,
+        )
+        assert lexical_only.vector_query_count == 0
+        assert lexical_only.vector_candidates == 0
+        assert len(backend.query_calls) == 1
+        assert lexical_only.lexical_candidates == 3
     finally:
         hybrid.close()
 

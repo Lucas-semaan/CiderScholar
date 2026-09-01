@@ -1,6 +1,19 @@
 import { describe, expect, it } from "vitest";
 
-import { publicationSource, publicationTypeLabel, themeLabel } from "./libraryPresentation";
+import {
+  documentTypeLabel,
+  publicationSource,
+  publicationTypeLabel,
+  themeLabel,
+} from "./libraryPresentation";
+
+describe("documentTypeLabel", () => {
+  it("never presents a content-free notice as an abstract", () => {
+    expect(documentTypeLabel("metadata_only")).toBe("Notice à acquérir");
+    expect(documentTypeLabel("abstract_only")).toBe("Abstract only");
+    expect(documentTypeLabel("full_text")).toBe("Full article");
+  });
+});
 
 describe("themeLabel", () => {
   it("presents persisted theme codes as readable French labels", () => {

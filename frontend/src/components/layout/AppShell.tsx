@@ -108,7 +108,12 @@ export function AppShell() {
             {runtime.data?.llm_model ?? "Chargement…"}
           </p>
           <p className="mt-1 text-xs text-slate-500">
-            {runtime.data?.llm_provider.toUpperCase() ?? "—"} · SQLite local
+            {runtime.data?.llm_provider === "argo"
+              ? "ARGO INRAE"
+              : runtime.data?.llm_provider === "custom"
+                ? "Personnalisé"
+                : "—"}{" "}
+            · SQLite local
           </p>
         </div>
       </aside>
@@ -136,7 +141,11 @@ export function AppShell() {
               <span className="size-1.5 rounded-full bg-current" />
               {runtime.data?.offline_mode ? "Hors ligne" : "Réseau maîtrisé"}
             </Badge>
-            {runtime.data?.llm_provider === "argo" && <Badge tone="accent">ARGO INRAE</Badge>}
+            {runtime.data?.llm_provider && (
+              <Badge tone="accent">
+                {runtime.data.llm_provider === "argo" ? "ARGO INRAE" : "LLM personnalisé"}
+              </Badge>
+            )}
           </div>
         </header>
         <main className="mx-auto w-full max-w-[1600px] px-4 py-7 sm:px-7 lg:px-10 lg:py-10">

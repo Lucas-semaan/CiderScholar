@@ -28,6 +28,11 @@ La décision manuelle des notices « À réviser » passe par
 FTS associées sont supprimées en cascade. L’interface sélectionne ensuite la prochaine notice à
 réviser disponible sur la page courante.
 
+`GET /api/library/records?availability=metadata_only` alimente la vue « Notices à acquérir ».
+Cette catégorie contient uniquement des notices sans abstract non vide ni texte intégral associé ;
+les statuts `accepted` et `review` restent filtrables séparément. Le type `metadata_only` est un état
+documentaire et ne rend jamais la notice admissible au RAG.
+
 Tout rejet possédant un DOI est également inscrit dans
 `data/common/excluded_bibliographic_dois.json`. Ce registre JSON horodaté est consulté avant
 chaque insertion issue d’une collecte et reprend au premier usage les DOI déjà présents dans

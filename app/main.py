@@ -22,6 +22,7 @@ from app.api.health import router as health_router
 from app.api.ingestion import router as ingestion_router
 from app.api.jobs import router as jobs_router
 from app.api.library import router as library_router
+from app.api.llm_providers import router as llm_providers_router
 from app.api.onboarding import router as onboarding_router
 from app.api.publisher_access import router as publisher_access_router
 from app.api.synthesis import router as synthesis_router
@@ -35,6 +36,7 @@ from app.corpus_packages.activation import (
 from app.corpus_packages.checks import refresh_corpus_update_if_due
 from app.database.sqlite import Database
 from app.desktop.app_updates import check_application_update
+from app.jobs.repository import JobRepository
 from app.secrets import hydrate_user_environment
 
 
@@ -56,6 +58,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         resolved_settings.paths.create()
         database.initialize()
         common_corpus_database.initialize()
+        # A previous worker may have been stopped while holding a job lease.  Recovery
+        # belongs to startup as well as to the worker so the API never revives with a
+        # fictitious "running" job.
+        JobRepository(database.path).recover_expired_leases()
         application.state.application_update = check_application_update(resolved_settings)
         refresh_corpus_update_if_due(resolved_settings)
         yield
@@ -87,6 +93,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     application.include_router(ingestion_router)
     application.include_router(jobs_router)
     application.include_router(library_router)
+    application.include_router(llm_providers_router)
     application.include_router(onboarding_router)
     application.include_router(publisher_access_router)
     application.include_router(synthesis_router)

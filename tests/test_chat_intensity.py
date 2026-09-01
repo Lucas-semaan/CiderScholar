@@ -33,11 +33,31 @@ def test_answer_effort_budgets_are_monotonic_and_bounded() -> None:
         assert getattr(concise, field) <= getattr(balanced, field) <= getattr(deep, field)
 
     assert concise.follow_up_incomplete_axes is False
-    assert balanced.follow_up_incomplete_axes is True
-    assert deep.follow_up_incomplete_axes is True
-    assert deep.article_count <= 10
-    assert deep.evidence_record_limit <= 20
-    assert deep.max_evidence_items <= 20
+    assert balanced.follow_up_incomplete_axes is False
+    assert deep.follow_up_incomplete_axes is False
+    assert {
+        concise.max_retrieval_waves,
+        balanced.max_retrieval_waves,
+        deep.max_retrieval_waves,
+    } == {1}
+    assert (concise.verification_need_limit, balanced.verification_need_limit) == (3, 5)
+    assert deep.verification_need_limit == 8
+    assert (balanced.evidence_record_limit, balanced.max_evidence_items) == (16, 20)
+    assert balanced.max_evidence_characters == 36_000
+    assert balanced.target_duration_seconds == 15 * 60
+    assert concise.target_duration_seconds is None
+    assert deep.target_duration_seconds is None
+    assert deep.article_count >= 16
+    assert deep.evidence_record_limit >= 32
+    assert deep.max_evidence_items >= 32
+    assert concise.max_vector_query_variants == 2
+    assert balanced.max_vector_query_variants == 2
+    assert deep.max_vector_query_variants == 2
+    assert deep.max_retrieval_waves == 1
+    assert deep.mono_max_output_tokens == 4_096
+    assert deep.facet_max_output_tokens == 3_072
+    assert deep.final_max_output_tokens == 4_096
+    assert deep.max_vector_query_variants < deep.max_query_variants
 
 
 def test_chat_answer_payload_defaults_to_balanced_and_accepts_deep() -> None:

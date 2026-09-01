@@ -68,6 +68,21 @@ def test_argo_client_does_not_keep_an_accessible_key_copy(settings) -> None:
         client.close()
 
 
+def test_argo_client_can_bound_one_workflow_request_below_global_timeout(settings) -> None:
+    client = ArgoClient(
+        settings,
+        api_key="unit-test-secret",
+        request_timeout_seconds=12.0,
+        transport=httpx.MockTransport(lambda _request: httpx.Response(200, json=_models())),
+    )
+
+    try:
+        assert client._http.timeout.read == pytest.approx(12.0)
+        assert client._http.timeout.connect == pytest.approx(10.0)
+    finally:
+        client.close()
+
+
 def test_argo_client_uses_personal_dpapi_key_before_environment(settings, monkeypatch) -> None:
     monkeypatch.setenv(settings.argo.api_key_env, "environment-fallback")
     monkeypatch.setattr(

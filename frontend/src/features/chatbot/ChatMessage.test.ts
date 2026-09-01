@@ -44,4 +44,66 @@ describe("ChatMessage", () => {
     expect(markup).not.toContain("Synthèse en 1 axe");
     expect(markup).toContain("RAG local");
   });
+
+  it("explains cumulative scientific validation failures without exposing raw codes", () => {
+    const message: ChatMessageValue = {
+      id: "assistant-validation-failed",
+      role: "assistant",
+      content: "La synthèse n'a pas satisfait les contrôles scientifiques.",
+      response: {
+        message: "La synthèse n'a pas satisfait les contrôles scientifiques.",
+        retrieval_query: "fermentation",
+        answer_markdown: "La synthèse n'a pas satisfait les contrôles scientifiques.",
+        sources: [],
+        warnings: [],
+        model: "deterministic-structured-fallback",
+        local_result_count: 12,
+        external_result_count: 0,
+        external_enrichment_used: false,
+        prompt_tokens: 33,
+        completion_tokens: 11,
+        duration_seconds: 1,
+        generation_status: "validation_failed",
+        diagnostic_code: "missing_required_evidence",
+        diagnostic_codes: ["missing_required_evidence", "paragraph_too_short"],
+        retrieval_traces: [
+          {
+            schema_version: 1,
+            stage: "llm_context",
+            query_variant_count: 0,
+            vector_query_count: 0,
+            cache_hit_count: 0,
+            cache_miss_count: 0,
+            lexical_candidate_count: 0,
+            dense_candidate_count: 0,
+            rrf_unique_candidate_count: 0,
+            fused_candidate_count: 0,
+            pre_rerank_candidate_count: 0,
+            post_rerank_candidate_count: 0,
+            selected_article_count: 3,
+            selected_passage_count: 9,
+            selected_full_text_article_count: 2,
+            selected_full_text_passage_count: 8,
+            selected_abstract_article_count: 1,
+            selected_abstract_passage_count: 1,
+            rejection_counts: {},
+            vector_search_degraded: false,
+          },
+        ],
+        interaction_mode: "research",
+        reused_previous_sources: false,
+      },
+    };
+
+    const markup = renderToStaticMarkup(createElement(ChatMessage, { message }));
+
+    expect(markup).toContain("Synthèse non validée");
+    expect(markup).toContain("Preuves pertinentes non toutes intégrées");
+    expect(markup).toContain("Paragraphes insuffisamment développés");
+    expect(markup).toContain("Documents retrouvés, non cités");
+    expect(markup).toContain("2 texte(s) intégral(aux)");
+    expect(markup).toContain("8 passage(s)");
+    expect(markup).toContain("1 abstract(s)");
+    expect(markup).not.toContain("missing_required_evidence");
+  });
 });

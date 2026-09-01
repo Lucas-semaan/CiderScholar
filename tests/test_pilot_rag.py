@@ -4,20 +4,31 @@ import json
 
 import pytest
 
-from app.llm.argo_client import ArgoProtocolError, ArgoScientificValidationError
+from app.chat_effort import AnswerEffort
+from app.llm.argo_client import (
+    ArgoProtocolError,
+    ArgoQuotaError,
+    ArgoScientificValidationError,
+    ScientificValidationReason,
+)
 from app.llm.contracts import GenerationMetrics, GenerationResponse
 from app.llm.response_style import ResponseStyle
 from app.models.chatbot import ChatEvidencePassage, ChatEvidenceRecord
+from app.retrieval.coverage_assessment import AxisCoverageAssessment
+from app.retrieval.scientific_intent import ScientificFacet
 from app.updates.pilot_rag import (
+    PROMPT_RETRY_HEADROOM_CHARACTERS,
     CiderAbstractRagService,
     CiderEvidenceAnswer,
     CiderEvidenceRagService,
     CitedEvidenceStatement,
     _apa_reference,
     _clean_author_names,
+    _PromptBudgetError,
     _reject_internal_process_leaks,
     _renderable_doi,
     _salvage_grounded_evidence_answer,
+    _validate_evidence_grounding,
 )
 from app.updates.vector_index import BibliographicHybridResult
 
@@ -54,6 +65,635 @@ def _response(content: str) -> GenerationResponse:
             eval_duration_seconds=0.1,
         ),
     )
+
+
+def test_bounded_evidence_reserves_ranked_records_for_required_axes() -> None:
+    records = [
+        ChatEvidenceRecord(
+            record_id=f"common:article-{index}",
+            origin="local_rag",
+            evidence_level="full_text",
+            scope="common",
+            article_id=f"article-{index}",
+            title=f"Study {index}",
+            passages=[
+                ChatEvidencePassage(
+                    evidence_id=f"common:article-{index}:chunk:1",
+                    chunk_id=1,
+                    page_start=1,
+                    page_end=1,
+                    text=f"Documented result for study {index}.",
+                )
+            ],
+        )
+        for index in range(12)
+    ]
+
+    selected, _evidence = CiderEvidenceRagService(object())._bounded_evidence(
+        records,
+        axis_candidate_ids={
+            "primary_axis": ["common:article-0"],
+            "required_axis_b": ["common:article-10"],
+            "required_axis_c": ["common:article-11"],
+        },
+    )
+
+    selected_ids = {record.record_id for record in selected}
+    assert "common:article-10" in selected_ids
+    assert "common:article-11" in selected_ids
+    # Axis hints can reorder records, but cannot silently discard relevant RAG evidence.
+    assert len(selected) == len(records)
+    assert selected_ids == {record.record_id for record in records}
+
+
+def test_deep_prompt_budget_preserves_all_essential_evidence_and_long_axis_drafts() -> None:
+    records = [
+        ChatEvidenceRecord(
+            record_id=f"common:article-{index}",
+            origin="local_rag",
+            evidence_level="full_text",
+            scope="common",
+            article_id=f"article-{index}",
+            title=f"Study {index}",
+            passages=[
+                ChatEvidencePassage(
+                    evidence_id=f"common:article-{index}:chunk:{passage}",
+                    chunk_id=passage,
+                    page_start=passage,
+                    page_end=passage + 1,
+                    text=(f"Documented result {index}-{passage}. " + "evidence " * 130),
+                )
+                for passage in (1, 2)
+            ],
+        )
+        for index in range(36)
+    ]
+    service = CiderEvidenceRagService(
+        object(),
+        answer_effort=AnswerEffort.DEEP,
+        max_input_characters=64_000,
+    )
+    _selected, evidence = service._bounded_evidence(records)
+    assert len(evidence) == 72
+    cited_by_axis = [
+        "common:article-0:chunk:1",
+        "common:article-2:chunk:1",
+        "common:article-4:chunk:1",
+        "common:article-6:chunk:1",
+    ]
+    payload = {
+        "question": "Compare all documented axes.",
+        "conversation_history": [
+            {"role": "user", "content": "context " * 500},
+            {"role": "assistant", "content": "prior answer " * 500},
+        ],
+        "evidence": evidence,
+        "facet_drafts": [
+            {
+                "key": f"axis-{index}",
+                "label": f"Axis {index}",
+                "query": "documented axis",
+                "answer_markdown": "Validated cited draft. " * 600,
+                "cited_evidence_ids": [evidence_id],
+                "source_record_ids": [f"common:article-{index * 2}"],
+            }
+            for index, evidence_id in enumerate(cited_by_axis)
+        ],
+    }
+    system = "Scientific instructions. " * 200
+
+    all_evidence_ids = [str(item["evidence_id"]) for item in evidence]
+    fitted = service._fit_prompt_payload(
+        system,
+        payload,
+        priority_evidence_ids=cited_by_axis,
+        essential_evidence_ids=all_evidence_ids,
+    )
+
+    serialized = json.dumps(fitted, ensure_ascii=False)
+    assert len(system) + len(serialized) <= 64_000 - PROMPT_RETRY_HEADROOM_CHARACTERS
+    assert len(system) + len(serialized) + PROMPT_RETRY_HEADROOM_CHARACTERS <= 64_000
+    fitted_by_id = {item["evidence_id"]: item for item in fitted["evidence"]}
+    assert set(fitted_by_id) == set(all_evidence_ids)
+    assert list(fitted_by_id)[:4] == cited_by_axis
+    for evidence_id in cited_by_axis:
+        item = fitted_by_id[evidence_id]
+        assert item["record_id"]
+        assert item["page_start"] is not None
+        assert item["page_end"] is not None
+        assert item["text"]
+
+
+def test_evidence_rag_uses_all_presented_evidence_and_argo_selected_typology() -> None:
+    records = [
+        ChatEvidenceRecord(
+            record_id=f"common:ranked-{index}",
+            origin="local_rag",
+            evidence_level="abstract",
+            scope="common",
+            title=f"Étude classée {index}",
+            authors=[f"Auteur {index}"],
+            evidence_grade="A",
+            passages=[
+                ChatEvidencePassage(
+                    evidence_id=f"common:ranked-{index}:abstract",
+                    text=(
+                        "L'étude décrit un résultat pertinent dans la matrice examinée et replace "
+                        "l'observation dans les conditions expérimentales réellement appliquées. "
+                        "Les auteurs détaillent la méthode de suivi, la temporalité des "
+                        "prélèvements et les caractéristiques du lot étudié. Ils comparent les "
+                        "observations entre "
+                        "les conditions disponibles et rapportent les variations constatées sans "
+                        "les étendre à une autre étape du procédé. La discussion distingue ce qui "
+                        "est directement observé de ce qui relève de l'interprétation. Elle "
+                        "précise "
+                        "aussi les limites de la comparaison, la portée propre à la matrice et les "
+                        "informations qui resteraient nécessaires pour généraliser le constat. "
+                        "Ces éléments permettent de relier le résultat à son contexte, de le "
+                        "rapprocher des travaux compatibles et de préserver les différences de "
+                        "protocole lors de la synthèse."
+                    ),
+                )
+            ],
+        )
+        for index in range(10)
+    ]
+    expected_ids = [f"common:ranked-{index}:abstract" for index in range(10)]
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def chat(self, messages, *, json_schema, **_options):
+            self.calls += 1
+            assert json_schema["properties"]["response_format"]["enum"] == [
+                "prose",
+                "thematic_sections",
+                "comparison",
+                "process",
+                "bullet_list",
+            ]
+            payload = json.loads(messages[1]["content"])
+            assert [item["evidence_id"] for item in payload["evidence"]] == expected_ids
+            assert "mini-introduction de deux à quatre phrases" in messages[0]["content"]
+            assert "Choisis toi-même la typologie" in messages[0]["content"]
+            assert "trois à six phrases liées" in messages[0]["content"]
+            if self.calls == 1:
+                statements = [
+                    {
+                        "statement": (
+                            "Les travaux retenus décrivent plusieurs résultats pertinents."
+                        ),
+                        "evidence_ids": [expected_ids[0]],
+                        "section": "synthetic_answer",
+                        "mechanism": None,
+                    }
+                ]
+            else:
+                assert "omitted relevant evidence elements" in messages[-1]["content"]
+                assert expected_ids[-1] in messages[-1]["content"]
+                sentence = (
+                    "Les observations décrivent des résultats distincts dans leur contexte "
+                    "expérimental, précisent les conditions étudiées, rapprochent les constats "
+                    "compatibles, séparent les différences de protocole et conservent les limites "
+                    "d'interprétation propres à chaque travail scientifique disponible. "
+                )
+                statements = [
+                    {
+                        "statement": sentence * 4,
+                        "evidence_ids": expected_ids[0:2],
+                        "section": "synthetic_answer",
+                        "mechanism": None,
+                    },
+                    {
+                        "statement": sentence * 4,
+                        "evidence_ids": expected_ids[2:4],
+                        "section": "documented_effect",
+                        "mechanism": "Conditions expérimentales",
+                    },
+                    {
+                        "statement": sentence * 4,
+                        "evidence_ids": expected_ids[4:6],
+                        "section": "documented_effect",
+                        "mechanism": "Résultats convergents",
+                    },
+                    {
+                        "statement": sentence * 4,
+                        "evidence_ids": expected_ids[6:8],
+                        "section": "documented_effect",
+                        "mechanism": "Limites de transposition",
+                    },
+                    {
+                        "statement": sentence * 4,
+                        "evidence_ids": expected_ids[8:10],
+                        "section": "documented_effect",
+                        "mechanism": "Résultats complémentaires",
+                    },
+                ]
+            return _response(
+                json.dumps(
+                    {
+                        "status": "answerable",
+                        "response_format": "thematic_sections",
+                        "definition": (
+                            "Cette synthèse situe les résultats dans leurs contextes "
+                            "expérimentaux. "
+                            "Elle distingue les constats, leurs conditions et leurs limites."
+                        ),
+                        "statements": statements,
+                        "limitations": [],
+                        "insufficiency_message": None,
+                    },
+                    ensure_ascii=False,
+                )
+            )
+
+    client = FakeClient()
+    result = CiderEvidenceRagService(client).answer(
+        "Que montrent ces études sur le sujet ?",
+        records,
+    )
+
+    assert client.calls == 2
+    assert result.answer.response_format is ResponseStyle.THEMATIC_SECTIONS
+    assert result.cited_evidence_ids == expected_ids
+    assert result.source_record_ids == [f"common:ranked-{index}" for index in range(10)]
+    assert result.answer_markdown.startswith("Cette synthèse situe les résultats")
+    assert "## Conditions expérimentales" in result.answer_markdown
+    assert "Étude classée 8" in result.answer_markdown
+    assert result.generation_traces[0].presented_evidence_count == 10
+    assert result.generation_traces[0].cited_evidence_count == 10
+
+
+def test_evidence_rag_regenerates_telegraphic_paragraph_from_rich_evidence() -> None:
+    evidence_text = (
+        "Les auteurs décrivent les observations dans la matrice étudiée et précisent le cadre "
+        "expérimental retenu. La méthode distingue les lots examinés, les moments de suivi et les "
+        "conditions appliquées pendant l'essai. Les résultats sont présentés avec les variations "
+        "observées entre les situations comparées. La discussion sépare les constats directement "
+        "documentés des interprétations proposées. Elle précise la portée du travail, les limites "
+        "liées au protocole et les informations manquantes pour une transposition à une autre "
+        "matrice. Les auteurs rapprochent enfin les observations compatibles tout en conservant "
+        "les différences de méthode et de temporalité. "
+    ) * 2
+    record = ChatEvidenceRecord(
+        record_id="common:rich-study",
+        origin="local_rag",
+        evidence_level="abstract",
+        scope="common",
+        title="Étude détaillée",
+        authors=["Auteur Test"],
+        evidence_grade="A",
+        passages=[
+            ChatEvidencePassage(
+                evidence_id="common:rich-study:abstract",
+                text=evidence_text,
+            )
+        ],
+    )
+    developed_paragraph = (
+        "L'étude replace d'abord les observations dans la matrice et dans le cadre expérimental "
+        "effectivement examinés. Elle précise que la lecture des résultats dépend des lots, des "
+        "moments de suivi et des conditions appliquées pendant l'essai. Les variations sont "
+        "présentées entre les situations comparées, en séparant les constats documentés des "
+        "interprétations proposées. Le rapprochement avec les observations compatibles conserve "
+        "les différences de méthode et de temporalité. La portée reste donc attachée au protocole "
+        "décrit et à la matrice étudiée, tandis qu'une transposition demanderait les informations "
+        "supplémentaires signalées dans la discussion."
+    )
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def chat(self, messages, **_options):
+            self.calls += 1
+            if self.calls == 1:
+                assert "paragraphe scientifique substantiel" in messages[0]["content"]
+                statement = "Les observations dépendent du contexte expérimental étudié."
+            else:
+                assert (
+                    "paragraph that is too short for its cited evidence" in messages[-1]["content"]
+                )
+                assert "n'ajoute ni remplissage ni connaissance externe" in messages[-1]["content"]
+                statement = developed_paragraph
+            return _response(
+                json.dumps(
+                    {
+                        "status": "answerable",
+                        "response_format": "prose",
+                        "definition": (
+                            "Cette synthèse situe les observations dans la matrice étudiée. "
+                            "Elle examine leur contexte, leur portée et leurs limites."
+                        ),
+                        "statements": [
+                            {
+                                "statement": statement,
+                                "evidence_ids": ["common:rich-study:abstract"],
+                                "section": "synthetic_answer",
+                                "mechanism": None,
+                            }
+                        ],
+                        "limitations": [],
+                        "insufficiency_message": None,
+                    },
+                    ensure_ascii=False,
+                )
+            )
+
+    client = FakeClient()
+    result = CiderEvidenceRagService(client).answer(
+        "Que montrent les observations ?",
+        [record],
+    )
+
+    assert client.calls == 2
+    assert result.answer.statements[0].statement == developed_paragraph
+    assert "(Test, n.d.)" in result.answer_markdown
+
+
+def test_evidence_grounding_requires_more_global_text_for_many_rich_citations() -> None:
+    evidence: dict[str, tuple[ChatEvidenceRecord, ChatEvidencePassage]] = {}
+    evidence_ids: list[str] = []
+    source_text = (
+        "Le travail situe les observations dans la matrice étudiée, décrit les conditions de "
+        "comparaison et distingue les constats des interprétations. La méthode précise le suivi, "
+        "la temporalité et les différences de protocole. La discussion délimite la portée des "
+        "résultats et les informations manquantes pour les transposer. "
+    ) * 4
+    for index in range(8):
+        evidence_id = f"common:rich-{index}:abstract"
+        passage = ChatEvidencePassage(evidence_id=evidence_id, text=source_text)
+        record = ChatEvidenceRecord(
+            record_id=f"common:rich-{index}",
+            origin="local_rag",
+            evidence_level="abstract",
+            scope="common",
+            title=f"Étude riche {index}",
+            evidence_grade="A",
+            passages=[passage],
+        )
+        evidence_ids.append(evidence_id)
+        evidence[evidence_id] = (record, passage)
+
+    paragraph = (
+        "Les travaux replacent les observations dans leur matrice, décrivent les conditions "
+        "comparées, distinguent les constats des interprétations et précisent la portée ainsi que "
+        "les limites documentées. "
+    )
+    answer = CiderEvidenceAnswer(
+        status="answerable",
+        response_format="prose",
+        definition=(
+            "Cette synthèse examine les observations dans leurs cadres expérimentaux. "
+            "Elle rapproche les résultats tout en conservant leurs limites."
+        ),
+        statements=[
+            CitedEvidenceStatement(
+                statement=paragraph * 3,
+                evidence_ids=evidence_ids[index : index + 2],
+            )
+            for index in range(0, 8, 2)
+        ],
+        limitations=[],
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="synthesis is too short for the selected evidence and requested effort",
+    ):
+        _validate_evidence_grounding(
+            answer,
+            evidence,
+            set(evidence_ids),
+            None,
+            require_structured_response=True,
+            require_contextual_introduction=True,
+            question="Que montrent ces études ?",
+            required_evidence_ids=frozenset(evidence_ids),
+            answer_effort=AnswerEffort.BALANCED,
+        )
+
+    developed = answer.model_copy(deep=True)
+    developed.statements = [
+        statement.model_copy(update={"statement": paragraph * 5}) for statement in answer.statements
+    ]
+    used_ids = _validate_evidence_grounding(
+        developed,
+        evidence,
+        set(evidence_ids),
+        None,
+        require_structured_response=True,
+        require_contextual_introduction=True,
+        question="Que montrent ces études ?",
+        required_evidence_ids=frozenset(evidence_ids),
+        answer_effort=AnswerEffort.BALANCED,
+    )
+
+    assert used_ids == evidence_ids
+
+
+def test_evidence_grounding_reports_all_safe_validation_failures_together() -> None:
+    source_text = (
+        "Le travail décrit la matrice, les conditions expérimentales et les observations "
+        "qualitatives obtenues pendant le suivi. Il compare les lots, précise la temporalité, "
+        "distingue les résultats des interprétations et discute les limites du protocole sans "
+        "rapporter de valeur numérique. "
+    ) * 3
+    evidence: dict[str, tuple[ChatEvidenceRecord, ChatEvidencePassage]] = {}
+    evidence_ids: list[str] = []
+    for index in range(2):
+        evidence_id = f"common:cumulative-{index}:abstract"
+        passage = ChatEvidencePassage(evidence_id=evidence_id, text=source_text)
+        record = ChatEvidenceRecord(
+            record_id=f"common:cumulative-{index}",
+            origin="local_rag",
+            evidence_level="abstract",
+            scope="common",
+            title=f"Étude cumulative {index}",
+            evidence_grade="A",
+            passages=[passage],
+        )
+        evidence_ids.append(evidence_id)
+        evidence[evidence_id] = (record, passage)
+
+    answer = CiderEvidenceAnswer(
+        response_format="prose",
+        definition=(
+            "Cette synthèse examine les observations rapportées dans les deux études. "
+            "Elle les replace dans leur matrice et leurs conditions expérimentales."
+        ),
+        statements=[
+            CitedEvidenceStatement(
+                statement="Le RAG indique une hausse de 42 %.",
+                evidence_ids=[evidence_ids[0]],
+            )
+        ],
+        limitations=[],
+    )
+
+    with pytest.raises(RuntimeError) as exc_info:
+        _validate_evidence_grounding(
+            answer,
+            evidence,
+            set(evidence_ids),
+            ResponseStyle.PROSE,
+            require_structured_response=True,
+            require_contextual_introduction=True,
+            question="Que montrent ces études ?",
+            required_evidence_ids=frozenset(evidence_ids),
+            answer_effort=AnswerEffort.BALANCED,
+        )
+
+    assert set(exc_info.value.reasons) >= {
+        ScientificValidationReason.MISSING_REQUIRED_EVIDENCE,
+        ScientificValidationReason.INTERNAL_PROCESS_LEAK,
+        ScientificValidationReason.PARAGRAPH_TOO_SHORT,
+        ScientificValidationReason.UNSUPPORTED_NUMERIC_CLAIM,
+    }
+
+
+def test_final_prompt_budget_failure_returns_validated_cited_drafts() -> None:
+    records = [
+        ChatEvidenceRecord(
+            record_id=f"record-{index}",
+            origin="local_rag",
+            evidence_level="full_text",
+            scope="common",
+            article_id=f"article-{index}",
+            title=f"Study {index}",
+            passages=[
+                ChatEvidencePassage(
+                    evidence_id=f"record-{index}:chunk:1",
+                    chunk_id=1,
+                    page_start=index,
+                    page_end=index,
+                    text="The study documents a measured effect.",
+                )
+            ],
+        )
+        for index in (1, 2)
+    ]
+
+    class FinalBudgetFailureService(CiderEvidenceRagService):
+        def _fit_prompt_payload(self, system, payload, **options):
+            if payload.get("facet_drafts"):
+                raise _PromptBudgetError("irreducible final prompt overhead")
+            return super()._fit_prompt_payload(system, payload, **options)
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def chat(self, _messages, **_options):
+            self.calls += 1
+            return _response(
+                json.dumps(
+                    {
+                        "response_format": "prose",
+                        "statements": [
+                            {
+                                "statement": "The study documents a measured effect.",
+                                "evidence_ids": [f"record-{self.calls}:chunk:1"],
+                            }
+                        ],
+                        "limitations": [],
+                    }
+                )
+            )
+
+    client = FakeClient()
+    result = FinalBudgetFailureService(client).answer_faceted(
+        "Compare the documented effects and conditions.",
+        records,
+        facets=[
+            ScientificFacet(
+                key="effects", label="Effects", terms_fr=["effets"], terms_en=["effects"]
+            ),
+            ScientificFacet(
+                key="conditions",
+                label="Conditions",
+                terms_fr=["conditions"],
+                terms_en=["conditions"],
+            ),
+        ],
+    )
+
+    assert client.calls == 2
+    assert result.generation_status == "partial_generated"
+    assert result.cited_evidence_ids == ["record-1:chunk:1", "record-2:chunk:1"]
+    assert result.generation_traces[-1].phase == "final_assembly"
+    assert result.generation_traces[-1].outcome == "failed"
+    assert result.generation_traces[-1].request_count == 0
+
+
+def test_late_quota_returns_validated_cited_drafts_without_restarting() -> None:
+    records = [
+        ChatEvidenceRecord(
+            record_id=f"record-{index}",
+            origin="local_rag",
+            evidence_level="full_text",
+            scope="common",
+            article_id=f"article-{index}",
+            title=f"Study {index}",
+            passages=[
+                ChatEvidencePassage(
+                    evidence_id=f"record-{index}:chunk:1",
+                    chunk_id=1,
+                    page_start=index,
+                    page_end=index,
+                    text="The study documents a measured effect.",
+                )
+            ],
+        )
+        for index in (1, 2)
+    ]
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def chat(self, _messages, **_options):
+            self.calls += 1
+            if self.calls == 3:
+                raise ArgoQuotaError("provider quota reached during final assembly")
+            return _response(
+                json.dumps(
+                    {
+                        "response_format": "prose",
+                        "statements": [
+                            {
+                                "statement": "The study documents a measured effect.",
+                                "evidence_ids": [f"record-{self.calls}:chunk:1"],
+                            }
+                        ],
+                        "limitations": [],
+                    }
+                )
+            )
+
+    client = FakeClient()
+    result = CiderEvidenceRagService(client).answer_faceted(
+        "Compare the documented effects and conditions.",
+        records,
+        facets=[
+            ScientificFacet(
+                key="effects", label="Effects", terms_fr=["effets"], terms_en=["effects"]
+            ),
+            ScientificFacet(
+                key="conditions",
+                label="Conditions",
+                terms_fr=["conditions"],
+                terms_en=["conditions"],
+            ),
+        ],
+    )
+
+    assert client.calls == 3
+    assert result.generation_status == "partial_generated"
+    assert result.cited_evidence_ids == ["record-1:chunk:1", "record-2:chunk:1"]
+    assert result.generation_traces[-1].phase == "final_assembly"
+    assert result.generation_traces[-1].outcome == "failed"
 
 
 @pytest.mark.parametrize(
@@ -132,7 +772,11 @@ def test_evidence_rag_uses_only_indirect_evidence_with_explicit_scope() -> None:
                     {
                         "status": "answerable",
                         "response_format": "prose",
-                        "definition": "Effet du procédé demandé.",
+                        "definition": (
+                            "La question porte sur l'effet du procédé exact demandé. "
+                            "La synthèse distingue explicitement les résultats issus du "
+                            "procédé aval."
+                        ),
                         "statements": [
                             {
                                 "statement": (
@@ -170,15 +814,73 @@ def test_evidence_rag_uses_only_indirect_evidence_with_explicit_scope() -> None:
     assert result.source_record_ids == ["common:indirect"]
     assert "Preuve indirecte" in result.answer_markdown
     assert "Définition retenue" not in result.answer_markdown
-    assert "Effet du procédé demandé." not in result.answer_markdown
-    assert "## Réponse synthétique" in result.answer_markdown
-    assert "## Effets documentés" in result.answer_markdown
+    assert result.answer_markdown.startswith("La question porte sur l'effet du procédé exact")
     assert "## Limites des preuves" in result.answer_markdown
     assert "Related downstream process" in result.answer_markdown
     assert "## Références" in result.answer_markdown
 
 
-def test_evidence_rag_recovers_empty_answerable_as_documentary_abstention() -> None:
+def test_evidence_rag_keeps_unlabelled_indirect_claim_as_quality_warning() -> None:
+    passage = ChatEvidencePassage(
+        evidence_id="common:indirect-warning:abstract",
+        text="The study describes a transferable mechanism in a related matrix.",
+    )
+    record = ChatEvidenceRecord(
+        record_id="common:indirect-warning",
+        origin="local_rag",
+        evidence_level="abstract",
+        scope="common",
+        title="Transferable mechanism",
+        evidence_grade="B",
+        passages=[passage],
+    )
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def chat(self, _messages, **_options):
+            self.calls += 1
+            return _response(
+                json.dumps(
+                    {
+                        "status": "answerable",
+                        "response_format": "prose",
+                        "definition": (
+                            "La question porte sur un mécanisme dans la matrice demandée. "
+                            "La synthèse précise la portée de l'analogie disponible."
+                        ),
+                        "statements": [
+                            {
+                                "statement": (
+                                    "L'étude décrit un mécanisme transposable dans une matrice "
+                                    "connexe."
+                                ),
+                                "evidence_ids": ["common:indirect-warning:abstract"],
+                                "section": "synthetic_answer",
+                                "mechanism": None,
+                            }
+                        ],
+                        "limitations": [],
+                        "insufficiency_message": None,
+                    },
+                    ensure_ascii=False,
+                )
+            )
+
+    client = FakeClient()
+    result = CiderEvidenceRagService(client).answer(
+        "Que suggère ce mécanisme dans la matrice demandée ?",
+        [record],
+    )
+
+    assert client.calls == 10
+    assert result.generation_status == "partial_generated"
+    assert result.cited_evidence_ids == ["common:indirect-warning:abstract"]
+    assert result.validation_warning_codes == ["missing_indirect_evidence_label"]
+
+
+def test_evidence_rag_retries_a_b_graded_abstention_then_keeps_safe_output() -> None:
     passage = ChatEvidencePassage(
         evidence_id="common:adjacent:abstract",
         text=(
@@ -250,7 +952,7 @@ def test_evidence_rag_recovers_empty_answerable_as_documentary_abstention() -> N
         [record],
     )
 
-    assert client.calls == 2
+    assert client.calls == 10
     assert result.answer.status == "insufficient"
     assert result.generation_status == "abstained"
     assert result.answer.statements == []
@@ -264,13 +966,17 @@ def test_evidence_rag_recovers_empty_answerable_as_documentary_abstention() -> N
         "schema_version": 1,
         "phase": "evidence",
         "outcome": "abstained",
-        "request_count": 2,
-        "validation_retries": 1,
+        "request_count": 10,
+        "validation_retries": 9,
         "length_retries": 0,
         "correction_temperature": 0.1,
-        "prompt_tokens": 100,
-        "completion_tokens": 40,
+        "prompt_tokens": 500,
+        "completion_tokens": 200,
+        "validation_codes": ["empty_answerable_statements", "missing_required_evidence"],
+        "presented_evidence_count": 1,
+        "cited_evidence_count": 0,
     }
+    assert result.validation_warning_codes == ["missing_required_evidence"]
 
 
 def test_pilot_rag_constrains_ids_and_renders_abstract_citations() -> None:
@@ -281,7 +987,7 @@ def test_pilot_rag_constrains_ids_and_renders_abstract_citations() -> None:
             assert max_output_tokens == 4096
             assert json_schema["properties"]["response_format"] == {
                 "type": "string",
-                "const": "prose",
+                "enum": ["prose", "bullet_list"],
             }
             assert "abstracts" in messages[1]["content"]
             assert json.loads(messages[1]["content"])["output_language"] == "fr"
@@ -298,7 +1004,7 @@ def test_pilot_rag_constrains_ids_and_renders_abstract_citations() -> None:
             assert "jamais comme un résultat acquis" in messages[0]["content"]
             assert "ni emoji, ni émoticône" in messages[0]["content"]
             assert "ni compliment, ni superlatif non étayé" in messages[0]["content"]
-            assert "response_format=bullet_list seulement" in messages[0]["content"]
+            assert "choisis response_format=prose ou" in messages[0]["content"]
             enum = json_schema["$defs"]["CitedAbstractStatement"]["properties"]["record_ids"][
                 "items"
             ]["enum"]
@@ -365,7 +1071,11 @@ def test_evidence_rag_translates_every_generated_field_to_question_language() ->
             else:
                 assert options["temperature"] == 0.1
                 assert "Traduis intégralement chaque champ rédactionnel" in messages[-1]["content"]
-                definition = "Le vieillissement sous bois est le procédé étudié."
+                definition = (
+                    "Le vieillissement sous bois est le procédé étudié dans les preuves. "
+                    "La synthèse examine les modifications aromatiques observées pendant "
+                    "cette étape."
+                )
             return _response(
                 json.dumps(
                     {
@@ -399,7 +1109,9 @@ def test_evidence_rag_translates_every_generated_field_to_question_language() ->
     )
 
     assert client.calls == 2
-    assert result.answer.definition == "Le vieillissement sous bois est le procédé étudié."
+    assert result.answer.definition is not None
+    assert result.answer.definition.startswith("Le vieillissement sous bois est le procédé étudié")
+    assert "modifications aromatiques" in result.answer.definition
     assert "The study shows" not in result.answer_markdown
 
 
@@ -456,6 +1168,10 @@ def test_evidence_rag_uses_full_text_passages_and_renders_exact_pages() -> None:
                 json.dumps(
                     {
                         "response_format": "prose",
+                        "definition": (
+                            "L'article porte sur la température appliquée pendant la fermentation. "
+                            "La synthèse précise le résultat aromatique observé et sa portée."
+                        ),
                         "statements": [
                             {
                                 "statement": (
@@ -518,6 +1234,7 @@ def test_evidence_rag_exhausted_grounding_retries_raise_worker_safe_error() -> N
                 json.dumps(
                     {
                         "response_format": "prose",
+                        "definition": "La question porte sur l'effet observé pendant l'essai.",
                         "statements": [
                             {
                                 "statement": "La production a augmente de 15 %.",
@@ -533,7 +1250,513 @@ def test_evidence_rag_exhausted_grounding_retries_raise_worker_safe_error() -> N
     with pytest.raises(ArgoScientificValidationError, match="numeric value 15"):
         CiderEvidenceRagService(client).answer("Quel est l'effet observe ?", [record])
 
+    assert client.calls == 10
+
+
+def test_evidence_rag_returns_best_safe_answer_with_quality_warning_after_ten_requests() -> None:
+    records = [
+        ChatEvidenceRecord(
+            record_id=f"common:safe-{index}",
+            origin="local_rag",
+            evidence_level="abstract",
+            scope="common",
+            title=f"Étude sûre {index}",
+            evidence_grade="A",
+            passages=[
+                ChatEvidencePassage(
+                    evidence_id=f"common:safe-{index}:abstract",
+                    text=f"L'étude {index} décrit une observation distincte dans la matrice.",
+                )
+            ],
+        )
+        for index in range(1, 3)
+    ]
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def chat(self, messages, **_options):
+            self.calls += 1
+            if self.calls > 1:
+                assert len(messages) == 3
+                assert '"code": "missing_required_evidence"' in messages[-1]["content"]
+                assert "Intègre chaque preuve A ou B" in messages[-1]["content"]
+            return _response(
+                json.dumps(
+                    {
+                        "status": "answerable",
+                        "response_format": "prose",
+                        "definition": (
+                            "La question porte sur deux observations dans la matrice étudiée. "
+                            "La synthèse examine leur portée documentaire respective."
+                        ),
+                        "statements": [
+                            {
+                                "statement": (
+                                    "La première étude décrit une observation distincte dans la "
+                                    "matrice."
+                                ),
+                                "evidence_ids": ["common:safe-1:abstract"],
+                                "section": "synthetic_answer",
+                                "mechanism": None,
+                            }
+                        ],
+                        "limitations": [],
+                        "insufficiency_message": None,
+                    },
+                    ensure_ascii=False,
+                )
+            )
+
+    client = FakeClient()
+    result = CiderEvidenceRagService(client).answer(
+        "Que montrent ces deux études dans la matrice ?",
+        records,
+    )
+
+    assert client.calls == 10
+    assert result.generation_status == "partial_generated"
+    assert result.validation_warning_codes == ["missing_required_evidence"]
+    assert result.cited_evidence_ids == ["common:safe-1:abstract"]
+    assert "certains passages pertinents retrouvés" in result.answer_markdown
+    assert result.generation_traces[0].request_count == 10
+    assert result.generation_traces[0].validation_retries == 9
+
+
+def test_evidence_rag_prefers_evidence_coverage_over_fewer_style_warnings() -> None:
+    records = [
+        ChatEvidenceRecord(
+            record_id=f"common:coverage-{index}",
+            origin="local_rag",
+            evidence_level="abstract",
+            scope="common",
+            title=f"Étude de couverture {index}",
+            evidence_grade="A",
+            passages=[
+                ChatEvidencePassage(
+                    evidence_id=f"common:coverage-{index}:abstract",
+                    text=f"L'étude {index} décrit une observation distincte dans la matrice.",
+                )
+            ],
+        )
+        for index in range(1, 3)
+    ]
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def chat(self, _messages, **_options):
+            self.calls += 1
+            complete = self.calls > 1
+            return _response(
+                json.dumps(
+                    {
+                        "status": "answerable",
+                        "response_format": "prose",
+                        "definition": (
+                            "- Bref."
+                            if complete
+                            else (
+                                "La question porte sur deux observations dans la matrice. "
+                                "La synthèse examine leur portée documentaire."
+                            )
+                        ),
+                        "statements": [
+                            {
+                                "statement": (
+                                    "Les études décrivent des observations distinctes dans la "
+                                    "matrice."
+                                ),
+                                "evidence_ids": (
+                                    [
+                                        "common:coverage-1:abstract",
+                                        "common:coverage-2:abstract",
+                                    ]
+                                    if complete
+                                    else ["common:coverage-1:abstract"]
+                                ),
+                                "section": "synthetic_answer",
+                                "mechanism": None,
+                            }
+                        ],
+                        "limitations": [],
+                        "insufficiency_message": None,
+                    },
+                    ensure_ascii=False,
+                )
+            )
+
+    client = FakeClient()
+    result = CiderEvidenceRagService(client).answer(
+        "Que montrent ces deux études dans la matrice ?",
+        records,
+    )
+
     assert client.calls == 2
+    assert result.cited_evidence_ids == [
+        "common:coverage-1:abstract",
+        "common:coverage-2:abstract",
+    ]
+    assert result.validation_warning_codes == []
+
+
+def test_evidence_rag_accumulates_safe_paragraphs_across_correction_attempts() -> None:
+    records = [
+        ChatEvidenceRecord(
+            record_id=f"common:cumulative-{index}",
+            origin="local_rag",
+            evidence_level="abstract",
+            scope="common",
+            title=f"Étude cumulative {index}",
+            evidence_grade="A",
+            passages=[
+                ChatEvidencePassage(
+                    evidence_id=f"common:cumulative-{index}:abstract",
+                    text=f"L'étude {index} décrit une observation distincte dans la matrice.",
+                )
+            ],
+        )
+        for index in range(1, 3)
+    ]
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def chat(self, messages, **_options):
+            self.calls += 1
+            evidence_id = f"common:cumulative-{self.calls}:abstract"
+            if self.calls == 2:
+                assert "common:cumulative-2:abstract" in messages[-1]["content"]
+            return _response(
+                json.dumps(
+                    {
+                        "status": "answerable",
+                        "response_format": "prose",
+                        "definition": (
+                            "Ces études décrivent deux observations dans la matrice considérée. "
+                            "La synthèse en précise la portée documentaire."
+                        ),
+                        "statements": [
+                            {
+                                "statement": (
+                                    f"L'étude {self.calls} décrit une observation distincte "
+                                    "dans la matrice."
+                                ),
+                                "evidence_ids": [evidence_id],
+                                "section": "synthetic_answer",
+                                "mechanism": None,
+                            }
+                        ],
+                        "limitations": [],
+                        "insufficiency_message": None,
+                    },
+                    ensure_ascii=False,
+                )
+            )
+
+    client = FakeClient()
+    result = CiderEvidenceRagService(client).answer(
+        "Que montrent ces deux études dans la matrice ?",
+        records,
+    )
+
+    assert client.calls == 2
+    assert result.generation_status == "generated"
+    assert result.cited_evidence_ids == [
+        "common:cumulative-1:abstract",
+        "common:cumulative-2:abstract",
+    ]
+    assert len(result.answer.statements) == 2
+
+
+def test_evidence_rag_keeps_grounded_paragraph_from_an_earlier_blocked_attempt() -> None:
+    records = [
+        ChatEvidenceRecord(
+            record_id=f"common:mixed-{index}",
+            origin="local_rag",
+            evidence_level="abstract",
+            scope="common",
+            title=f"Étude mixte {index}",
+            evidence_grade="A",
+            passages=[
+                ChatEvidencePassage(
+                    evidence_id=f"common:mixed-{index}:abstract",
+                    text=f"L'étude {index} décrit une observation dans la matrice.",
+                )
+            ],
+        )
+        for index in range(1, 3)
+    ]
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def chat(self, _messages, **_options):
+            self.calls += 1
+            if self.calls == 1:
+                payload = {
+                    "status": "answerable",
+                    "response_format": "prose",
+                    "definition": "Le RAG a retrouvé deux études dans la matrice.",
+                    "statements": [
+                        {
+                            "statement": (
+                                "La première étude décrit une observation dans la matrice."
+                            ),
+                            "evidence_ids": ["common:mixed-1:abstract"],
+                            "section": "synthetic_answer",
+                            "mechanism": None,
+                        },
+                        {
+                            "statement": "La seconde étude rapporte une hausse de 15 %.",
+                            "evidence_ids": ["common:mixed-2:abstract"],
+                            "section": "documented_effect",
+                            "mechanism": "Effet quantifié",
+                        },
+                    ],
+                    "limitations": [],
+                    "insufficiency_message": None,
+                }
+            else:
+                payload = {
+                    "status": "insufficient",
+                    "response_format": "prose",
+                    "definition": "Les documents ne répondent pas directement à la question.",
+                    "statements": [],
+                    "limitations": [],
+                    "insufficiency_message": (
+                        "Aucune affirmation supplémentaire ne peut être établie."
+                    ),
+                }
+            return _response(json.dumps(payload, ensure_ascii=False))
+
+    client = FakeClient()
+    result = CiderEvidenceRagService(client).answer(
+        "Que montrent ces deux études dans la matrice ?",
+        records,
+    )
+
+    assert client.calls == 10
+    assert result.generation_status == "partial_generated"
+    assert result.cited_evidence_ids == ["common:mixed-1:abstract"]
+    assert result.source_record_ids == ["common:mixed-1"]
+    assert result.validation_warning_codes == ["missing_required_evidence"]
+    assert "La première étude décrit" in result.answer_markdown
+    assert "Le RAG" not in result.answer_markdown
+    assert "15 %" not in result.answer_markdown
+
+
+def test_evidence_rag_keeps_a_safe_candidate_when_a_retry_input_is_rejected() -> None:
+    records = [
+        ChatEvidenceRecord(
+            record_id=f"common:retry-{index}",
+            origin="local_rag",
+            evidence_level="abstract",
+            scope="common",
+            title=f"Étude {index}",
+            evidence_grade="A",
+            passages=[
+                ChatEvidencePassage(
+                    evidence_id=f"common:retry-{index}:abstract",
+                    text=f"L'étude {index} décrit une observation dans la matrice.",
+                )
+            ],
+        )
+        for index in range(1, 3)
+    ]
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def chat(self, _messages, **_options):
+            self.calls += 1
+            if self.calls == 2:
+                raise ValueError("LLM input exceeds the configured character limit")
+            return _response(
+                json.dumps(
+                    {
+                        "status": "answerable",
+                        "response_format": "prose",
+                        "definition": (
+                            "La question porte sur deux observations dans une même matrice. "
+                            "La synthèse examine leur portée documentaire."
+                        ),
+                        "statements": [
+                            {
+                                "statement": "La première étude décrit une observation.",
+                                "evidence_ids": ["common:retry-1:abstract"],
+                                "section": "synthetic_answer",
+                                "mechanism": None,
+                            }
+                        ],
+                        "limitations": [],
+                        "insufficiency_message": None,
+                    },
+                    ensure_ascii=False,
+                )
+            )
+
+    client = FakeClient()
+    result = CiderEvidenceRagService(client).answer(
+        "Que montrent les deux observations dans cette matrice ?",
+        records,
+    )
+
+    assert client.calls == 2
+    assert result.generation_status == "partial_generated"
+    assert result.validation_warning_codes == ["missing_required_evidence"]
+    assert result.cited_evidence_ids == ["common:retry-1:abstract"]
+
+
+def test_evidence_rag_translates_retry_input_value_error_to_scientific_diagnostic() -> None:
+    record = ChatEvidenceRecord(
+        record_id="common:retry-hard",
+        origin="local_rag",
+        evidence_level="abstract",
+        scope="common",
+        title="Étude",
+        evidence_grade="A",
+        passages=[
+            ChatEvidencePassage(
+                evidence_id="common:retry-hard:abstract",
+                text="L'étude décrit une observation dans la matrice.",
+            )
+        ],
+    )
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def chat(self, _messages, **_options):
+            self.calls += 1
+            if self.calls == 2:
+                raise ValueError("LLM input exceeds the configured character limit")
+            return _response(
+                json.dumps(
+                    {
+                        "status": "answerable",
+                        "response_format": "prose",
+                        "definition": (
+                            "La question porte sur une observation dans la matrice. "
+                            "La synthèse en examine la portée."
+                        ),
+                        "statements": [
+                            {
+                                "statement": "Une hausse de 15 % est observée.",
+                                "evidence_ids": ["common:retry-hard:abstract"],
+                                "section": "synthetic_answer",
+                                "mechanism": None,
+                            }
+                        ],
+                        "limitations": [],
+                        "insufficiency_message": None,
+                    },
+                    ensure_ascii=False,
+                )
+            )
+
+    client = FakeClient()
+    with pytest.raises(ArgoScientificValidationError) as raised:
+        CiderEvidenceRagService(client).answer(
+            "Que montre cette observation dans la matrice ?",
+            [record],
+        )
+
+    assert client.calls == 2
+    assert raised.value.reason is ScientificValidationReason.PROMPT_BUDGET_EXCEEDED
+    assert raised.value.prompt_tokens == 50
+    assert raised.value.completion_tokens == 20
+    assert raised.value.generation_traces[0].request_count == 2
+
+
+def test_evidence_rag_correction_lists_every_current_violation_and_action() -> None:
+    records = [
+        ChatEvidenceRecord(
+            record_id=f"common:multi-{index}",
+            origin="local_rag",
+            evidence_level="abstract",
+            scope="common",
+            title=f"Étude {index}",
+            evidence_grade="A",
+            passages=[
+                ChatEvidencePassage(
+                    evidence_id=f"common:multi-{index}:abstract",
+                    text=f"L'étude {index} décrit une observation dans la matrice.",
+                )
+            ],
+        )
+        for index in range(1, 3)
+    ]
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def chat(self, messages, **_options):
+            self.calls += 1
+            if self.calls == 2:
+                correction = messages[-1]["content"]
+                assert '"code": "missing_required_evidence"' in correction
+                assert '"code": "missing_contextual_introduction"' in correction
+                assert '"code": "unsupported_numeric_claim"' in correction
+                assert "scientific_blocker" in correction
+                assert "quality_warning" in correction
+            evidence_ids = (
+                ["common:multi-1:abstract"]
+                if self.calls == 1
+                else ["common:multi-1:abstract", "common:multi-2:abstract"]
+            )
+            statement = (
+                "Une hausse de 15 % est observée."
+                if self.calls == 1
+                else "Les deux études décrivent des observations dans la matrice étudiée."
+            )
+            return _response(
+                json.dumps(
+                    {
+                        "status": "answerable",
+                        "response_format": "prose",
+                        "definition": (
+                            "Bref."
+                            if self.calls == 1
+                            else (
+                                "La question porte sur des observations dans une même matrice. "
+                                "La synthèse rapproche les deux études disponibles."
+                            )
+                        ),
+                        "statements": [
+                            {
+                                "statement": statement,
+                                "evidence_ids": evidence_ids,
+                                "section": "synthetic_answer",
+                                "mechanism": None,
+                            }
+                        ],
+                        "limitations": [],
+                        "insufficiency_message": None,
+                    },
+                    ensure_ascii=False,
+                )
+            )
+
+    client = FakeClient()
+    result = CiderEvidenceRagService(client).answer(
+        "Que montrent les observations dans cette matrice ?",
+        records,
+    )
+
+    assert client.calls == 2
+    assert result.generation_status == "generated"
+    assert result.cited_evidence_ids == [
+        "common:multi-1:abstract",
+        "common:multi-2:abstract",
+    ]
 
 
 def test_faceted_evidence_rag_keeps_cited_drafts_and_assembles_them() -> None:
@@ -579,35 +1802,66 @@ def test_faceted_evidence_rag_keeps_cited_drafts_and_assembles_them() -> None:
             enum = json_schema["$defs"]["CitedEvidenceStatement"]["properties"]["evidence_ids"][
                 "items"
             ]["enum"]
-            assert enum == [
-                "common:article-1:chunk:1",
-                "common:article-2:chunk:1",
-                "common:article-3:chunk:1",
-            ]
             if self.calls <= 3:
-                assert max_output_tokens == 4096
+                assert enum == [f"common:article-{self.calls}:chunk:1"]
+                assert max_output_tokens == 3072
                 assert json_schema["properties"]["statements"]["maxItems"] == 4
+                assert json_schema["properties"]["response_format"] == {
+                    "type": "string",
+                    "const": "prose",
+                }
                 assert "facet_drafts" not in payload
-                cited = enum[self.calls - 1]
+                cited = enum[0]
             else:
-                assert max_output_tokens == 6144
+                assert enum == [
+                    "common:article-1:chunk:1",
+                    "common:article-2:chunk:1",
+                    "common:article-3:chunk:1",
+                ]
+                assert max_output_tokens == 4096
                 assert json_schema["properties"]["statements"]["maxItems"] == 16
+                assert json_schema["properties"]["response_format"]["enum"] == [
+                    "prose",
+                    "thematic_sections",
+                    "comparison",
+                    "process",
+                    "bullet_list",
+                ]
+                statement_schema = json_schema["$defs"]["CitedEvidenceStatement"]
+                assert "facet_key" in statement_schema["required"]
+                assert statement_schema["properties"]["facet_key"]["enum"] == [
+                    "aroma",
+                    "evolution",
+                    "structure",
+                ]
                 assert len(payload["facet_drafts"]) == 3
                 assert "A=direct, B=indirect" in messages[0]["content"]
                 assert "N'utilise jamais C ou D comme preuve" in messages[0]["content"]
                 assert "status=insufficient" in messages[0]["content"]
                 assert "status=answerable avec statements vide" in messages[0]["content"]
                 cited = enum[0]
+            statements = (
+                [
+                    {
+                        "statement": "L'étude observe un effet documenté.",
+                        "evidence_ids": [f"common:article-{index}:chunk:1"],
+                        "facet_key": key,
+                    }
+                    for index, key in enumerate(["aroma", "structure", "evolution"], start=1)
+                ]
+                if self.calls > 3
+                else [{"statement": "L'étude observe un effet documenté.", "evidence_ids": [cited]}]
+            )
             return _response(
                 json.dumps(
                     {
-                        "response_format": "prose",
-                        "statements": [
-                            {
-                                "statement": "L'étude observe un effet documenté.",
-                                "evidence_ids": [cited],
-                            }
-                        ],
+                        "response_format": ("thematic_sections" if self.calls > 3 else "prose"),
+                        "definition": (
+                            "La synthèse examine les effets documentés de l'élevage en barrique. "
+                            "Elle distingue les dimensions aromatiques, structurelles et "
+                            "temporelles."
+                        ),
+                        "statements": statements,
                         "limitations": [],
                     },
                     ensure_ascii=False,
@@ -618,20 +1872,26 @@ def test_faceted_evidence_rag_keeps_cited_drafts_and_assembles_them() -> None:
     result = CiderEvidenceRagService(client).answer_faceted(
         "Quel est l'impact de l'élevage en barrique sur les arômes et la structure du Calvados ?",
         records,
+        axis_candidate_ids={
+            "aroma": ["common:article-1"],
+            "structure": ["common:article-2"],
+            "evolution": ["common:article-3"],
+        },
     )
 
-    assert client.calls == 4
+    assert client.calls == 5
+    assert result.answer.response_format is ResponseStyle.THEMATIC_SECTIONS
     assert [draft.key for draft in result.facet_drafts] == ["aroma", "structure", "evolution"]
     assert result.facet_drafts[1].cited_evidence_ids == ["common:article-2:chunk:1"]
-    assert result.prompt_tokens == 200
-    assert result.completion_tokens == 80
+    assert result.prompt_tokens == 250
+    assert result.completion_tokens == 100
     assert [trace.phase for trace in result.generation_traces] == [
         "facet_draft",
         "facet_draft",
         "facet_draft",
         "final_assembly",
     ]
-    assert all(trace.request_count == 1 for trace in result.generation_traces)
+    assert [trace.request_count for trace in result.generation_traces] == [1, 1, 1, 2]
     assert all(trace.correction_temperature is None for trace in result.generation_traces)
 
 
@@ -682,7 +1942,7 @@ def test_faceted_final_assembly_failure_returns_cited_partial_drafts() -> None:
         "Quel est l'impact de l'élevage en barrique sur les arômes et la structure ?", records
     )
 
-    assert client.calls == 5
+    assert client.calls == 10
     assert result.generation_status == "partial_generated"
     assert result.cited_evidence_ids == [
         "common:article-1:chunk:1",
@@ -690,14 +1950,389 @@ def test_faceted_final_assembly_failure_returns_cited_partial_drafts() -> None:
         "common:article-3:chunk:1",
     ]
     assert "ne couvrent qu'une partie" in result.answer_markdown
-    assert result.prompt_tokens == 250
-    assert result.completion_tokens == 100
+    assert result.prompt_tokens == 500
+    assert result.completion_tokens == 200
     failed = result.generation_traces[-1]
     assert failed.phase == "final_assembly"
     assert failed.outcome == "failed"
-    assert failed.request_count == 2
-    assert failed.validation_retries == 1
+    assert failed.request_count == 7
+    assert failed.validation_retries == 6
     assert failed.correction_temperature == 0.1
+
+
+def test_first_facet_is_corrected_without_preventing_later_facets() -> None:
+    records = [
+        ChatEvidenceRecord(
+            record_id=f"common:article-{index}",
+            origin="local_rag",
+            evidence_level="full_text",
+            scope="common",
+            article_id=f"article-{index}",
+            title=f"Étude {index}",
+            evidence_grade="A",
+            passages=[
+                ChatEvidencePassage(
+                    evidence_id=f"common:article-{index}:chunk:1",
+                    chunk_id=1,
+                    page_start=1,
+                    page_end=1,
+                    text="L'étude documente un effet du traitement.",
+                )
+            ],
+        )
+        for index in range(1, 4)
+    ]
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def chat(self, _messages, **_options):
+            self.calls += 1
+            if self.calls <= 2:
+                statement = "L'effet mesuré atteint 15 %."
+                evidence_id = "common:article-1:chunk:1"
+            else:
+                statement = "L'étude documente un effet du traitement."
+                evidence_id = f"common:article-{2 if self.calls in {3, 5} else 3}:chunk:1"
+            return _response(
+                json.dumps(
+                    {
+                        "response_format": "prose",
+                        "statements": [
+                            {
+                                "statement": statement,
+                                "evidence_ids": [evidence_id],
+                            }
+                        ],
+                        "limitations": [],
+                    },
+                    ensure_ascii=False,
+                )
+            )
+
+    client = FakeClient()
+    result = CiderEvidenceRagService(client).answer_faceted(
+        "Quel est l'impact de l'élevage en barrique sur les arômes et la structure du Calvados ?",
+        records,
+    )
+
+    assert client.calls == 10
+    assert result.generation_status == "partial_generated"
+    assert [draft.key for draft in result.facet_drafts] == [
+        "aroma",
+        "structure",
+        "evolution",
+    ]
+    assert result.generation_traces[0].outcome == "generated"
+    assert result.generation_traces[0].request_count == 3
+    assert result.generation_traces[0].validation_retries == 2
+
+
+@pytest.mark.parametrize(
+    ("effort", "expected_calls"),
+    [(AnswerEffort.DEEP, 10), (AnswerEffort.BALANCED, 10)],
+)
+def test_faceted_assembly_expands_once_when_effort_claim_threshold_is_validated(
+    effort: AnswerEffort, expected_calls: int
+) -> None:
+    records = [
+        ChatEvidenceRecord(
+            record_id=f"common:article-{index}",
+            origin="local_rag",
+            evidence_level="full_text",
+            scope="common",
+            article_id=f"article-{index}",
+            title=f"Étude {index}",
+            evidence_grade="A",
+            passages=[
+                ChatEvidencePassage(
+                    evidence_id=f"common:article-{index}:chunk:1",
+                    chunk_id=1,
+                    page_start=1,
+                    page_end=1,
+                    text="L'étude documente un effet mesuré.",
+                )
+            ],
+        )
+        for index in range(1, 4)
+    ]
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def chat(self, _messages, **_options):
+            self.calls += 1
+            evidence_id = f"common:article-{min(self.calls, 3)}:chunk:1"
+            statements = (
+                [
+                    "L'\u00e9tude documente un effet mesur\u00e9.",
+                    "L'\u00e9tude d\u00e9crit les conditions exp\u00e9rimentales.",
+                ]
+                if self.calls <= 3
+                else ["L'\u00e9tude documente un effet mesur\u00e9."]
+                if self.calls == 4
+                else ["L'\u00e9tude documente un effet mesur\u00e9."] * 6
+            )
+            return _response(
+                json.dumps(
+                    {
+                        "response_format": "prose",
+                        "statements": [
+                            {
+                                "statement": "L'étude documente un effet mesuré.",
+                                "evidence_ids": [evidence_id],
+                            }
+                            | {"statement": statement}
+                            for statement in statements
+                        ],
+                        "limitations": [],
+                    },
+                    ensure_ascii=False,
+                )
+            )
+
+    client = FakeClient()
+    result = CiderEvidenceRagService(client, answer_effort=effort).answer_faceted(
+        "Quel est l'impact de l'élevage en barrique sur les arômes et la structure ?", records
+    )
+
+    assert client.calls == expected_calls
+    assert result.generation_traces[-1].request_count == 7
+
+
+@pytest.mark.parametrize("effort", [AnswerEffort.BALANCED, AnswerEffort.DEEP])
+def test_faceted_assembly_reexpands_after_salvage_and_preserves_validated_drafts(
+    effort: AnswerEffort,
+) -> None:
+    records = [
+        ChatEvidenceRecord(
+            record_id=f"common:article-{index}",
+            origin="local_rag",
+            evidence_level="full_text",
+            scope="common",
+            article_id=f"article-{index}",
+            title=f"Étude {index}",
+            evidence_grade="A",
+            passages=[
+                ChatEvidencePassage(
+                    evidence_id=f"common:article-{index}:chunk:1",
+                    chunk_id=1,
+                    page_start=1,
+                    page_end=1,
+                    text=(
+                        "L'étude documente un effet mesuré. "
+                        "Les conditions expérimentales sont décrites."
+                    ),
+                )
+            ],
+        )
+        for index in range(1, 4)
+    ]
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def chat(self, _messages, **_options):
+            self.calls += 1
+            evidence_id = f"common:article-{min(self.calls, 3)}:chunk:1"
+            if self.calls <= 3:
+                statements = [
+                    "L'étude documente un effet mesuré.",
+                    "Les conditions expérimentales sont décrites.",
+                ]
+            elif self.calls <= 5:
+                statements = [
+                    "L'étude documente un effet mesuré.",
+                    "Les conditions expérimentales sont décrites.",
+                    "L'étude documente un effet mesuré dans cette matrice.",
+                    "Une valeur de 4,04 a été observée.",
+                    "Une valeur de 5,05 a été observée.",
+                    "Une valeur de 6,06 a été observée.",
+                ]
+            else:
+                # The requested re-expansion still loses the valid facet claims.
+                # The deterministic fallback must retain the six cited draft claims.
+                statements = [
+                    "L'étude documente un effet mesuré.",
+                    "Les conditions expérimentales sont décrites.",
+                    "L'étude documente un effet mesuré dans cette matrice.",
+                ]
+            return _response(
+                json.dumps(
+                    {
+                        "response_format": "prose",
+                        "statements": [
+                            {"statement": statement, "evidence_ids": [evidence_id]}
+                            for statement in statements
+                        ],
+                        "limitations": [],
+                    },
+                    ensure_ascii=False,
+                )
+            )
+
+    client = FakeClient()
+    result = CiderEvidenceRagService(client, answer_effort=effort).answer_faceted(
+        "Quel est l'impact de l'élevage en barrique sur les arômes et la structure ?",
+        records,
+        axis_candidate_ids={
+            "aroma": ["common:article-1"],
+            "structure": ["common:article-2"],
+            "evolution": ["common:article-3"],
+        },
+    )
+
+    assert client.calls == 10
+    assert len(result.answer.statements) == 6
+    assert result.cited_evidence_ids == [
+        "common:article-1:chunk:1",
+        "common:article-2:chunk:1",
+        "common:article-3:chunk:1",
+    ]
+    assert result.generation_status == "partial_generated"
+    assert result.generation_traces[-1].request_count == 7
+    assert result.generation_traces[-1].outcome == "partial_generated"
+
+
+def test_faceted_renderer_keeps_each_axis_or_an_explicit_gap() -> None:
+    records = [
+        ChatEvidenceRecord(
+            record_id=f"common:article-{index}",
+            origin="local_rag",
+            evidence_level="full_text",
+            scope="common",
+            article_id=f"article-{index}",
+            title=f"Étude {index}",
+            evidence_grade="A",
+            passages=[
+                ChatEvidencePassage(
+                    evidence_id=f"common:article-{index}:chunk:1",
+                    chunk_id=1,
+                    page_start=1,
+                    page_end=1,
+                    text="L'étude documente un effet mesuré.",
+                )
+            ],
+        )
+        for index in range(1, 4)
+    ]
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def chat(self, _messages, **_options):
+            self.calls += 1
+            if self.calls == 2:
+                return _response(
+                    json.dumps(
+                        {
+                            "status": "insufficient",
+                            "response_format": "prose",
+                            "statements": [],
+                            "limitations": [],
+                            "insufficiency_message": "Aucune preuve directe.",
+                        }
+                    )
+                )
+            cited = f"common:article-{min(self.calls, 3)}:chunk:1"
+            return _response(
+                json.dumps(
+                    {
+                        "response_format": "prose",
+                        "statements": [
+                            {
+                                "statement": "L'étude documente un effet mesuré.",
+                                "evidence_ids": [cited],
+                            }
+                        ],
+                        "limitations": [],
+                    }
+                )
+            )
+
+    result = CiderEvidenceRagService(FakeClient()).answer_faceted(
+        "Quel est l'impact de l'élevage en barrique sur les arômes et la structure ?", records
+    )
+
+    assert "Évolution chimique pendant la maturation — documenté" in result.answer_markdown
+    assert "Structure, équilibre et perception en bouche — non documenté" in result.answer_markdown
+    assert "Aucune preuve directe." in result.answer_markdown
+
+
+def test_faceted_renderer_uses_validated_axis_coverage_status() -> None:
+    records = [
+        ChatEvidenceRecord(
+            record_id=f"record-{index}",
+            origin="local_rag",
+            evidence_level="abstract",
+            title=f"Study {index}",
+            evidence_grade="A",
+            passages=[
+                ChatEvidencePassage(
+                    evidence_id=f"record-{index}:abstract",
+                    text="The study documents a measured effect.",
+                )
+            ],
+        )
+        for index in range(1, 3)
+    ]
+    facets = [
+        ScientificFacet(
+            key="effects",
+            label="Effects",
+            terms_fr=["effets"],
+            terms_en=["effects"],
+        ),
+        ScientificFacet(
+            key="conditions",
+            label="Conditions",
+            terms_fr=["conditions"],
+            terms_en=["conditions"],
+        ),
+    ]
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def chat(self, _messages, **_options):
+            self.calls += 1
+            cited = "record-2:abstract" if self.calls == 2 else "record-1:abstract"
+            return _response(
+                json.dumps(
+                    {
+                        "response_format": "prose",
+                        "statements": [
+                            {
+                                "statement": "The study documents a measured effect.",
+                                "evidence_ids": [cited],
+                            }
+                        ],
+                        "limitations": [],
+                    }
+                )
+            )
+
+    result = CiderEvidenceRagService(FakeClient()).answer_faceted(
+        "Compare the effects and conditions of two treatments.",
+        records,
+        facets=facets,
+        axis_coverage=[
+            AxisCoverageAssessment(
+                axis_key="effects",
+                status="partial",
+                supporting_candidate_ids=["record-1"],
+                assessment="Only part of the axis is covered.",
+            )
+        ],
+    )
+
+    assert "## Effects" in result.answer_markdown
+    assert "partially documented" in result.answer_markdown
 
 
 def test_evidence_rag_salvages_only_valid_statement_after_repeated_failure() -> None:
@@ -721,6 +2356,11 @@ def test_evidence_rag_salvages_only_valid_statement_after_repeated_failure() -> 
                 json.dumps(
                     {
                         "response_format": "prose",
+                        "definition": (
+                            "La question porte sur la valeur observée dans cette étude. "
+                            "La synthèse distingue le résultat documenté de toute valeur "
+                            "non étayée."
+                        ),
                         "statements": [
                             {
                                 "statement": "La valeur observée était de 3,03.",
@@ -791,7 +2431,7 @@ def test_faceted_answer_salvage_discards_only_an_unsupported_numeric_statement()
     assert [statement.statement for statement in salvaged.statements] == [
         "La valeur observée était de 3,03."
     ]
-    assert "preuves disponibles" in salvaged.limitations[-1]
+    assert "preuves pertinentes retenues" in salvaged.limitations[-1]
     assert "générées" not in salvaged.limitations[-1]
 
 
@@ -953,7 +2593,10 @@ def test_complete_scientific_prose_response_contract() -> None:
 
     class FakeClient:
         def chat(self, _messages, *, json_schema, **_options):
-            assert json_schema["properties"]["response_format"]["const"] == "prose"
+            assert json_schema["properties"]["response_format"]["enum"] == [
+                "prose",
+                "bullet_list",
+            ]
             return _response(
                 json.dumps(
                     {
@@ -1068,7 +2711,7 @@ def test_pilot_rag_rejects_an_emoji() -> None:
         CiderAbstractRagService(FakeClient()).answer("Question", [record])
 
 
-def test_pilot_rag_attempts_only_one_structural_correction() -> None:
+def test_pilot_rag_uses_the_full_structural_correction_budget() -> None:
     record = _record("11111111-1111-1111-1111-111111111111", "10.1000/cider")
 
     class FakeClient:
@@ -1096,7 +2739,7 @@ def test_pilot_rag_attempts_only_one_structural_correction() -> None:
     with pytest.raises(RuntimeError, match="list marker"):
         CiderAbstractRagService(client).answer("Réponds en prose.", [record])
 
-    assert client.calls == 2
+    assert client.calls == 10
 
 
 def test_pilot_rag_rejects_known_empty_introduction() -> None:

@@ -31,6 +31,76 @@ def _cited_evidence_ids(document: ThemeSynthesis | FinalSynthesis) -> list[str]:
     return list(dict.fromkeys(values))
 
 
+class DatabaseReadSession:
+    """One explicitly closed, read-only SQLite connection for a retrieval batch.
+
+    The session is deliberately short-lived (one user retrieval) so its page cache can
+    accelerate query variants without becoming a second authority or retaining data.
+    """
+
+    def __init__(
+        self,
+        database: Database,
+        *,
+        cache_size_kib: int,
+        mmap_size_bytes: int,
+    ) -> None:
+        self._database = database
+        self._cache_size_kib = cache_size_kib
+        self._mmap_size_bytes = mmap_size_bytes
+        self._connection: sqlite3.Connection | None = None
+        self._caption_index_state: tuple[int, bool] | None = None
+
+    def __enter__(self) -> DatabaseReadSession:
+        self._connection = self._database._connect_readonly(
+            cache_size_kib=self._cache_size_kib,
+            mmap_size_bytes=self._mmap_size_bytes,
+        )
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        if self._connection is not None:
+            self._connection.close()
+            self._connection = None
+        self._caption_index_state = None
+
+    @property
+    def connection(self) -> sqlite3.Connection:
+        if self._connection is None:
+            raise RuntimeError("SQLite read session is not active")
+        return self._connection
+
+    def _caption_index_has_rows(self) -> bool:
+        data_version = int(self.connection.execute("PRAGMA data_version").fetchone()[0])
+        if self._caption_index_state is None or self._caption_index_state[0] != data_version:
+            has_rows = self.connection.execute(
+                "SELECT EXISTS(SELECT 1 FROM document_element_captions_fts LIMIT 1)"
+            ).fetchone()[0]
+            self._caption_index_state = (data_version, bool(has_rows))
+        return self._caption_index_state[1]
+
+    def lexical_search(
+        self,
+        query: str,
+        limit: int = 20,
+        *,
+        article_ids: Sequence[str] | None = None,
+        sections: Sequence[str] | None = None,
+        section_weight: float = 1.5,
+        text_weight: float = 1.0,
+    ) -> list[sqlite3.Row]:
+        return self._database.lexical_search(
+            query,
+            limit,
+            article_ids=article_ids,
+            sections=sections,
+            section_weight=section_weight,
+            text_weight=text_weight,
+            connection=self.connection,
+            caption_index_has_rows=self._caption_index_has_rows(),
+        )
+
+
 class Database:
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
@@ -43,6 +113,39 @@ class Database:
         connection.execute("PRAGMA synchronous = NORMAL")
         connection.execute("PRAGMA busy_timeout = 30000")
         return connection
+
+    def _connect_readonly(
+        self,
+        *,
+        cache_size_kib: int,
+        mmap_size_bytes: int,
+    ) -> sqlite3.Connection:
+        if cache_size_kib <= 0 or mmap_size_bytes < 0:
+            raise ValueError("SQLite read session limits must be non-negative")
+        connection = sqlite3.connect(
+            self.path.resolve().as_uri() + "?mode=ro", uri=True, timeout=30.0
+        )
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA query_only = ON")
+        connection.execute("PRAGMA busy_timeout = 30000")
+        connection.execute(f"PRAGMA cache_size = {-cache_size_kib}")
+        connection.execute("PRAGMA temp_store = MEMORY")
+        connection.execute(f"PRAGMA mmap_size = {mmap_size_bytes}")
+        return connection
+
+    def read_session(
+        self,
+        *,
+        cache_size_kib: int = 32 * 1024,
+        mmap_size_bytes: int = 128 * 1024 * 1024,
+    ) -> DatabaseReadSession:
+        """Create a bounded read-only session; callers must use it as a context manager."""
+
+        return DatabaseReadSession(
+            self,
+            cache_size_kib=cache_size_kib,
+            mmap_size_bytes=mmap_size_bytes,
+        )
 
     def initialize(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -957,6 +1060,8 @@ class Database:
         sections: Sequence[str] | None = None,
         section_weight: float = 1.5,
         text_weight: float = 1.0,
+        connection: sqlite3.Connection | None = None,
+        caption_index_has_rows: bool | None = None,
     ) -> list[sqlite3.Row]:
         """Execute one already-sanitized FTS5 expression with bounded SQL filters."""
 
@@ -998,42 +1103,48 @@ class Database:
             ORDER BY lexical_score, c.id
             LIMIT ?
         """
-        caption_predicates = [
-            "document_element_captions_fts MATCH ?",
-            "a.validation_status IN ('validated', 'indexed')",
-            "r.related_chunk_id IS NOT NULL",
-        ]
-        caption_parameters: list[Any] = [query]
-        if article_ids is not None:
-            placeholders = ",".join("?" for _ in article_ids)
-            caption_predicates.append(f"c.article_id IN ({placeholders})")
-            caption_parameters.extend(article_ids)
-        if sections is not None:
-            placeholders = ",".join("?" for _ in sections)
-            caption_predicates.append(f"c.section IN ({placeholders})")
-            caption_parameters.extend(sections)
-        caption_parameters.append(limit)
-        caption_sql = f"""
-            SELECT
-                c.*,
-                a.title AS article_title,
-                a.publication_year,
-                bm25(document_element_captions_fts) + 0.25 AS lexical_score
-            FROM document_element_captions_fts
-            JOIN document_elements AS d
-              ON d.rowid = document_element_captions_fts.rowid
-            JOIN document_element_relations AS r ON r.element_id = d.id
-            JOIN chunks AS c ON c.id = r.related_chunk_id
-            JOIN articles AS a ON a.id = c.article_id
-            WHERE {" AND ".join(caption_predicates)}
-            ORDER BY lexical_score, c.id
-            LIMIT ?
-        """
-        with closing(self.connect()) as connection:
-            rows = [
-                *connection.execute(sql, parameters),
-                *connection.execute(caption_sql, caption_parameters),
-            ]
+        owns_connection = connection is None
+        active_connection = connection or self.connect()
+        try:
+            rows = [*active_connection.execute(sql, parameters)]
+            # A session verifies this once and rechecks after a writer commits. A one-off
+            # query intentionally keeps the historical behaviour and searches captions.
+            if caption_index_has_rows is not False:
+                caption_predicates = [
+                    "document_element_captions_fts MATCH ?",
+                    "a.validation_status IN ('validated', 'indexed')",
+                    "r.related_chunk_id IS NOT NULL",
+                ]
+                caption_parameters: list[Any] = [query]
+                if article_ids is not None:
+                    placeholders = ",".join("?" for _ in article_ids)
+                    caption_predicates.append(f"c.article_id IN ({placeholders})")
+                    caption_parameters.extend(article_ids)
+                if sections is not None:
+                    placeholders = ",".join("?" for _ in sections)
+                    caption_predicates.append(f"c.section IN ({placeholders})")
+                    caption_parameters.extend(sections)
+                caption_parameters.append(limit)
+                caption_sql = f"""
+                    SELECT
+                        c.*,
+                        a.title AS article_title,
+                        a.publication_year,
+                        bm25(document_element_captions_fts) + 0.25 AS lexical_score
+                    FROM document_element_captions_fts
+                    JOIN document_elements AS d
+                      ON d.rowid = document_element_captions_fts.rowid
+                    JOIN document_element_relations AS r ON r.element_id = d.id
+                    JOIN chunks AS c ON c.id = r.related_chunk_id
+                    JOIN articles AS a ON a.id = c.article_id
+                    WHERE {" AND ".join(caption_predicates)}
+                    ORDER BY lexical_score, c.id
+                    LIMIT ?
+                """
+                rows.extend(active_connection.execute(caption_sql, caption_parameters))
+        finally:
+            if owns_connection:
+                active_connection.close()
         best_by_chunk: dict[int, sqlite3.Row] = {}
         for row in rows:
             chunk_id = int(row["id"])
@@ -1398,6 +1509,164 @@ class Database:
                     (article_id, limit),
                 )
             )
+
+    def hierarchical_chunks_for_article(
+        self,
+        article_id: str,
+        *,
+        anchor_chunk_ids: Sequence[int],
+        neighborhood_radius: int = 1,
+        limit: int = 20,
+        include_methods: bool = False,
+    ) -> list[sqlite3.Row]:
+        """Navigate article -> section -> chunk without scanning the complete article.
+
+        The returned rows are the original SQLite chunks. Ranked anchors come first,
+        followed by their local neighbours, chunks from the same sections, then a
+        small preferred-section fallback. No summary or generated text is introduced.
+        """
+
+        if limit <= 0:
+            raise ValueError("hierarchical article chunk limit must be positive")
+        if neighborhood_radius < 0:
+            raise ValueError("hierarchical chunk radius cannot be negative")
+        anchors = list(dict.fromkeys(int(chunk_id) for chunk_id in anchor_chunk_ids))[:8]
+        with closing(self.connect()) as connection:
+            article = connection.execute(
+                """
+                SELECT id
+                FROM articles
+                WHERE id = ? AND validation_status IN ('validated', 'indexed')
+                """,
+                (article_id,),
+            ).fetchone()
+            if article is None:
+                return []
+
+            anchor_rows: list[sqlite3.Row] = []
+            if anchors:
+                placeholders = ",".join("?" for _ in anchors)
+                anchor_rows = list(
+                    connection.execute(
+                        f"""
+                        SELECT c.*
+                        FROM chunks AS c
+                        WHERE c.article_id = ? AND c.id IN ({placeholders})
+                        """,
+                        (article_id, *anchors),
+                    )
+                )
+                by_id = {int(row["id"]): row for row in anchor_rows}
+                anchor_rows = [by_id[chunk_id] for chunk_id in anchors if chunk_id in by_id]
+
+            ordered: list[sqlite3.Row] = []
+            seen: set[int] = set()
+
+            def append_rows(rows: Sequence[sqlite3.Row]) -> None:
+                for row in rows:
+                    chunk_id = int(row["id"])
+                    if chunk_id in seen or len(ordered) >= limit:
+                        continue
+                    ordered.append(row)
+                    seen.add(chunk_id)
+
+            append_rows(anchor_rows)
+            anchor_indexes = [int(row["chunk_index"]) for row in anchor_rows]
+            if anchor_indexes and len(ordered) < limit:
+                predicates = " OR ".join("c.chunk_index BETWEEN ? AND ?" for _ in anchor_indexes)
+                parameters: list[Any] = [article_id]
+                for index in anchor_indexes:
+                    parameters.extend(
+                        [max(0, index - neighborhood_radius), index + neighborhood_radius]
+                    )
+                neighbour_rows = list(
+                    connection.execute(
+                        f"""
+                        SELECT c.*
+                        FROM chunks AS c
+                        WHERE c.article_id = ? AND ({predicates})
+                        ORDER BY c.chunk_index
+                        """,
+                        parameters,
+                    )
+                )
+                neighbour_rows.sort(
+                    key=lambda row: (
+                        min(
+                            abs(int(row["chunk_index"]) - anchor_index)
+                            for anchor_index in anchor_indexes
+                        ),
+                        int(row["chunk_index"]),
+                    )
+                )
+                append_rows(neighbour_rows)
+
+            anchor_sections = list(
+                dict.fromkeys(
+                    str(row["section"])
+                    for row in anchor_rows
+                    if row["section"] is not None and str(row["section"]).strip()
+                )
+            )
+            preferred_sections = ["Results", "Discussion", "Conclusion", "Abstract"]
+            if include_methods:
+                preferred_sections.append("Materials and Methods")
+            section_names = list(dict.fromkeys([*anchor_sections, *preferred_sections]))
+            if section_names and len(ordered) < limit:
+                placeholders = ",".join("?" for _ in section_names)
+                section_rows = list(
+                    connection.execute(
+                        f"""
+                        SELECT c.*
+                        FROM chunks AS c
+                        WHERE c.article_id = ?
+                          AND lower(COALESCE(c.section, '')) IN ({placeholders})
+                        ORDER BY
+                            CASE lower(COALESCE(c.section, ''))
+                                WHEN 'results' THEN 0
+                                WHEN 'discussion' THEN 1
+                                WHEN 'conclusion' THEN 2
+                                WHEN 'abstract' THEN 3
+                                WHEN 'materials and methods' THEN 4
+                                ELSE 5
+                            END,
+                            c.chunk_index
+                        LIMIT ?
+                        """,
+                        (
+                            article_id,
+                            *(section.casefold() for section in section_names),
+                            max(limit * 2, limit),
+                        ),
+                    )
+                )
+                append_rows(section_rows)
+
+            if len(ordered) < limit:
+                fallback_rows = list(
+                    connection.execute(
+                        """
+                        SELECT c.*
+                        FROM chunks AS c
+                        WHERE c.article_id = ?
+                        ORDER BY
+                            CASE lower(COALESCE(c.section, ''))
+                                WHEN 'results' THEN 0
+                                WHEN 'discussion' THEN 1
+                                WHEN 'conclusion' THEN 2
+                                WHEN 'abstract' THEN 3
+                                WHEN 'introduction' THEN 4
+                                WHEN 'materials and methods' THEN 6
+                                ELSE 5
+                            END,
+                            c.chunk_index
+                        LIMIT ?
+                        """,
+                        (article_id, limit),
+                    )
+                )
+                append_rows(fallback_rows)
+            return ordered[:limit]
 
     def create_query(
         self,

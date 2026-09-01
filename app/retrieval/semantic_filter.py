@@ -27,7 +27,10 @@ RELEVANCE_GRADES: dict[RelevanceLevel, str | None] = {
     "unassessed": None,
 }
 
-MAX_FILTER_CANDIDATES = 20
+# The filter evaluates a bounded, complete candidate set.  It must never silently
+# discard candidates merely because a deep answer retains more than twenty records.
+MAX_FILTER_CANDIDATES = 48
+MAX_FILTER_BATCH_CANDIDATES = 10
 MAX_CANDIDATE_TEXT_CHARACTERS = 1_600
 MAX_FILTER_INPUT_CHARACTERS = 42_000
 
@@ -64,9 +67,13 @@ class SemanticCandidate(BaseModel):
             cleaned = _clean_text(passage.text)
             if not cleaned:
                 continue
-            excerpt = cleaned[:remaining]
+            separator_length = 1 if passages else 0
+            available = remaining - separator_length
+            if available <= 0:
+                break
+            excerpt = cleaned[:available]
             passages.append(excerpt)
-            remaining -= len(excerpt)
+            remaining -= separator_length + len(excerpt)
         text = "\n".join(passages).strip()
         if not text:
             raise ValueError(f"evidence candidate has no usable text: {record.record_id}")
@@ -230,10 +237,11 @@ class ArgoSemanticEvidenceFilter:
             raise ValueError("semantic filter question must contain between 2 and 4000 characters")
         if not 1 <= len(axes) <= 4:
             raise ValueError("semantic filter requires between one and four research axes")
-        candidates = [
-            SemanticCandidate.from_evidence_record(record)
-            for record in records[:MAX_FILTER_CANDIDATES]
-        ]
+        if len(records) > MAX_FILTER_CANDIDATES:
+            raise ValueError(
+                "semantic filter received more candidates than its bounded contract permits"
+            )
+        candidates = [SemanticCandidate.from_evidence_record(record) for record in records]
         if not candidates:
             raise ValueError("semantic filter requires at least one evidence candidate")
         candidate_ids = [candidate.candidate_id for candidate in candidates]
@@ -297,6 +305,38 @@ class ArgoSemanticEvidenceFilter:
         )
 
     def _assess_axis(
+        self,
+        question: str,
+        axis: ResearchAxis,
+        candidates: Sequence[SemanticCandidate],
+        *,
+        on_argo_reserved: Callable[[], None] | None,
+    ) -> tuple[AxisSemanticAssessment, str, int, int]:
+        """Assess one axis in bounded batches, then restore candidate order."""
+
+        decisions: list[CandidateSemanticDecision] = []
+        model = "safe-fallback"
+        prompt_tokens = 0
+        completion_tokens = 0
+        for start in range(0, len(candidates), MAX_FILTER_BATCH_CANDIDATES):
+            batch = candidates[start : start + MAX_FILTER_BATCH_CANDIDATES]
+            assessment, model, batch_prompt_tokens, batch_completion_tokens = self._assess_batch(
+                question,
+                axis,
+                batch,
+                on_argo_reserved=on_argo_reserved,
+            )
+            decisions.extend(assessment.decisions)
+            prompt_tokens += batch_prompt_tokens
+            completion_tokens += batch_completion_tokens
+        return (
+            AxisSemanticAssessment(axis_key=axis.key, decisions=decisions),
+            model,
+            prompt_tokens,
+            completion_tokens,
+        )
+
+    def _assess_batch(
         self,
         question: str,
         axis: ResearchAxis,

@@ -5,7 +5,7 @@ export type * from "./chat";
 export interface RuntimeSettings {
   offline_mode: boolean;
   bibliographic_apis: boolean;
-  llm_provider: "argo";
+  llm_provider: "argo" | "custom";
   llm_model: string;
   llm_key_configured: boolean;
   embedding_model: string;
@@ -175,6 +175,36 @@ export interface ArgoConnectionStatus {
   message: string;
 }
 
+export type LlmProviderId = "argo" | "custom";
+
+export interface LlmProviderProfile {
+  id: LlmProviderId;
+  label: string;
+  base_url: string;
+  model: string;
+  key_configured: boolean;
+  active: boolean;
+  endpoint_editable: boolean;
+}
+
+export interface LlmProvidersResponse {
+  active_provider: LlmProviderId;
+  providers: LlmProviderProfile[];
+}
+
+export interface LlmProviderConnectionStatus {
+  state:
+    | "ready"
+    | "missing"
+    | "rejected"
+    | "network_unavailable"
+    | "model_unavailable"
+    | "invalid_response";
+  configured: boolean;
+  provider?: LlmProviderId;
+  message: string;
+}
+
 export interface PublisherAccessStatus {
   enabled: boolean;
   credentials_configured: boolean;
@@ -277,6 +307,9 @@ export interface LibraryStatistics {
   documents: number;
   full_texts: number;
   abstract_only: number;
+  acquisition_notices: number;
+  accepted_without_content: number;
+  review_without_content: number;
 }
 
 export interface LibrarySummary {
@@ -307,7 +340,7 @@ export interface LibraryRecord {
   sources: string | null;
   first_seen_at: string | null;
   last_seen_at: string | null;
-  document_type: "full_text" | "abstract_only";
+  document_type: "full_text" | "abstract_only" | "metadata_only";
   article_id: string | null;
   pdf_available: boolean;
   pdf_path: string | null;

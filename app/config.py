@@ -226,7 +226,7 @@ class RetrievalConfig(BaseModel):
     lexical_text_weight: float = Field(default=1.0, ge=0.0, le=10.0)
     hybrid_candidate_limit: int = Field(default=200, ge=10, le=1000)
     hybrid_default_limit: int = Field(default=100, ge=1, le=1000)
-    hybrid_max_query_variants: int = Field(default=8, ge=1, le=20)
+    hybrid_max_query_variants: int = Field(default=10, ge=1, le=20)
 
     @model_validator(mode="after")
     def validate_weights(self) -> RetrievalConfig:

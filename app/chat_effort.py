@@ -18,7 +18,11 @@ class AnswerEffort(StrEnum):
 class AnswerEffortBudget:
     """One coherent budget; scientific validation is intentionally not optional."""
 
+    target_duration_seconds: int | None
+    hypothetical_answer_max_words: int
+    verification_need_limit: int
     max_query_variants: int
+    max_vector_query_variants: int
     abstract_result_limit: int
     article_count: int
     passages_per_article: int
@@ -27,6 +31,7 @@ class AnswerEffortBudget:
     evidence_record_limit: int
     max_evidence_items: int
     max_evidence_characters: int
+    max_retrieval_waves: int
     follow_up_query_limit: int
     follow_up_incomplete_axes: bool
     mono_max_statements: int
@@ -39,16 +44,21 @@ class AnswerEffortBudget:
 
 _BUDGETS: dict[AnswerEffort, AnswerEffortBudget] = {
     AnswerEffort.CONCISE: AnswerEffortBudget(
-        max_query_variants=4,
+        target_duration_seconds=None,
+        hypothetical_answer_max_words=80,
+        verification_need_limit=3,
+        max_query_variants=5,
+        max_vector_query_variants=2,
         abstract_result_limit=12,
         article_count=6,
         passages_per_article=3,
-        candidate_chunks_per_article=50,
+        candidate_chunks_per_article=12,
         context_radius=1,
         evidence_record_limit=12,
         max_evidence_items=12,
         max_evidence_characters=24_000,
-        follow_up_query_limit=4,
+        max_retrieval_waves=1,
+        follow_up_query_limit=0,
         follow_up_incomplete_axes=False,
         mono_max_statements=4,
         mono_max_output_tokens=3_072,
@@ -58,42 +68,55 @@ _BUDGETS: dict[AnswerEffort, AnswerEffortBudget] = {
         final_max_output_tokens=4_096,
     ),
     AnswerEffort.BALANCED: AnswerEffortBudget(
-        max_query_variants=8,
+        # Performance objective only: it never interrupts or skips a pipeline stage.
+        target_duration_seconds=15 * 60,
+        hypothetical_answer_max_words=140,
+        verification_need_limit=5,
+        max_query_variants=7,
+        max_vector_query_variants=2,
         abstract_result_limit=15,
         article_count=8,
         passages_per_article=4,
-        candidate_chunks_per_article=75,
-        context_radius=2,
+        candidate_chunks_per_article=16,
+        context_radius=1,
         evidence_record_limit=16,
         max_evidence_items=20,
         max_evidence_characters=36_000,
-        follow_up_query_limit=8,
-        follow_up_incomplete_axes=True,
+        max_retrieval_waves=1,
+        follow_up_query_limit=0,
+        follow_up_incomplete_axes=False,
         mono_max_statements=8,
         mono_max_output_tokens=4_096,
         facet_max_statements=4,
-        facet_max_output_tokens=4_096,
+        facet_max_output_tokens=3_072,
         final_max_statements=16,
-        final_max_output_tokens=6_144,
+        final_max_output_tokens=4_096,
     ),
     AnswerEffort.DEEP: AnswerEffortBudget(
-        max_query_variants=8,
-        abstract_result_limit=20,
-        article_count=10,
+        target_duration_seconds=None,
+        hypothetical_answer_max_words=250,
+        verification_need_limit=8,
+        max_query_variants=10,
+        max_vector_query_variants=2,
+        abstract_result_limit=32,
+        article_count=16,
         passages_per_article=6,
-        candidate_chunks_per_article=100,
-        context_radius=3,
-        evidence_record_limit=20,
-        max_evidence_items=20,
-        max_evidence_characters=42_000,
-        follow_up_query_limit=8,
-        follow_up_incomplete_axes=True,
+        candidate_chunks_per_article=20,
+        context_radius=2,
+        # Deep answers retain a wider, still bounded evidence pool. The downstream
+        # global semantic gate and claim validator still assess every selected record.
+        evidence_record_limit=36,
+        max_evidence_items=40,
+        max_evidence_characters=64_000,
+        max_retrieval_waves=1,
+        follow_up_query_limit=0,
+        follow_up_incomplete_axes=False,
         mono_max_statements=12,
-        mono_max_output_tokens=6_144,
+        mono_max_output_tokens=4_096,
         facet_max_statements=6,
-        facet_max_output_tokens=4_096,
+        facet_max_output_tokens=3_072,
         final_max_statements=16,
-        final_max_output_tokens=8_192,
+        final_max_output_tokens=4_096,
     ),
 }
 

@@ -42,6 +42,8 @@ export function normalizeStoredResponse(response: StoredChatResponse): StoredCha
     warnings: response.warnings ?? [],
     generation_status: response.generation_status ?? "generated",
     diagnostic_code: response.diagnostic_code ?? null,
+    diagnostic_codes:
+      response.diagnostic_codes ?? (response.diagnostic_code ? [response.diagnostic_code] : []),
     interaction_mode: response.interaction_mode ?? "research",
     reused_previous_sources: response.reused_previous_sources ?? false,
   };

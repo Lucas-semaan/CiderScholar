@@ -8,12 +8,23 @@ import type { LibraryRecordFilters } from "@/lib/api";
 
 interface LibraryFiltersProps {
   filters: LibraryRecordFilters;
+  mode?: "documents" | "acquisition";
   themes: string[];
   onChange: (update: (previous: LibraryRecordFilters) => LibraryRecordFilters) => void;
   onSubmit: () => void;
 }
 
-export function LibraryFilters({ filters, themes, onChange, onSubmit }: LibraryFiltersProps) {
+export function LibraryFilters({
+  filters,
+  mode = "documents",
+  themes,
+  onChange,
+  onSubmit,
+}: LibraryFiltersProps) {
+  const status =
+    filters.statuses.length === 1 && ["accepted", "review"].includes(filters.statuses[0] ?? "")
+      ? filters.statuses[0]
+      : "all";
   return (
     <Card>
       <CardHeader>
@@ -24,7 +35,11 @@ export function LibraryFilters({ filters, themes, onChange, onSubmit }: LibraryF
       </CardHeader>
       <CardBody>
         <form
-          className="grid gap-4 lg:grid-cols-[minmax(0,2fr)_minmax(10rem,1fr)_minmax(10rem,1fr)_auto] lg:items-end"
+          className={
+            mode === "acquisition"
+              ? "grid gap-4 lg:grid-cols-[minmax(0,2fr)_minmax(10rem,1fr)_minmax(14rem,1.2fr)_auto] lg:items-end"
+              : "grid gap-4 lg:grid-cols-[minmax(0,2fr)_minmax(10rem,1fr)_minmax(10rem,1fr)_auto] lg:items-end"
+          }
           onSubmit={(event) => {
             event.preventDefault();
             onSubmit();
@@ -61,21 +76,40 @@ export function LibraryFilters({ filters, themes, onChange, onSubmit }: LibraryF
               ))}
             </Select>
           </Field>
-          <Field label="Type de contenu">
-            <Select
-              onChange={(event) =>
-                onChange((previous) => ({
-                  ...previous,
-                  availability: event.target.value as LibraryRecordFilters["availability"],
-                }))
-              }
-              value={filters.availability}
-            >
-              <option value="all">Tous les documents</option>
-              <option value="full_text">Full article</option>
-              <option value="abstract_only">Abstract only</option>
-            </Select>
-          </Field>
+          {mode === "acquisition" ? (
+            <Field label="Statut de la notice">
+              <Select
+                onChange={(event) => {
+                  const nextStatus = event.target.value;
+                  onChange((previous) => ({
+                    ...previous,
+                    statuses: nextStatus === "all" ? ["accepted", "review"] : [nextStatus],
+                  }));
+                }}
+                value={status}
+              >
+                <option value="all">Acceptées et à réviser</option>
+                <option value="accepted">Acceptées sans contenu</option>
+                <option value="review">À réviser sans contenu</option>
+              </Select>
+            </Field>
+          ) : (
+            <Field label="Type de contenu">
+              <Select
+                onChange={(event) =>
+                  onChange((previous) => ({
+                    ...previous,
+                    availability: event.target.value as LibraryRecordFilters["availability"],
+                  }))
+                }
+                value={filters.availability}
+              >
+                <option value="all">Tous les documents</option>
+                <option value="full_text">Full article</option>
+                <option value="abstract_only">Abstract only</option>
+              </Select>
+            </Field>
+          )}
           <div className="flex items-end">
             <Button className="w-full whitespace-nowrap lg:w-auto" type="submit">
               Appliquer

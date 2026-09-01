@@ -162,6 +162,25 @@ Le texte final n’est repris ni du résultat FTS ni du payload Qdrant : tous le
 réhydratés une dernière fois depuis SQLite. Les filtres article et section sont appliqués aux deux
 canaux avant la RRF.
 
+Depuis le 27 août 2026, le chatbot groupe une seule vague autour de la question originale, d'une
+hypothèse Argo explicitement non fiable et de vérifications atomiques adaptées à l'effort. Les deux
+premières formulations sont les entrées denses prioritaires ; l'original et les vérifications restent
+interrogés lexicalement dans une session partagée. Il n'existe plus de pools ni de quotas par axe, de
+contrôleur de couverture ou de seconde vague automatique. Un filtre global A–D précède la synthèse
+finale et une lacune conduit à l'abstention ou à une réponse partielle.
+
+La navigation intra-article exploite directement la hiérarchie SQLite
+`article_id -> section/subsection -> chunk_index`. Elle sélectionne les ancres, leurs voisins et des
+sections scientifiques ciblées sans créer de copie textuelle ni lire l'article complet par défaut.
+Les modèles locaux ne voient que les lignes SQLite réhydratées ; Qdrant, les hypothèses et les notices
+externes non ingérées ne sont jamais des autorités scientifiques.
+
+Le cross-encoder peut être spécialisé progressivement avec le script
+`scripts.build_specialized_reranker_dataset`, qui combine CiderQA développement et des décisions A–D
+pointant vers des chunks SQLite, puis `scripts.train_specialized_reranker`, qui produit un nouveau
+modèle candidat signé. Le modèle candidat n'est ni activé ni substitué automatiquement : il doit
+franchir les gates CiderQA avant une modification explicite de la configuration.
+
 ## Classement distinct des articles
 
 Le classement n’assimile jamais un fragment à un article. Il regroupe les candidats hybrides par
@@ -183,10 +202,10 @@ n’entre dans le score.
 
 ## Connexion ARGO
 
-`ArgoClient` appelle directement l’API officielle compatible OpenAI avec `httpx`, sans framework RAG
-ni SDK intermédiaire. La configuration impose l’endpoint HTTPS INRAE, TLS, l’absence de proxy
-d’environnement et le refus des redirections. La clé Bearer est lue uniquement depuis la variable
-d’environnement configurée.
+Le client LLM appelle directement une API compatible OpenAI avec `httpx`, sans framework RAG ni SDK
+intermédiaire. Le fournisseur actif est ARGO INRAE, avec son endpoint HTTPS imposé, ou un profil
+personnalisé HTTPS. TLS, l’absence de proxy d’environnement et le refus des redirections restent
+obligatoires.
 
 Les appels sont synchrones, non streamés et protégés par un verrou : un seul travail génératif
 s’exécute à la fois. Le nombre maximal de tokens produits et le nombre de caractères du prompt sont
@@ -199,6 +218,14 @@ métier portant sur l’identité des fragments, les pages sources et les preuve
 
 La sonde `/health/llm` vérifie la clé et le modèle sans produire de texte. Le client HTTP est fermé et
 la clé effacée de l’instance après chaque workflow.
+
+Le profil personnalisé exige un nom de modèle explicite et les routes `/models` et
+`/chat/completions`; les URL avec identifiants, paramètres ou fragment sont refusées. Les préférences
+non secrètes et le fournisseur actif sont persistés atomiquement dans
+`data/preferences/llm-providers.json`. Les clés restent séparées et chiffrées par DPAPI dans
+`data/secrets/argo-key.dpapi` et `data/secrets/custom-llm-key.dpapi`. Les API
+`/api/llm-providers` n’exposent que l’endpoint, le modèle et un booléen de présence de clé ; les
+anciennes routes `/api/argo-key` restent disponibles pour la compatibilité ARGO.
 
 ## Extraction de preuves traçables
 
@@ -321,3 +348,11 @@ En mode Qdrant embarqué, l’application sérialise ses opérations et crée le
 par `qdrant-client==1.18.0` pour sonder le mode de compilation : son context manager ne la ferme pas
 correctement sous Python 3.14. Les connexions persistantes des collections restent fermées
 explicitement par `QdrantLocalIndex.close()`.
+
+Dans une vague de retrieval conversationnel, un `QdrantLocalIndex` propriétaire acquiert paresseusement
+le verrou du corpus et le client local. Les index propres aux collections `science_chunks` et
+bibliographiques lui empruntent ce client sans le fermer. La même propriété est propagée à
+l'indexation incrémentale éventuellement déclenchée par l'acquisition de texte intégral, puis le
+propriétaire unique ferme le client et libère le verrou à la sortie de la vague. Un cache hit complet
+n'ouvre donc pas Qdrant, et deux collections consultées dans une même vague ne rouvrent pas le
+stockage local.

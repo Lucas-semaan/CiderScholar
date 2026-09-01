@@ -22,12 +22,20 @@ from app.jobs.repository import (
 router = APIRouter(prefix="/api/jobs", tags=["jobs"])
 
 
+def _repository_with_expired_leases_recovered(database: Database) -> JobRepository:
+    """Expose a truthful job state even when the durable worker has stopped."""
+
+    repository = JobRepository(database.path)
+    repository.recover_expired_leases()
+    return repository
+
+
 @router.get("/{job_id}", response_model=JobPublic)
 def get_job(
     job_id: UUID,
     database: Annotated[Database, Depends(get_database)],
 ) -> JobPublic:
-    job = JobRepository(database.path).get(job_id)
+    job = _repository_with_expired_leases_recovered(database).get(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Travail introuvable.")
     return job.to_public()
@@ -38,7 +46,7 @@ def cancel_job(
     job_id: UUID,
     database: Annotated[Database, Depends(get_database)],
 ) -> JobPublic:
-    repository = JobRepository(database.path)
+    repository = _repository_with_expired_leases_recovered(database)
     job = repository.get(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Travail introuvable.")
@@ -63,7 +71,7 @@ def retry_job(
     payload: JobRetryRequest,
     database: Annotated[Database, Depends(get_database)],
 ) -> JobPublic:
-    repository = JobRepository(database.path)
+    repository = _repository_with_expired_leases_recovered(database)
     job = repository.get(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Travail introuvable.")

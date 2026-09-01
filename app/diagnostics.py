@@ -15,7 +15,7 @@ from threading import Event, Thread
 from app.config import Settings
 from app.jobs.repository import JobRepository
 from app.llm.argo_client import ArgoClient, ArgoHealth
-from app.llm.argo_key import ArgoKeyStore
+from app.llm.providers import LlmProviderStore
 from app.memory import MemoryGuard
 
 WORKER_HEARTBEAT_MAX_AGE_SECONDS = 5
@@ -75,7 +75,7 @@ def build_readiness_report(
     now: datetime | None = None,
     disk_free_bytes: int | None = None,
 ) -> dict[str, object]:
-    """Run bounded checks; ARGO uses only its model-list endpoint and never generation."""
+    """Run bounded checks; the active LLM uses only its model list and never generation."""
 
     measured_at = now or datetime.now(UTC)
     checks = {
@@ -187,11 +187,14 @@ def _argo_check(
     settings: Settings,
     argo_probe: Callable[[], ArgoHealth] | None,
 ) -> dict[str, str]:
-    configured = ArgoKeyStore(settings).configured() or bool(
-        os.environ.get(settings.argo.api_key_env, "").strip()
-    )
+    profile = LlmProviderStore(settings).active_profile()
+    configured = profile.key_configured
     if not configured:
-        return _check("blocked", "Clé ARGO absente.", "Ajouter puis tester la clé dans Paramètres.")
+        return _check(
+            "blocked",
+            f"Clé {profile.label} absente.",
+            "Ajouter puis tester la clé dans Paramètres.",
+        )
     try:
         if argo_probe is None:
             with ArgoClient(settings) as client:
@@ -201,21 +204,23 @@ def _argo_check(
     except Exception:
         return _check(
             "blocked",
-            "Sonde ARGO indisponible.",
-            "Vérifier le réseau INRAE ou le VPN, puis actualiser.",
+            "Sonde LLM indisponible.",
+            "Vérifier le réseau du fournisseur, puis actualiser.",
         )
     if health.reachable and health.model_available:
-        return _check("ready", "Clé et modèle ARGO accessibles.", "Aucune action requise.")
+        return _check(
+            "ready", f"Clé et modèle {profile.label} accessibles.", "Aucune action requise."
+        )
     if health.reachable:
         return _check(
             "blocked",
-            "Modèle ARGO non autorisé pour cette clé.",
-            "Choisir un modèle autorisé ou contacter le support ARGO.",
+            f"Modèle {profile.label} non autorisé pour cette clé.",
+            "Choisir un modèle accessible puis actualiser.",
         )
     return _check(
         "blocked",
-        "ARGO ne répond pas à la sonde sans génération.",
-        "Vérifier le réseau INRAE ou le VPN, puis actualiser.",
+        f"{profile.label} ne répond pas à la sonde sans génération.",
+        "Vérifier le réseau du fournisseur, puis actualiser.",
     )
 
 

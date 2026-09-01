@@ -8,9 +8,12 @@ from enum import StrEnum
 
 
 class ResponseStyle(StrEnum):
-    """Closed set of response layouts supported by the scientific renderer."""
+    """Closed set of layouts ARGO may select for a scientific synthesis."""
 
     PROSE = "prose"
+    THEMATIC_SECTIONS = "thematic_sections"
+    COMPARISON = "comparison"
+    PROCESS = "process"
     BULLET_LIST = "bullet_list"
 
 
@@ -49,12 +52,18 @@ _EXPLICIT_LIST_REQUESTS = (
 def detect_response_style(question: str) -> ResponseStyle:
     """Return the explicitly requested style, defaulting deterministically to prose."""
 
+    return requested_response_style(question) or ResponseStyle.PROSE
+
+
+def requested_response_style(question: str) -> ResponseStyle | None:
+    """Return only an explicit user constraint; otherwise let ARGO choose."""
+
     normalized = _normalize(question)
     if _contains_phrase(normalized, _BULLET_PROHIBITIONS):
         return ResponseStyle.PROSE
     if _contains_phrase(normalized, _EXPLICIT_LIST_REQUESTS):
         return ResponseStyle.BULLET_LIST
-    return ResponseStyle.PROSE
+    return None
 
 
 def _normalize(value: str) -> str:

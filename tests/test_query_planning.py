@@ -8,6 +8,7 @@ from app.llm.argo_client import ArgoProtocolError
 from app.llm.contracts import GenerationMetrics, GenerationResponse
 from app.retrieval.query_planning import (
     ArgoQueryPlanningService,
+    QueryPlanningProtocolDiagnostic,
     ResearchQueryPlan,
     deterministic_query_plan,
 )
@@ -107,6 +108,240 @@ def test_argo_planner_keeps_a_simple_question_on_one_axis() -> None:
     assert "La décomposition n'est jamais systématique" in client.messages[0]["content"]
 
 
+def test_argo_planner_deep_mode_instructs_conditional_multi_axis_decomposition() -> None:
+    client = _FakePlanningClient(
+        {
+            "interpreted_question": "Effet du traitement sur le jus de pomme",
+            "axes": [
+                {
+                    "key": "treatment",
+                    "label": "Effet du traitement",
+                    "question": "Quel est l'effet du traitement sur le jus de pomme ?",
+                    "terms_fr": ["traitement"],
+                    "terms_en": ["treatment"],
+                    "search_queries": ["apple juice treatment effect"],
+                }
+            ],
+            "retrieval_queries": ["apple juice treatment effect"],
+        }
+    )
+
+    result = ArgoQueryPlanningService(client).plan(
+        "Effet du traitement sur le jus de pomme ?", deep=True
+    )
+
+    assert len(result.plan.axes) == 1
+    prompt = client.messages[0]["content"]
+    assert "finalité/effets, mécanismes et conditions, comparaison" in prompt
+    assert "Ne sur-décompose jamais une question simple" in prompt
+
+
+def test_argo_planner_prepends_controlled_process_query_when_generated_plan_drifts() -> None:
+    client = _FakePlanningClient(
+        {
+            "interpreted_question": "Impact du cuvage cidricole",
+            "axes": [
+                {
+                    "key": "overall",
+                    "label": "Impact global",
+                    "question": "Quel est l’impact du cuvage ?",
+                    "terms_fr": ["cuvage"],
+                    "terms_en": ["holding"],
+                    "search_queries": [
+                        "apple juice clarification storage quality",
+                        "cider fermentation temperature quality",
+                    ],
+                }
+            ],
+            "retrieval_queries": ["apple juice clarification storage quality"],
+        }
+    )
+
+    result = ArgoQueryPlanningService(client).plan(
+        "Quel est l’impact du cuvage pour les jus de pomme et les cidres ?",
+        deep=True,
+    )
+
+    first_query = result.plan.axes[0].search_queries[0]
+    assert "apple juice" in first_query
+    assert "cider" in first_query
+    assert "mash maceration" in first_query
+    assert "pre-press maceration" in first_query
+    assert result.plan.retrieval_queries[0] == first_query
+
+
+def test_argo_planner_deep_mode_completes_a_comparative_plan_with_fallback_axes() -> None:
+    client = _FakePlanningClient(
+        {
+            "interpreted_question": "Comparer les colles végétales et animales",
+            "axes": [
+                {
+                    "key": "fining_effects",
+                    "label": "Effets du collage",
+                    "question": "Quels sont les effets du collage ?",
+                    "terms_fr": ["collage"],
+                    "terms_en": ["fining"],
+                    "search_queries": [
+                        "apple juice fining effects",
+                        "apple juice fining turbidity",
+                        "apple juice fining clarity",
+                        "apple juice colloidal stability",
+                    ],
+                }
+            ],
+            "retrieval_queries": ["apple juice fining effects"],
+        }
+    )
+
+    result = ArgoQueryPlanningService(client).plan(
+        "Comparer les colles végétales et animales dans le jus de pomme.", deep=True
+    )
+
+    assert [axis.key for axis in result.plan.axes] == [
+        "fining_effects",
+        "fining_agents_comparison",
+        "fining_mechanisms_conditions",
+        "fining_tradeoffs_limits",
+    ]
+    assert result.plan.requires_faceted_answer is True
+    assert any("plant proteins" in query for query in result.plan.retrieval_queries)
+
+
+def test_argo_planner_balanced_mode_restores_mineral_fining_axis() -> None:
+    client = _FakePlanningClient(
+        {
+            "interpreted_question": "Comparer les colles végétales et animales",
+            "axes": [
+                {
+                    "key": "fining_effects",
+                    "label": "Effets du collage",
+                    "question": "Quels sont les effets du collage ?",
+                    "terms_fr": ["collage"],
+                    "terms_en": ["fining"],
+                    "search_queries": ["apple juice fining effects"],
+                },
+                {
+                    "key": "fining_agents_comparison",
+                    "label": "Comparaison des colles",
+                    "question": "Comment comparer les protéines végétales et animales ?",
+                    "terms_fr": ["proteines vegetales", "gelatine"],
+                    "terms_en": ["plant proteins", "gelatin"],
+                    "search_queries": [
+                        "apple juice plant proteins gelatin fining",
+                        "apple juice animal plant fining agents",
+                        "apple juice pea protein gelatin",
+                        "apple juice alternative fining proteins",
+                    ],
+                },
+            ],
+            "retrieval_queries": ["apple juice plant proteins gelatin fining"],
+        }
+    )
+
+    result = ArgoQueryPlanningService(client).plan(
+        "Comparer les colles végétales et animales dans le jus de pomme."
+    )
+
+    assert [axis.key for axis in result.plan.axes] == [
+        "fining_effects",
+        "fining_agents_comparison",
+        "fining_mechanisms_conditions",
+    ]
+    mineral_axis = result.plan.axes[-1]
+    assert "bentonite" in mineral_axis.terms_en
+    assert any("bentonite" in query for query in mineral_axis.search_queries)
+    assert any("bentonite" in query for query in result.plan.retrieval_queries)
+
+
+def test_argo_planner_replaces_peripheral_full_plan_axis_with_required_facet() -> None:
+    client = _FakePlanningClient(
+        {
+            "interpreted_question": "Comparer les colles végétales et animales",
+            "axes": [
+                {
+                    "key": "fining_effects",
+                    "label": "Effets du collage",
+                    "question": "Quels sont les effets du collage ?",
+                    "terms_fr": ["collage"],
+                    "terms_en": ["fining"],
+                    "search_queries": ["apple juice fining effects"],
+                },
+                {
+                    "key": "fining_agents_comparison",
+                    "label": "Comparaison des colles",
+                    "question": "Comment comparer les protéines végétales et animales ?",
+                    "terms_fr": ["proteines vegetales", "gelatine"],
+                    "terms_en": ["plant proteins", "gelatin"],
+                    "search_queries": ["apple juice plant proteins gelatin fining"],
+                },
+                {
+                    "key": "consumer_context",
+                    "label": "Contexte consommateur",
+                    "question": "Quel contexte consommateur accompagne le collage ?",
+                    "terms_fr": ["consommateur"],
+                    "terms_en": ["consumer"],
+                    "search_queries": ["apple juice fining consumer context"],
+                },
+                {
+                    "key": "market_context",
+                    "label": "Contexte de marché",
+                    "question": "Quel contexte de marché accompagne le collage ?",
+                    "terms_fr": ["marché"],
+                    "terms_en": ["market"],
+                    "search_queries": ["apple juice fining market context"],
+                },
+            ],
+            "retrieval_queries": ["apple juice plant proteins gelatin fining"],
+        }
+    )
+
+    result = ArgoQueryPlanningService(client).plan(
+        "Comparer les colles végétales et animales dans le jus de pomme."
+    )
+
+    assert [axis.key for axis in result.plan.axes] == [
+        "fining_effects",
+        "fining_agents_comparison",
+        "fining_mechanisms_conditions",
+        "consumer_context",
+    ]
+    assert len(result.plan.axes) == 4
+    assert "bentonite" in result.plan.axes[2].terms_en
+    assert "market_context" not in {axis.key for axis in result.plan.axes}
+
+
+def test_argo_planner_balanced_mode_prioritizes_required_deterministic_axis() -> None:
+    client = _FakePlanningClient(
+        {
+            "interpreted_question": "Stabilité protéique pendant le stockage",
+            "axes": [
+                {
+                    "key": f"peripheral_axis_{index}",
+                    "label": f"Axe périphérique {index}",
+                    "question": f"Quelle dimension périphérique {index} étudier ?",
+                    "terms_fr": [f"périphérique {index}"],
+                    "terms_en": [f"peripheral {index}"],
+                    "search_queries": [f"apple juice peripheral dimension {index}"],
+                }
+                for index in range(1, 5)
+            ],
+            "retrieval_queries": ["apple juice storage protein stability"],
+        }
+    )
+
+    result = ArgoQueryPlanningService(client).plan(
+        "Comment la température et la durée de stockage modifient-elles la stabilité "
+        "protéique du jus de pomme ?"
+    )
+
+    assert [axis.key for axis in result.plan.axes] == [
+        "protein_stability",
+        "peripheral_axis_1",
+        "peripheral_axis_2",
+        "peripheral_axis_3",
+    ]
+
+
 def test_argo_planner_can_choose_two_independent_axes_and_expand_the_matrix() -> None:
     payload = {
         "interpreted_question": "Effets du bois sur les arômes et la structure du Calvados",
@@ -151,14 +386,14 @@ def test_argo_planner_can_choose_two_independent_axes_and_expand_the_matrix() ->
     )
 
     assert result.plan.requires_faceted_answer is True
-    assert [axis.key for axis in result.plan.axes] == ["aroma", "structure"]
+    assert [axis.key for axis in result.plan.axes] == ["aroma", "structure", "evolution"]
     assert "apple brandy oak aging volatile compounds esters" in result.plan.retrieval_queries
     assert (
         "cider brandy wood aging phenolics tannins acidity color mouthfeel"
         in result.plan.retrieval_queries
     )
     assert intent.matrix_close[:2] == ["apple brandy", "apple spirit"]
-    assert [facet.key for facet in intent.facets] == ["aroma", "structure"]
+    assert [facet.key for facet in intent.facets] == ["aroma", "structure", "evolution"]
     assert "phenolic compounds" in intent.facet("structure").terms_en
 
 
@@ -283,6 +518,42 @@ def test_argo_planner_reports_repeated_invalid_outputs_as_a_protocol_error() -> 
     assert isinstance(error.value.__cause__, Exception)
 
 
+@pytest.mark.parametrize(
+    ("responses", "expected_diagnostic"),
+    [
+        (
+            [_response('{"interpreted_question": "truncated"'), _response('{"axes":')],
+            {"category": "invalid_json", "pydantic_path": None, "pydantic_type": None},
+        ),
+        (
+            [
+                _response({"requires_faceted_answer": False}),
+                _response({"requires_faceted_answer": False}),
+            ],
+            {
+                "category": "schema_validation",
+                "pydantic_path": ("interpreted_question",),
+                "pydantic_type": "missing",
+            },
+        ),
+    ],
+)
+def test_argo_planner_exposes_a_non_sensitive_protocol_diagnostic(
+    responses: list[GenerationResponse],
+    expected_diagnostic: dict[str, object],
+) -> None:
+    client = _SequencePlanningClient(responses)
+    question = "Question confidentielle à ne jamais exposer"
+
+    with pytest.raises(ArgoProtocolError) as error:
+        ArgoQueryPlanningService(client).plan(question)
+
+    diagnostic = error.value.diagnostic
+    assert isinstance(diagnostic, QueryPlanningProtocolDiagnostic)
+    assert diagnostic.model_dump() == expected_diagnostic
+    assert question not in str(diagnostic)
+
+
 def test_deterministic_plan_is_only_marked_as_fallback() -> None:
     result = deterministic_query_plan(
         "Impact de l'élevage en barrique sur les arômes et la structure du Calvados ?"
@@ -321,7 +592,9 @@ def test_deterministic_plan_expands_fining_and_plant_animal_comparison() -> None
     assert [axis.key for axis in result.plan.axes] == [
         "fining_effects",
         "fining_agents_comparison",
+        "fining_mechanisms_conditions",
     ]
+    assert any("bentonite" in query for query in result.plan.retrieval_queries)
     assert result.plan.requires_faceted_answer is True
     assert any(
         "fining" in query and "plant proteins" in query and "gelatin" in query
@@ -352,3 +625,33 @@ def test_plan_propagates_excluded_concepts_to_scientific_intent() -> None:
     intent = plan.scientific_intent("Effect of a process on an exact matrix")
 
     assert intent.excluded_terms[:2] == ["similar process", "unrelated matrix"]
+
+
+def test_deep_plan_intent_completes_missing_deterministic_comparative_facets() -> None:
+    plan = ResearchQueryPlan.model_validate(
+        {
+            "interpreted_question": "Comparer des colles végétales et animales",
+            "axes": [
+                {
+                    "key": "fining_effects",
+                    "label": "Effets du collage",
+                    "question": "Quels sont les effets du collage ?",
+                    "terms_fr": ["collage"],
+                    "terms_en": ["fining"],
+                    "search_queries": ["apple juice fining effects"],
+                }
+            ],
+            "retrieval_queries": ["apple juice fining effects"],
+        }
+    )
+
+    intent = plan.scientific_intent(
+        "Comparer les colles végétales et animales dans le jus de pomme.", deep=True
+    )
+
+    assert [facet.key for facet in intent.facets] == [
+        "fining_effects",
+        "fining_agents_comparison",
+        "fining_mechanisms_conditions",
+        "fining_tradeoffs_limits",
+    ]

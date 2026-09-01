@@ -160,8 +160,8 @@ def merge_chatbot_candidates(
 ) -> tuple[list[BibliographicHybridResult], int]:
     """Reserve room for qualified live sources without displacing the local RAG."""
 
-    if not 1 <= limit <= 16:
-        raise ValueError("chatbot source limit must be between 1 and 16")
+    if not 1 <= limit <= 64:
+        raise ValueError("chatbot source limit must be between 1 and 64")
     qualified_external = [
         record for record in external_records if record.abstract and _is_cider_relevant(record)
     ]

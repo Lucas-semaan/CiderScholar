@@ -97,7 +97,7 @@ def _semantic(axes: list[ResearchAxis], record_id: str) -> SemanticFilterResult:
 
 def test_coverage_assessor_reports_covered_and_missing_axes_with_grounded_ids() -> None:
     axes = [_axis("mechanism", "mécanismes"), _axis("methods", "méthodes")]
-    payload = {
+    mechanism_payload = {
         "axes": [
             {
                 "axis_key": "mechanism",
@@ -106,7 +106,11 @@ def test_coverage_assessor_reports_covered_and_missing_axes_with_grounded_ids() 
                 "assessment": "La preuve traite directement le mécanisme.",
                 "missing_information": [],
                 "suggested_queries": [],
-            },
+            }
+        ]
+    }
+    methods_payload = {
+        "axes": [
             {
                 "axis_key": "methods",
                 "status": "missing",
@@ -117,7 +121,7 @@ def test_coverage_assessor_reports_covered_and_missing_axes_with_grounded_ids() 
             },
         ]
     }
-    client = _Client([payload])
+    client = _Client([mechanism_payload, methods_payload])
 
     result = ArgoEvidenceCoverageAssessor(client).assess(
         "Stabilité protéique du jus de pomme",
@@ -133,6 +137,59 @@ def test_coverage_assessor_reports_covered_and_missing_axes_with_grounded_ids() 
     schema = client.calls[0][1]["json_schema"]
     axis_schema = schema["$defs"]["AxisCoverageAssessment"]
     assert axis_schema["properties"]["supporting_candidate_ids"]["items"]["enum"] == ["record-1"]
+    assert len(client.calls) == 2
+
+
+def test_coverage_assessor_keeps_more_than_twenty_eligible_candidates_bounded() -> None:
+    axis = _axis("mechanism", "mécanismes")
+    records = [_record(f"record-{index}") for index in range(36)]
+    semantic = SemanticFilterResult(
+        question="Stabilité protéique du jus de pomme",
+        axes=[
+            AxisSemanticAssessment(
+                axis_key=axis.key,
+                decisions=[
+                    CandidateSemanticDecision(
+                        candidate_id=record.record_id,
+                        relevance="direct",
+                        rationale="Relevant persisted evidence.",
+                    )
+                    for record in records
+                ],
+            )
+        ],
+        selected_candidate_ids=[record.record_id for record in records],
+        model="semantic-test",
+        prompt_tokens=10,
+        completion_tokens=10,
+    )
+    client = _Client(
+        [
+            {
+                "axes": [
+                    {
+                        "axis_key": axis.key,
+                        "status": "covered",
+                        "supporting_candidate_ids": [record.record_id for record in records],
+                        "assessment": "Les preuves directes couvrent le mécanisme.",
+                        "missing_information": [],
+                        "suggested_queries": [],
+                    }
+                ]
+            }
+        ]
+    )
+
+    result = ArgoEvidenceCoverageAssessor(client).assess(
+        "Stabilité protéique du jus de pomme", [axis], records, semantic
+    )
+
+    assert result.axes[0].status == "covered"
+    payload = json.loads(client.calls[0][0][1]["content"])
+    assert [candidate["candidate_id"] for candidate in payload["candidates"]] == [
+        record.record_id for record in records
+    ]
+    assert len(client.calls[0][0][1]["content"]) <= 48_000
 
 
 def test_coverage_rejects_invented_or_semantically_ineligible_references() -> None:
@@ -163,6 +220,153 @@ def test_coverage_rejects_invented_or_semantically_ineligible_references() -> No
     assert result.axes[0].supporting_candidate_ids == []
     assert result.ready_for_synthesis is False
     assert len(client.calls) == 2
+
+
+def test_coverage_uses_disjoint_candidates_per_axis_and_keeps_exact_axis_order() -> None:
+    axes = [_axis("mechanism", "mécanismes"), _axis("methods", "méthodes")]
+    semantic = SemanticFilterResult(
+        question="Stabilité protéique du jus de pomme",
+        axes=[
+            AxisSemanticAssessment(
+                axis_key="mechanism",
+                decisions=[
+                    CandidateSemanticDecision(
+                        candidate_id="record-mechanism",
+                        relevance="direct",
+                        rationale="Direct mechanism evidence.",
+                    )
+                ],
+            ),
+            AxisSemanticAssessment(
+                axis_key="methods",
+                decisions=[
+                    CandidateSemanticDecision(
+                        candidate_id="record-methods",
+                        relevance="direct",
+                        rationale="Direct methods evidence.",
+                    )
+                ],
+            ),
+        ],
+        selected_candidate_ids=["record-mechanism", "record-methods"],
+        model="semantic-test",
+        prompt_tokens=10,
+        completion_tokens=10,
+    )
+    client = _Client(
+        [
+            {
+                "axes": [
+                    {
+                        "axis_key": "mechanism",
+                        "status": "covered",
+                        "supporting_candidate_ids": ["record-mechanism"],
+                        "assessment": "Direct mechanism evidence is available.",
+                        "missing_information": [],
+                        "suggested_queries": [],
+                    }
+                ]
+            },
+            {
+                "axes": [
+                    {
+                        "axis_key": "methods",
+                        "status": "covered",
+                        "supporting_candidate_ids": ["record-methods"],
+                        "assessment": "Direct methods evidence is available.",
+                        "missing_information": [],
+                        "suggested_queries": [],
+                    }
+                ]
+            },
+        ]
+    )
+
+    result = ArgoEvidenceCoverageAssessor(client).assess(
+        "Stabilité protéique du jus de pomme",
+        axes,
+        [_record("record-mechanism"), _record("record-methods")],
+        semantic,
+    )
+
+    assert [assessment.axis_key for assessment in result.axes] == ["mechanism", "methods"]
+    assert result.covered_axis_keys == ["mechanism", "methods"]
+    assert result.ready_for_synthesis is True
+    for call, candidate_id in zip(
+        client.calls, ["record-mechanism", "record-methods"], strict=True
+    ):
+        schema = call[1]["json_schema"]
+        axis_schema = schema["$defs"]["AxisCoverageAssessment"]
+        assert axis_schema["properties"]["supporting_candidate_ids"]["items"]["enum"] == [
+            candidate_id
+        ]
+        payload = json.loads(call[0][1]["content"])
+        assert payload["axis"]["semantically_eligible_candidate_ids"] == [candidate_id]
+        assert [candidate["candidate_id"] for candidate in payload["candidates"]] == [candidate_id]
+
+
+def test_coverage_falls_back_only_for_the_failed_axis() -> None:
+    axes = [_axis("mechanism", "mécanismes"), _axis("methods", "méthodes")]
+    semantic = SemanticFilterResult(
+        question="Stabilité protéique du jus de pomme",
+        axes=[
+            AxisSemanticAssessment(
+                axis_key="mechanism",
+                decisions=[
+                    CandidateSemanticDecision(
+                        candidate_id="record-mechanism",
+                        relevance="direct",
+                        rationale="Direct mechanism evidence.",
+                    )
+                ],
+            ),
+            AxisSemanticAssessment(
+                axis_key="methods",
+                decisions=[
+                    CandidateSemanticDecision(
+                        candidate_id="record-methods",
+                        relevance="supportive",
+                        rationale="Supportive methods evidence.",
+                    )
+                ],
+            ),
+        ],
+        selected_candidate_ids=["record-mechanism", "record-methods"],
+        model="semantic-test",
+        prompt_tokens=10,
+        completion_tokens=10,
+    )
+    client = _Client(
+        [
+            {
+                "axes": [
+                    {
+                        "axis_key": "mechanism",
+                        "status": "covered",
+                        "supporting_candidate_ids": ["record-mechanism"],
+                        "assessment": "Direct mechanism evidence is available.",
+                        "missing_information": [],
+                        "suggested_queries": [],
+                    }
+                ]
+            },
+            TimeoutError("offline"),
+        ]
+    )
+
+    result = ArgoEvidenceCoverageAssessor(client).assess(
+        "Stabilité protéique du jus de pomme",
+        axes,
+        [_record("record-mechanism"), _record("record-methods")],
+        semantic,
+    )
+
+    assert result.used_fallback is False
+    assert result.axes[0].status == "covered"
+    assert result.axes[1].status == "partial"
+    assert result.axes[1].supporting_candidate_ids == ["record-methods"]
+    assert result.ready_for_synthesis is False
+    assert result.warning is not None
 
 
 def test_coverage_api_failure_never_assumes_evidence_is_sufficient() -> None:

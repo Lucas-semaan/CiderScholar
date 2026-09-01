@@ -139,6 +139,57 @@ def test_get_job_route_returns_safe_projection_and_404(settings) -> None:
     assert summary["active_job_count"] == 1
 
 
+def test_api_recovers_an_expired_worker_lease_before_reporting_a_job(settings) -> None:
+    database = Database(settings.paths.database_path)
+    database.initialize()
+    repository = JobRepository(database.path)
+    conversation_id = uuid4()
+    message_id = uuid4()
+    now = datetime.now(UTC)
+    with database.transaction() as connection:
+        connection.execute(
+            "INSERT INTO chat_conversations(id, title) VALUES (?, 'Reprise worker')",
+            (str(conversation_id),),
+        )
+        connection.execute(
+            """
+            INSERT INTO chat_messages(id, conversation_id, position, role, content)
+            VALUES (?, ?, 0, 'user', 'Question')
+            """,
+            (str(message_id), str(conversation_id)),
+        )
+    queued = repository.enqueue(
+        ChatAnswerPayload(
+            message="Question",
+            conversation_id=conversation_id,
+            client_request_id=uuid4(),
+        ),
+        user_message_id=message_id,
+        now=now - timedelta(minutes=10),
+    )
+    claimed = repository.claim_next(
+        worker_id="interrupted-worker",
+        lease_duration=timedelta(minutes=5),
+        now=now - timedelta(minutes=9),
+    )
+    assert claimed is not None and claimed.id == queued.id
+
+    with TestClient(create_app(settings)) as client:
+        response = client.get(f"/api/jobs/{queued.id}")
+        conversation = client.get(f"/api/chatbot/conversations/{conversation_id}")
+
+    assert response.status_code == 200
+    recovered = response.json()
+    assert recovered["state"] == "queued"
+    assert recovered["error"] == {
+        "code": "timeout",
+        "message": "Le worker local a été interrompu ; reprise planifiée.",
+        "retry_at": recovered["error"]["retry_at"],
+    }
+    assert recovered["error"]["retry_at"] is not None
+    assert [job["id"] for job in conversation.json()["active_jobs"]] == [str(queued.id)]
+
+
 def test_cancel_and_retry_reject_invalid_transitions_with_409(settings) -> None:
     database = Database(settings.paths.database_path)
     database.initialize()

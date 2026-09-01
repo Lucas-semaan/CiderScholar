@@ -1,4 +1,4 @@
-"""Unified browsing of full articles and verified abstract-only records."""
+"""Unified browsing of full articles, abstract-only records, and acquisition leads."""
 
 from __future__ import annotations
 
@@ -7,12 +7,15 @@ import re
 import unicodedata
 from collections.abc import Sequence
 from contextlib import closing
+from functools import lru_cache
+from pathlib import Path
+from threading import Lock
 from typing import Any, Literal
 
 from app.database.sqlite import Database
 from app.updates.models import normalize_doi
 
-DocumentAvailability = Literal["all", "full_text", "abstract_only"]
+DocumentAvailability = Literal["all", "full_text", "abstract_only", "metadata_only"]
 
 _ALLOWED_STATUSES = {"unreviewed", "accepted", "review", "rejected"}
 _STATUS_PRIORITY = {"accepted": 0, "review": 1, "unreviewed": 2, "rejected": 3}
@@ -25,6 +28,7 @@ _CIDRE_FTS_QUERY = (
     "cider OR ciders OR cidre OR cidres OR cidricole OR cidricoles OR "
     "cidriculture OR cidrerie OR cidreries OR cidrification OR sidra OR sidras"
 )
+_DOCUMENT_CACHE_LOCK = Lock()
 
 
 def _fold(value: object) -> str:
@@ -104,43 +108,96 @@ def _load_rows(database: Database) -> tuple[list[dict[str, Any]], list[dict[str,
             dict(row)
             for row in connection.execute(
                 """
+                WITH source_summary AS (
+                    SELECT record_id,
+                        GROUP_CONCAT(DISTINCT source) AS sources,
+                        MIN(first_seen_at) AS first_seen_at,
+                        MAX(last_seen_at) AS last_seen_at
+                    FROM bibliographic_record_sources
+                    GROUP BY record_id
+                ), ranked_assets AS (
+                    SELECT record_id, article_id,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY record_id
+                            ORDER BY source_priority, observed_at DESC, article_id
+                        ) AS position
+                    FROM (
+                        SELECT record_id, article_id, updated_at AS observed_at,
+                            0 AS source_priority
+                        FROM full_text_assets
+                        WHERE article_id IS NOT NULL
+                        UNION ALL
+                        SELECT record_id, article_id, created_at AS observed_at,
+                            1 AS source_priority
+                        FROM publisher_full_text_assets
+                        WHERE article_id IS NOT NULL
+                    )
+                ), linked_assets AS (
+                    SELECT record_id, article_id
+                    FROM ranked_assets
+                    WHERE position = 1
+                )
                 SELECT r.*,
-                    (
-                        SELECT GROUP_CONCAT(DISTINCT s.source)
-                        FROM bibliographic_record_sources AS s
-                        WHERE s.record_id = r.id
-                    ) AS sources,
-                    (
-                        SELECT MIN(s.first_seen_at)
-                        FROM bibliographic_record_sources AS s
-                        WHERE s.record_id = r.id
-                    ) AS first_seen_at,
-                    (
-                        SELECT MAX(s.last_seen_at)
-                        FROM bibliographic_record_sources AS s
-                        WHERE s.record_id = r.id
-                    ) AS last_seen_at
+                    source_summary.sources,
+                    source_summary.first_seen_at,
+                    source_summary.last_seen_at,
+                    linked_assets.article_id AS linked_article_id
                 FROM bibliographic_records AS r
-                WHERE r.relevance_status = 'accepted'
+                LEFT JOIN source_summary ON source_summary.record_id = r.id
+                LEFT JOIN linked_assets ON linked_assets.record_id = r.id
                 ORDER BY r.created_at, r.id
                 """
             )
         ]
         article_rows = [
             dict(row)
+            for row in connection.execute("SELECT * FROM articles ORDER BY created_at, id")
+        ]
+        chunk_counts = {
+            str(row["article_id"]): int(row["chunk_count"] or 0)
             for row in connection.execute(
                 """
-                SELECT a.*,
-                    COUNT(c.id) AS chunk_count,
-                    SUM(CASE WHEN c.embedding_status = 'indexed' THEN 1 ELSE 0 END)
-                        AS indexed_chunk_count
-                FROM articles AS a
-                LEFT JOIN chunks AS c ON c.article_id = a.id
-                GROUP BY a.id
-                ORDER BY a.created_at, a.id
+                SELECT article_id, COUNT(*) AS chunk_count
+                FROM chunks
+                GROUP BY article_id
                 """
             )
+        }
+        incomplete_article_ids = [
+            str(article["id"])
+            for article in article_rows
+            if article.get("validation_status") != "indexed" or article.get("indexed_at") is None
         ]
+        indexed_chunk_counts: dict[str, int] = {}
+        for start in range(0, len(incomplete_article_ids), 900):
+            batch = incomplete_article_ids[start : start + 900]
+            placeholders = ",".join("?" for _ in batch)
+            indexed_chunk_counts.update(
+                {
+                    str(row["article_id"]): int(row["indexed_chunk_count"] or 0)
+                    for row in connection.execute(
+                        f"""
+                        SELECT article_id, COUNT(*) AS indexed_chunk_count
+                        FROM chunks INDEXED BY idx_chunks_article
+                        WHERE article_id IN ({placeholders})
+                          AND embedding_status = 'indexed'
+                        GROUP BY article_id
+                        """,
+                        batch,
+                    )
+                }
+            )
+        for article in article_rows:
+            article_id = str(article["id"])
+            chunk_count = chunk_counts.get(article_id, 0)
+            indexed_chunk_count = (
+                chunk_count
+                if article.get("validation_status") == "indexed"
+                and article.get("indexed_at") is not None
+                else indexed_chunk_counts.get(article_id, 0)
+            )
+            article["chunk_count"] = chunk_count
+            article["indexed_chunk_count"] = indexed_chunk_count
     return notice_rows, article_rows
 
 
@@ -173,7 +230,6 @@ def _abstract_document(record: dict[str, Any], article: dict[str, Any] | None) -
         "indexed_chunk_count": (
             int(article["indexed_chunk_count"] or 0) if article is not None else 0
         ),
-        "relevance_status": "accepted",
         "authors": _json_authors(record.get("authors") or (article or {}).get("authors")),
         "abstract": record.get("abstract") or (article or {}).get("abstract"),
         "sources": ",".join(sources) or None,
@@ -218,67 +274,146 @@ def _article_document(article: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _documents(database: Database) -> list[dict[str, Any]]:
-    abstract_records, articles = _load_rows(database)
-    abstract_groups: dict[str, list[dict[str, Any]]] = {}
-    for record in abstract_records:
-        doi = _verified_doi(record.get("doi"))
-        if doi is not None:
-            abstract_groups.setdefault(doi, []).append(record)
+def _metadata_document(record: dict[str, Any]) -> dict[str, Any]:
+    """Expose one content-free lead without promoting it to scientific evidence."""
 
-    best_abstract_by_doi: dict[str, dict[str, Any]] = {}
-    for doi, group in abstract_groups.items():
-        group.sort(
-            key=lambda record: (
-                not bool(str(record.get("abstract") or "").strip()),
-                -float(record.get("relevance_score") or 0.0),
-                str(record["id"]),
-            )
-        )
-        best_abstract_by_doi[doi] = group[0]
+    doi = _verified_doi(record.get("doi"))
+    return {
+        **record,
+        "library_id": f"notice:{record['id']}",
+        "document_type": "metadata_only",
+        "article_id": None,
+        "pdf_available": False,
+        "pdf_path": None,
+        "validation_status": None,
+        "chunk_count": 0,
+        "indexed_chunk_count": 0,
+        "doi": doi,
+        "url": f"https://doi.org/{doi}" if doi else record.get("url"),
+        "authors": _json_authors(record.get("authors")),
+        "abstract": None,
+        "sources": ",".join(_sources(record.get("sources"))) or None,
+    }
+
+
+def _preferred_record(records: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    return sorted(
+        records,
+        key=lambda record: (
+            not bool(str(record.get("abstract") or "").strip()),
+            _STATUS_PRIORITY.get(str(record.get("relevance_status")), 9),
+            -float(record.get("relevance_score") or 0.0),
+            str(record["id"]),
+        ),
+    )[0]
+
+
+def _build_documents(database: Database) -> list[dict[str, Any]]:
+    """Classify availability from persisted content, independently of relevance."""
+
+    notice_records, articles = _load_rows(database)
+    groups: dict[str, list[dict[str, Any]]] = {}
+    identity_by_record_id: dict[str, str] = {}
+    records_by_article_id: dict[str, list[dict[str, Any]]] = {}
+    for record in notice_records:
+        doi = _verified_doi(record.get("doi"))
+        identity = f"doi:{doi}" if doi is not None else f"record:{record['id']}"
+        groups.setdefault(identity, []).append(record)
+        identity_by_record_id[str(record["id"])] = identity
+        linked_article_id = str(record.get("linked_article_id") or "")
+        if linked_article_id:
+            records_by_article_id.setdefault(linked_article_id, []).append(record)
 
     documents: list[dict[str, Any]] = []
-    full_text_dois: set[str] = set()
+    consumed_identities: set[str] = set()
     for article in articles:
         doi = _verified_doi(article.get("doi"))
-        if doi is not None:
-            full_text_dois.add(doi)
-        abstract_record = best_abstract_by_doi.get(doi) if doi is not None else None
-        if abstract_record is None:
+        doi_identity = f"doi:{doi}" if doi is not None else None
+        linked_records = records_by_article_id.get(str(article["id"]), [])
+        matching_records = list(linked_records)
+        if doi_identity is not None:
+            matching_records.extend(groups.get(doi_identity, []))
+        matching_records = list({str(record["id"]): record for record in matching_records}.values())
+        notice_record = _preferred_record(matching_records) if matching_records else None
+        if notice_record is None:
             documents.append(_article_document(article))
             continue
-        document = _abstract_document(abstract_record, article)
-        document["doi"] = doi
-        document["canonical_key"] = f"doi:{doi}"
-        document["url"] = f"https://doi.org/{doi}"
-        group = abstract_groups[doi]
+        consumed_identities.update(
+            identity_by_record_id[str(record["id"])] for record in matching_records
+        )
+        document = _abstract_document(notice_record, article)
+        if doi is not None:
+            document["doi"] = doi
+            document["canonical_key"] = f"doi:{doi}"
+            document["url"] = f"https://doi.org/{doi}"
         combined_sources = list(
-            dict.fromkeys(source for record in group for source in _sources(record.get("sources")))
+            dict.fromkeys(
+                source for record in matching_records for source in _sources(record.get("sources"))
+            )
         )
         if article.get("source"):
             combined_sources.append(str(article["source"]))
         document["sources"] = ",".join(dict.fromkeys(combined_sources)) or None
         documents.append(document)
 
-    for doi, record in best_abstract_by_doi.items():
-        if doi in full_text_dois or not str(record.get("abstract") or "").strip():
+    for identity, group in groups.items():
+        if identity in consumed_identities:
             continue
+        records_with_abstract = [
+            record for record in group if str(record.get("abstract") or "").strip()
+        ]
+        if not records_with_abstract:
+            documents.append(_metadata_document(_preferred_record(group)))
+            continue
+        record = _preferred_record(records_with_abstract)
         document = _abstract_document(record, None)
+        doi = _verified_doi(record.get("doi"))
         document["doi"] = doi
-        document["canonical_key"] = f"doi:{doi}"
-        document["url"] = f"https://doi.org/{doi}"
+        if doi is not None:
+            document["canonical_key"] = f"doi:{doi}"
+            document["url"] = f"https://doi.org/{doi}"
         document["sources"] = (
             ",".join(
                 dict.fromkeys(
-                    source
-                    for candidate in abstract_groups[doi]
-                    for source in _sources(candidate.get("sources"))
+                    source for candidate in group for source in _sources(candidate.get("sources"))
                 )
             )
             or None
         )
         documents.append(document)
     return documents
+
+
+def _database_signature(path: Path) -> tuple[int, int, int, int]:
+    database_stat = path.stat()
+    wal_path = Path(f"{path}-wal")
+    if wal_path.is_file():
+        wal_stat = wal_path.stat()
+        return (
+            database_stat.st_mtime_ns,
+            database_stat.st_size,
+            wal_stat.st_mtime_ns,
+            wal_stat.st_size,
+        )
+    return (database_stat.st_mtime_ns, database_stat.st_size, -1, -1)
+
+
+@lru_cache(maxsize=2)
+def _cached_document_snapshot(
+    database_path: str,
+    _signature: tuple[int, int, int, int],
+) -> tuple[dict[str, Any], ...]:
+    return tuple(_build_documents(Database(Path(database_path))))
+
+
+def _documents(database: Database) -> list[dict[str, Any]]:
+    """Return an immutable-by-convention snapshot shared by simultaneous library reads."""
+
+    database_path = database.path.resolve()
+    signature = _database_signature(database_path)
+    with _DOCUMENT_CACHE_LOCK:
+        snapshot = _cached_document_snapshot(str(database_path), signature)
+    return [dict(document) for document in snapshot]
 
 
 def _metadata_haystack(document: dict[str, Any]) -> str:
@@ -338,7 +473,7 @@ def browse_document_library(
     selected_statuses = list(dict.fromkeys(statuses or []))
     if not set(selected_statuses) <= _ALLOWED_STATUSES:
         raise ValueError("invalid document relevance status")
-    if availability not in {"all", "full_text", "abstract_only"}:
+    if availability not in {"all", "full_text", "abstract_only", "metadata_only"}:
         raise ValueError("invalid document availability")
 
     terms = _query_terms(query)
@@ -361,9 +496,9 @@ def browse_document_library(
             continue
         if source and _fold(source) not in {_fold(item) for item in _sources(document["sources"])}:
             continue
-        if availability == "full_text" and document["document_type"] != "full_text":
+        if availability == "all" and document["document_type"] == "metadata_only":
             continue
-        if availability == "abstract_only" and document["document_type"] != "abstract_only":
+        if availability != "all" and document["document_type"] != availability:
             continue
         if has_abstract is True and not str(document.get("abstract") or "").strip():
             continue
@@ -396,6 +531,9 @@ def document_library_summary(database: Database) -> dict[str, Any]:
         document["themes"] = _document_themes(document, cidre_article_ids)
     full_texts = [document for document in documents if document["document_type"] == "full_text"]
     abstracts = [document for document in documents if document["document_type"] == "abstract_only"]
+    acquisition_notices = [
+        document for document in documents if document["document_type"] == "metadata_only"
+    ]
     themes = sorted(
         {theme for document in documents for theme in document["themes"]} | {_CIDRE_THEME},
         key=_fold,
@@ -406,9 +544,16 @@ def document_library_summary(database: Database) -> dict[str, Any]:
     )
     return {
         "statistics": {
-            "documents": len(documents),
+            "documents": len(full_texts) + len(abstracts),
             "full_texts": len(full_texts),
             "abstract_only": len(abstracts),
+            "acquisition_notices": len(acquisition_notices),
+            "accepted_without_content": sum(
+                document["relevance_status"] == "accepted" for document in acquisition_notices
+            ),
+            "review_without_content": sum(
+                document["relevance_status"] == "review" for document in acquisition_notices
+            ),
         },
         "filters": {"themes": themes, "sources": sources},
     }

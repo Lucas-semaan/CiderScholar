@@ -7,6 +7,7 @@ import unicodedata
 from collections.abc import Sequence
 from dataclasses import dataclass
 from time import perf_counter
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -127,6 +128,7 @@ class HybridSearchResponse(BaseModel):
     results: list[HybridChunkResult]
     lexical_candidates: int = Field(ge=0)
     vector_candidates: int = Field(ge=0)
+    vector_query_count: int = Field(default=0, ge=0)
     vector_search_degraded: bool = False
     unique_candidates: int = Field(ge=0)
     lexical_weight: float = Field(ge=0.0)
@@ -137,7 +139,7 @@ class HybridSearchResponse(BaseModel):
 
 
 class HybridSearchService:
-    """Run light lexical retrieval, then local vector retrieval, sequentially."""
+    """Run bounded lexical and vector retrieval, batching compatible query work."""
 
     def __init__(
         self,
@@ -200,7 +202,9 @@ class HybridSearchService:
         query_variants: Sequence[str] | None = None,
         limit: int | None = None,
         candidate_limit: int | None = None,
+        max_vector_query_variants: int | None = None,
         lexical_mode: QueryMode = "any",
+        prefix_matching: bool | None = None,
         article_ids: Sequence[str] | None = None,
         sections: Sequence[str] | None = None,
     ) -> HybridSearchResponse:
@@ -217,6 +221,13 @@ class HybridSearchService:
         if not 1 <= retrieval_limit <= 1000:
             raise ValueError("hybrid candidate limit must be between 1 and 1000")
         retrieval_limit = max(retrieval_limit, result_limit)
+        if max_vector_query_variants is not None and max_vector_query_variants < 0:
+            raise ValueError("vector query variant limit cannot be negative")
+        vector_query_limit = (
+            len(queries)
+            if max_vector_query_variants is None
+            else min(max_vector_query_variants, len(queries))
+        )
 
         rankings: list[RankedList] = []
         lexical_candidates = 0
@@ -227,25 +238,70 @@ class HybridSearchService:
         vector_scores: dict[int, float] = {}
         matched_queries: dict[int, list[str]] = {}
         per_query_lexical_weight = self.settings.retrieval.lexical_weight / len(queries)
-        per_query_vector_weight = self.settings.retrieval.vector_weight / len(queries)
+        per_query_vector_weight = (
+            self.settings.retrieval.vector_weight / vector_query_limit
+            if vector_query_limit
+            else 0.0
+        )
+
+        lexical_results_by_query = []
+        with self.lexical.read_session() as lexical_session:
+            for current_query in queries:
+                lexical_response = lexical_session.search(
+                    current_query,
+                    limit=retrieval_limit,
+                    mode=lexical_mode,
+                    prefix_matching=prefix_matching,
+                    article_ids=article_ids,
+                    sections=sections,
+                )
+                lexical_results_by_query.append(lexical_response.results)
+
+        vector_results_by_query: list[list[Any]] = [[] for _query in queries]
+        if not self._vector_disabled_by_memory and vector_query_limit:
+            try:
+                self.memory.check("hybrid vector query batch")
+            except MemoryLimitError as exc:
+                self._disable_vector_after_memory_limit(
+                    operation="hybrid vector query batch",
+                    error=exc,
+                )
+            else:
+                try:
+                    batched = self.vector.search_many(
+                        queries[:vector_query_limit],
+                        limit=retrieval_limit,
+                        article_ids=article_ids,
+                        sections=sections,
+                    )
+                except MemoryLimitError as exc:
+                    self._disable_vector_after_memory_limit(
+                        operation="hybrid vector search batch",
+                        error=exc,
+                    )
+                else:
+                    vector_results_by_query[:vector_query_limit] = batched
+                    try:
+                        self.memory.check("hybrid vector result batch")
+                    except MemoryLimitError as exc:
+                        # The bounded results are already authoritative and hydrated. Keep
+                        # them, then release heavy resources before downstream processing.
+                        self._disable_vector_after_memory_limit(
+                            operation="hybrid vector result batch",
+                            error=exc,
+                        )
 
         for query_index, current_query in enumerate(queries):
-            lexical_response = self.lexical.search(
-                current_query,
-                limit=retrieval_limit,
-                mode=lexical_mode,
-                article_ids=article_ids,
-                sections=sections,
-            )
-            lexical_candidates += len(lexical_response.results)
+            lexical_results = lexical_results_by_query[query_index]
+            lexical_candidates += len(lexical_results)
             rankings.append(
                 RankedList(
                     source=f"lexical:{query_index}",
                     weight=per_query_lexical_weight,
-                    chunk_ids=tuple(result.chunk_id for result in lexical_response.results),
+                    chunk_ids=tuple(result.chunk_id for result in lexical_results),
                 )
             )
-            for result in lexical_response.results:
+            for result in lexical_results:
                 lexical_ranks[result.chunk_id] = min(
                     lexical_ranks.get(result.chunk_id, result.rank), result.rank
                 )
@@ -254,38 +310,9 @@ class HybridSearchService:
                 )
                 matched_queries.setdefault(result.chunk_id, []).append(current_query)
 
-            if self._vector_disabled_by_memory:
+            if query_index >= vector_query_limit:
                 continue
-            try:
-                self.memory.check("hybrid vector query")
-            except MemoryLimitError as exc:
-                self._disable_vector_after_memory_limit(
-                    operation="hybrid vector query",
-                    error=exc,
-                )
-                continue
-            try:
-                vector_results = self.vector.search(
-                    current_query,
-                    limit=retrieval_limit,
-                    article_ids=article_ids,
-                    sections=sections,
-                )
-            except MemoryLimitError as exc:
-                self._disable_vector_after_memory_limit(
-                    operation="hybrid vector search",
-                    error=exc,
-                )
-                continue
-            try:
-                self.memory.check("hybrid vector results")
-            except MemoryLimitError as exc:
-                # The bounded vector result set is already available. Keep it, but release
-                # the model and index before processing more query variants.
-                self._disable_vector_after_memory_limit(
-                    operation="hybrid vector results",
-                    error=exc,
-                )
+            vector_results = vector_results_by_query[query_index]
             vector_candidates += len(vector_results)
             rankings.append(
                 RankedList(
@@ -351,6 +378,9 @@ class HybridSearchService:
             unique_candidates=len(set(lexical_ranks).union(vector_ranks)),
             lexical_weight=self.settings.retrieval.lexical_weight,
             vector_weight=self.settings.retrieval.vector_weight,
+            vector_query_count=sum(
+                1 for ranking in rankings if ranking.source.startswith("vector:")
+            ),
             reserved_reranker_weight=self.settings.retrieval.reranker_weight,
             rrf_k=self.settings.retrieval.rrf_k,
             duration_seconds=perf_counter() - started,

@@ -66,6 +66,28 @@ def test_aureli_search_uses_article_year_and_full_text_filters(settings) -> None
     assert "docid=cdi_test_primary_1" in str(record.url)
 
 
+def test_aureli_search_can_target_one_journal_and_keep_all_document_types(settings) -> None:
+    captured: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.update(dict(request.url.params.multi_items()))
+        return httpx.Response(200, content=json.dumps(_payload()).encode())
+
+    with AureliClient(settings, transport=httpx.MockTransport(handler)) as client:
+        client.search_articles(
+            "cider",
+            year=2024,
+            journal="Journal of Food Science",
+            include_all_document_types=True,
+            limit=2,
+        )
+
+    assert captured["qInclude"] == (
+        "facet_jtitle,exact,Journal of Food Science|,|facet_searchcreationdate,exact,[2024 TO 2024]"
+    )
+    assert "facet_rtype" not in captured["qInclude"]
+
+
 @pytest.mark.parametrize(
     ("kwargs", "message"),
     [
@@ -73,6 +95,10 @@ def test_aureli_search_uses_article_year_and_full_text_filters(settings) -> None
         ({"query": "cider", "year": 1599}, "publication year"),
         ({"query": "cider", "year": 2024, "limit": 51}, "page size"),
         ({"query": "cider", "year": 2024, "offset": 201}, "offset"),
+        (
+            {"query": "cider", "year": 2024, "journal": "Food|Science"},
+            "journal",
+        ),
     ],
 )
 def test_aureli_search_rejects_unbounded_inputs(settings, kwargs, message) -> None:

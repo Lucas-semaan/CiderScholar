@@ -1,7 +1,7 @@
 # Comment travailler sur CiderScholar
 
 Statut : guide méthodologique accepté.
-Dernière consolidation : 13 août 2026.
+Dernière consolidation : 27 août 2026.
 
 Ce guide transforme les consignes méthodologiques dispersées dans les conversations CiderScholar en
 règles durables et vérifiables. Il complète `AGENTS.md`, le contrat rédactionnel du chatbot et les
@@ -297,6 +297,39 @@ réappliquer le filtre éditorial. Temporiser et rendre la pagination reprenable
 défi anti-bot ou résultat scientifiquement inutilisable est consigné comme limite ; ne pas le
 contourner, changer d'identité réseau ou déguiser le client.
 
+### 3.5 Importer des exports texte Scopus localement
+
+Instruction utilisateur explicite et durable du 28 août 2026 : les exports Scopus fournis localement
+sont traités en priorité hors réseau. Le champ Scopus `Source title` désigne la revue, l'ouvrage ou les
+actes ; il ne doit jamais être confondu avec l'organisation `publisher`. En l'absence d'un champ
+éditeur explicite, ne pas inférer cette organisation depuis le DOI, le copyright de l'abstract ou le
+titre de source sans validation bibliographique attribuable.
+
+Le format texte concatène `Source title`, volume, numéro, pages et citations sur une ligne. Le parseur
+retire les suffixes bibliographiques depuis la droite et conserve toutes les virgules internes du
+titre de source ; il ne coupe jamais à la première virgule. Chaque valeur observée est persistée avec
+son EID Scopus dans `bibliographic_record_sources.source_title` pour le corpus actif ou dans
+`rejected_bibliographic_record_sources.source_title` pour l'archive, même lorsque plusieurs EID d'une
+même identité portent des variantes. Le champ scalaire `bibliographic_records.journal` n'est corrigé
+automatiquement que s'il est vide ou correspond exactement à l'ancien préfixe tronqué ; une valeur
+canonique différente provenant d'une autre source est conservée.
+
+Toute correction commence par un audit local sans mutation, refuse un harvest actif, crée une
+sauvegarde SQLite vérifiée avant la migration ou la mise à jour, puis contrôle SQLite, les clés
+étrangères et l'égalité FTS/base. Le rapport distingue notices brutes, EID uniques, sources actives,
+EID archivés ou absents, titres par source persistés, journaux scalaires corrigés, variantes et
+conflits. Les pourcentages par `Source title` utilisent un dénominateur explicitement nommé ; ils ne
+sont jamais présentés comme une distribution d'éditeurs.
+
+Instruction utilisateur explicite et durable du 28 août 2026 : la disponibilité d'un élément
+bibliographique est indépendante de son statut éditorial et de son état vectoriel. Une identité ayant
+un texte intégral persisté est classée `Full article`; sinon, toute identité ayant un abstract non vide
+est classée `Abstract only`, avec ses métadonnées, y compris sans DOI vérifié. Le statut
+`accepted/review/rejected` reste une dimension distincte et ne doit jamais faire disparaître un
+abstract de la base documentaire. Une référence qui ne possède ni texte intégral ni abstract n'est
+pas faussement appelée `Abstract only` : elle demeure une notice d'acquisition séparée jusqu'à
+l'obtention d'un contenu scientifique.
+
 ## 4. Rechercher et classer les preuves pour une question
 
 ### 4.1 Comprendre l’intention avant le retrieval
@@ -318,6 +351,9 @@ Lorsqu’un terme est ambigu, formuler l’interprétation retenue et les exclus
 cidricole désigne par défaut le maintien des pommes broyées ou de la pulpe avant pressurage ; il ne se
 confond pas automatiquement avec le stockage du jus, le chauffage, le transport, une fermentation
 inoculée ou la macération alcoolique du raisin.
+Pour tout procédé cidricole contrôlé ainsi désambiguïsé, injecter dans la première vague au moins une
+requête matrice-procédé avec ses synonymes scientifiques français et anglais ; un plan généré ne peut
+pas remplacer entièrement ce socle par des procédés voisins.
 
 ### 4.2 Élargissement progressif des matrices
 
@@ -400,17 +436,228 @@ La longueur suit la complexité et la couverture documentaire, pas un objectif d
 introduction scientifique utile définit le périmètre et les distinctions nécessaires ; elle ne devient
 pas une généralité encyclopédique non sourcée.
 
+Instruction utilisateur explicite et durable du 31 août 2026 : la réponse conversationnelle d'Argo
+est une synthèse du sujet construite à partir des fragments pertinents, pas une succession de résumés
+de fragments. Elle commence par une mini-introduction utile qui situe la matrice, le procédé, les
+distinctions nécessaires et l'angle de la synthèse, sans généralité encyclopédique non étayée. En
+l'absence de demande de forme explicite, Argo choisit la typologie qui sert le mieux la question et les
+preuves : prose continue, sections thématiques, comparaison, déroulé de processus ou liste. Une forme
+explicitement demandée par l'utilisateur reste prioritaire.
+
+Instruction utilisateur explicite et durable du 1er septembre 2026 : la fenêtre de génération
+conversationnelle ne retranche pas arbitrairement les preuves pertinentes retenues par le RAG. Tous
+les éléments A/B présentés à la génération contribuent à au moins une affirmation citée ; plusieurs fragments
+convergents ou complémentaires peuvent soutenir une même idée synthétique. Une réponse qui en omet un,
+ou qui réduit un ensemble riche à quelques phrases anormalement courtes, est corrigée à partir des mêmes
+preuves dans une enveloppe globale de dix requêtes de génération au plus, réponse initiale comprise. À
+chaque repasse, transmettre à Argo tous les codes encore actifs et une modification concrète attendue pour
+chacun. Le code d'omission énumère les identifiants exacts des preuves A/B encore absentes, afin qu'Argo
+ne doive pas les déduire de nouveau dans une longue fenêtre. Une seule consigne de repasse reste active
+dans le prompt : elle remplace la précédente et tient
+dans la marge d'entrée réservée, afin que dix tentatives ne fassent pas croître cumulativement le contexte.
+Tout dépassement résiduel est traduit en diagnostic scientifique structuré plutôt qu'en erreur interne. Si
+le contexte doit être ajusté à la borne d'entrée du fournisseur, raccourcir le
+texte de chaque passage sans supprimer son identité ni sa provenance ; la sélection RAG en amont reste
+le lieu où sont écartés les doublons ou éléments non pertinents. Cette exigence n'autorise ni citation
+décorative, ni répétition, ni utilisation d'un élément C/D.
+
+Le filtre sémantique global ne peut pas vider une vague locale classée sur la foi d'une seule sortie
+Argo. Un verdict où tous les candidats deviennent C/D reçoit jusqu'à deux repasses explicites
+(`semantic_filter_empty`) rappelant notamment la portée des preuves B sans imposer de promotion
+artificielle. Si les trois évaluations rejettent encore toute la vague, conserver les candidats SQLite
+comme non évalués par ce filtre et leurs niveaux locaux déterministes, afficher un avertissement de
+dégradation et laisser la génération ainsi que les validateurs affirmation-par-affirmation statuer. Ce
+repli n'autorise jamais une preuve externe, une citation inventée ou le contournement des contrôles
+numériques, causaux, normatifs et de sécurité.
+
+Après épuisement des dix requêtes, distinguer les blocages scientifiques des avertissements de qualité.
+Une référence de preuve inexistante, une preuve C/D utilisée comme appui, une affirmation numérique,
+causale, normative, évaluative ou de sécurité non étayée, une fuite d'identifiant ou du processus interne,
+un schéma inutilisable et une question altérée restent bloquants. Une introduction trop courte, une
+synthèse trop brève, une typologie imparfaite, une facette ou une preuve A/B omise et un écart de langue ou
+de structure, ainsi que l'absence de libellé explicite sur la portée indirecte d'une preuve B, peuvent
+devenir des avertissements seulement si toutes les affirmations affichées restent scientifiquement sûres.
+Une abstention générée alors que le filtre global a présenté des preuves A/B est elle-même traitée comme
+une omission à corriger : elle ne court-circuite pas les repasses. Si les dix requêtes restent toutes des
+abstentions, la plus précise peut être rendue sans citation plutôt qu'une erreur interne. Dès qu'une
+version answerable sûre existe, le meilleur candidat privilégie d'abord le nombre de preuves A/B réellement
+citées, puis la qualité formelle et la longueur étayée. Cette version est rendue avec
+`partial_generated`, les codes d'avertissement et une limitation lisible ; aucune affirmation bloquée
+n'est exposée.
+
+Chaque tentative answerable est aussi évaluée affirmation par affirmation dès sa réception. Si un bloc
+numérique, causal, interne ou autrement bloquant est rejeté, les autres paragraphes indépendamment
+validés et leurs citations alimentent un pool cumulatif sûr ; les variantes de correction portant sur les
+mêmes preuves sont ramenées à la formulation étayée la plus développée. L'assemblage cumulatif privilégie
+la couverture des preuves et des axes encore absents, puis repasse intégralement dans les validateurs avant
+d'être admissible. Une définition de repli contextualisée et strictement fondée sur la question remplace
+les champs globaux invalides. Une tentative ultérieure au schéma inutilisable ou une abstention ne peut
+donc plus effacer des affirmations scientifiques valides déjà obtenues, ni forcer le choix d'un seul essai
+quand plusieurs repasses apportent des paragraphes complémentaires.
+
+Chaque affirmation rendue est un paragraphe scientifique développé lorsque ses passages le permettent :
+elle expose le constat, le replace dans la matrice et les conditions étudiées, rapproche les sources
+convergentes ou complémentaires, puis précise sa portée ou sa limite documentée. La densité minimale de
+chaque paragraphe et la longueur totale sont proportionnées au nombre et à la richesse textuelle des
+preuves citées. Avec un corpus riche, une formulation télégraphique déclenche une correction ; avec une
+preuve pauvre, le système reste bref plutôt que d'extrapoler. Les citations doivent être plus nombreuses
+quand plusieurs sources soutiennent effectivement le même développement, jamais ajoutées pour décorer.
+
 Le contrôle public d’effort (`concise`, `balanced`, `deep`) module conjointement la largeur bornée
 du retrieval, la fenêtre de preuves et la taille maximale de la synthèse. Il ne désactive jamais le
 filtre sémantique, la validation des citations et des nombres, les niveaux A–D ni l’abstention. Le mode
 approfondi développe seulement les axes réellement documentés ; le mode concis conserve les nuances
 nécessaires à la fidélité scientifique.
 
+Instruction utilisateur explicite et durable du 24 août 2026 : une réponse approfondie à une question
+comparative ou réellement multi-dimensionnelle est pilotée par la couverture scientifique, pas par un
+simple plafond de tokens. Le plan comporte trois à quatre axes utiles au plus lorsqu'ils exigent des
+preuves distinctes ; chaque axe final affiche au moins une affirmation validée ou une lacune précise,
+avec un état documenté, partiel ou non documenté. Développer les mécanismes, conditions,
+contradictions, compromis et limites seulement lorsqu'ils sont étayés. Si au moins six affirmations
+distinctes sont validables mais que l'assemblage approfondi reste anormalement court, autoriser une
+seule relance d'expansion strictement fondée sur les mêmes preuves. Toute récupération qui retire des
+affirmations propage le statut public `partial_generated`.
+
+Instruction utilisateur explicite et durable du 24 août 2026 : les dimensions explicitement demandées
+et les facettes déterministes indispensables à leur interprétation priment sur les axes périphériques
+proposés par le planificateur, même lorsque le nombre maximal d'axes est déjà atteint. Cette priorité
+s'applique à toute question et à tout domaine : aucune liste d'agents, de procédés ou de substances
+n'est codée comme exception de génération. Un élément précis, comme la bentonite dans le collage des
+jus, sert uniquement de cas de non-régression pour cette règle générale. Si le corpus contient des
+preuves directes sur une dimension prioritaire, son absence de la synthèse est un défaut de
+planification, de retrieval ou d'assemblage, pas une lacune documentaire. Lorsque le nombre minimal
+d'affirmations distinctes défini par l'effort est déjà validé dans les axes, toute récupération qui
+fait repasser l'assemblage sous ce seuil déclenche une unique relance fondée sur les mêmes preuves ou
+un repli sur les affirmations d'axes déjà validées.
+
+Instruction utilisateur explicite et durable du 24 août 2026 : une synthèse ne doit pas devenir
+artificiellement courte parce que la fenêtre de génération, l'assemblage ou le rendu n'exploite qu'une
+fraction des preuves A/B déjà retenues. Le nombre de résultats RAG n'est pas un quota de citations :
+une source redondante ne doit pas être ajoutée pour faire nombre. En revanche, chaque résultat qui
+apporte un mécanisme, une condition, un effet, une contradiction ou une limite distincte doit pouvoir
+atteindre un brouillon d'axe, puis être conservé dans l'assemblage s'il est validé. Le contrôle de
+profondeur combine nombre d'affirmations, axes documentés et densité rédactionnelle soutenue par les
+brouillons ; il ne s'arrête pas au premier petit seuil d'affirmations. L'appartenance d'une
+affirmation à un axe est explicite et validée : elle n'est jamais déduite du seul partage d'un passage
+avec un autre axe. Un ouvrage généraliste riche, tel qu'un traité de procédés vinicoles utilisé par
+analogie contrôlée, reste un cas de non-régression et ne devient pas une exception codée.
+
+Pour un grand index vectoriel local, séparer la largeur lexicale de la largeur dense. Toutes les
+variantes scientifiques utiles peuvent rester interrogées par FTS, tandis qu'un nombre réduit et
+représentatif de variantes déclenche la recherche dense coûteuse ; les recherches propres aux axes
+réutilisent le pool vectoriel global et complètent par le lexical. Cette optimisation doit être
+testée sur le nombre d'appels denses et sur la conservation de la couverture par axe.
+
+Sur un index Qdrant local volumineux, une opération native atomique peut retarder les threads Python
+de heartbeat pendant plusieurs minutes, en particulier lorsque Windows pagine. Le lease par défaut
+du worker couvre trente minutes et reste renouvelé toutes les trente secondes dès que l'ordonnanceur
+Python reprend la main. Cette marge évite qu'une lecture de l'API remette en file et duplique une
+recherche encore active ; elle ne constitue ni un délai global de réponse ni une autorisation de
+laisser expirer silencieusement un job.
+
+Instruction utilisateur explicite et durable du 25 août 2026 : le mode `deep` doit pouvoir conserver
+plus de vingt candidats lorsque les preuves distinctes le justifient. Son pool borné retient jusqu'à
+32 résultats d'abstract, 36 enregistrements de preuve et 40 éléments dans le contexte scientifique ;
+le filtre sémantique et l'évaluation de couverture s'appliquent à tout le pool, par lots, sans coupe
+silencieuse à vingt. La première vague `balanced` ou `deep` utilise une requête exacte par axe, des
+candidats bornés et un coût dense réduit. Elle n'est définitive que si chaque axe est couvert par des
+preuves admissibles ; sinon une vague d'élargissement rétablit les variantes, le préfixage et les
+budgets configurés. L'optimisation ne constitue donc jamais un motif pour déclarer une lacune.
+
+Les variantes lexicales d'une même vague partagent une session SQLite en lecture seule, et les
+encodages ainsi que les requêtes Qdrant compatibles sont groupés. Un résultat de retrieval peut être
+réutilisé uniquement par un cache local adressé par le contenu : empreinte du corpus SQLite,
+configuration complète du retrieval, modèles et manifestes, filtres et limites. Toute différence ou
+entrée corrompue produit un cache miss sûr ; SQLite reste l'autorité pour le texte et les preuves.
+Tracer séparément hits et misses du cache, candidats lexicaux/denses et temps des vagues avant de
+conclure à un gain de performance.
+
 Une exécution partielle conserve le contrat rédactionnel normal. Les affirmations déjà validées et
 citées peuvent former une réponse `partial_generated`, avec une limite localisée sur l’axe manquant.
 Si aucune affirmation n’est validée, produire une abstention ou un diagnostic structuré dans la même
 forme que la réponse attendue. Ne jamais remplacer la synthèse par une succession d’extraits ou de
 sources brutes.
+
+Instruction utilisateur explicite et durable du 26 août 2026 : la recherche conversationnelle ne
+possède pas de délai global fixe ni de réserve de temps qui permettrait d’omettre le contrôle
+sémantique ou la synthèse. Les appels distants restent individuellement temporisés et les pools de
+preuves sont bornés par l’effort choisi ; l’amélioration de la durée repose sur le cache, le
+groupement des requêtes et la réduction du travail redondant, jamais sur la suppression silencieuse
+d’une étape de validation.
+
+Pour le mode `balanced`, quinze minutes constituent l’objectif de performance de référence, pas une
+limite d’exécution. Mesurer cet objectif sur la durée complète du job et optimiser d’abord les pools
+intermédiaires, les ouvertures d’index, les encodages et les recherches répétées. La sélection finale
+reste fixée par les exigences scientifiques du mode et une couverture insuffisante déclenche toujours
+la vague complémentaire prévue, même si l’objectif de quinze minutes est dépassé.
+
+Décision utilisateur validée le 26 août 2026 : chaque vague locale partage une seule ouverture
+Qdrant paresseuse entre les collections d'abstracts et de texte intégral, y compris lorsqu'une
+acquisition incrémentale écrit de nouveaux chunks pendant la vague ; le propriétaire est fermé à la
+fin de la vague. Lorsque l'évaluation de couverture est fiable et que des preuves filtrées existent,
+la vague complémentaire relance uniquement les axes `partial`, `missing` ou `indeterminate` ; les
+axes `covered` ne sont pas recherchés de nouveau s'ils possèdent aussi le nombre minimal de candidats
+sémantiques A/B exigé par l'effort. Un contrôle en repli ou une sélection vide conserve le comportement
+prudent qui élargit tous les axes. Les plafonds finaux et les validations restent inchangés.
+
+### 5.1 Pipeline conversationnel sans axes ni contrôle de couverture
+
+Instruction utilisateur explicite et durable du 27 août 2026 : les axes de travail, les quotas par
+axe, l'évaluation séparée de couverture et la vague complémentaire automatique sont retirés du chemin
+de production du chatbot. Cette décision remplace, pour ce chemin, les règles antérieures qui
+imposaient des brouillons par axe ou une seconde recherche lorsque leur couverture était jugée
+insuffisante. Les anciennes structures peuvent rester temporairement lisibles pour les migrations et
+les audits, mais elles ne pilotent plus la recherche ni la génération courantes.
+
+Le chemin de production suit désormais ce contrat vérifiable :
+
+1. Argo produit d'abord une **réponse hypothétique prudente**, jamais affichée et jamais considérée
+   comme une preuve, ainsi que des propositions atomiques à vérifier. Cette hypothèse simule la
+   structure et le vocabulaire d'une réponse experte afin d'orienter le retrieval ; elle ne contient
+   ni citation, ni DOI, ni page, ni valeur numérique absente de la question. Elle distingue
+   observation attendue, mécanisme encore hypothétique, recommandation éventuelle et limites de
+   transposition.
+2. Le nombre de vérifications s'adapte à l'effort sans devenir un quota de remplissage : `concise`
+   autorise au plus trois besoins et une hypothèse de 80 mots ; `balanced`, cinq besoins et 140 mots ;
+   `deep`, huit besoins et 250 mots. Une question simple peut conserver un seul besoin. Toutes les
+   dimensions explicitement demandées restent obligatoires même en mode concis. La brièveté réduit le
+   nombre d'affirmations finales, jamais le niveau de validation.
+3. Une **seule vague groupée** interroge localement l'original et l'hypothèse pour le dense, puis
+   l'original et les requêtes courtes des vérifications pour le lexical. Les variantes partagent la
+   session SQLite, l'encodage est groupé, les collections réutilisent une seule ouverture Qdrant, puis
+   l'union dédupliquée subit une fusion et un reranking globaux. Aucun besoin ne devient une unité de
+   recherche successive.
+4. Le contexte intra-article utilise un index logique `article -> section -> chunk` construit sur les
+   colonnes SQLite persistées. Il part des chunks d'ancrage, lit leurs voisins bornés, puis seulement
+   quelques chunks des mêmes sections ou de `Results`, `Discussion`, `Conclusion`, `Abstract` et,
+   lorsque la question le demande, `Materials and Methods`. Les fenêtres candidates par article sont
+   respectivement bornées à 12, 16 et 20 chunks pour `concise`, `balanced` et `deep`; les passages
+   finaux restent bornés à 3, 4 et 6. Le chatbot ne lit donc pas automatiquement un article complet.
+5. Les passages et abstracts originaux relus depuis SQLite constituent la seule autorité scientifique.
+   Qdrant ne fournit que des identifiants et scores. Une notice externe découverte ne devient une
+   preuve qu'après ingestion, validation et persistance dans SQLite. La réponse hypothétique ne peut
+   jamais atteindre le prompt de synthèse finale. Une analyse visuelle générée peut être persistée
+   pour revue, mais elle n'alimente pas cette synthèse tant qu'un contrat distinct ne l'a pas promue
+   comme preuve validée.
+6. Argo qualifie globalement les candidats A à D par rapport à la question complète et aux besoins de
+   vérification. Une contradiction qui étudie directement la question reste A ; elle n'est pas
+   rejetée parce qu'elle contredit l'hypothèse. Ce filtre n'évalue aucune couverture et ne déclenche
+   aucune nouvelle recherche.
+7. Argo produit enfin une synthèse unique à partir des seuls passages SQLite retenus. Chaque
+   affirmation cite un identifiant de preuve autorisé ; valeurs numériques, causalité, pages,
+   métadonnées, langue et pertinence A/B repassent par les validateurs applicatifs. Une lacune donne
+   une abstention localisée ou `partial_generated`, jamais une recherche implicite ni une affirmation
+   complétée par la mémoire du modèle.
+
+Le retriever et le reranker peuvent être spécialisés progressivement hors ligne. CiderQA
+`development` fournit les positifs traçables ; les décisions A–D validées fournissent positifs,
+preuves indirectes et négatifs difficiles, dont le texte est toujours réhydraté depuis SQLite. Les
+labels `validation` et `final_test` ne servent jamais à l'entraînement. Chaque entraînement continue
+depuis un modèle local signé vers un nouveau répertoire candidat, sans écraser ni activer le modèle
+courant. La promotion exige les gates CiderQA de retrieval, exactitude, citations, nombres et
+abstention. Un fine-tuning ultérieur du générateur peut améliorer style, abstention et respect du
+schéma de citations, mais ne sert jamais à mémoriser les connaissances scientifiques du corpus.
 
 ## 6. Diagnostiquer et améliorer le système
 
@@ -435,15 +682,21 @@ Pour une boucle d’amélioration :
 - figer une baseline, les questions, les critères et un lot de contrôle ;
 - journaliser réponses brutes, sources, réglages, versions, coûts, latences et erreurs ;
 - mesurer séparément attente du verrou local, recherche abstracts, recherche texte intégral,
-  enrichment, filtre sémantique, couverture et génération, sans journaliser le contenu scientifique ;
+  enrichment, filtre sémantique global et génération, sans journaliser le contenu scientifique ;
 - modifier une seule famille de paramètres par cycle ;
 - rejouer le cas révélateur et au moins un contrôle indépendant ;
 - généraliser la correction, sans introduire dans le prompt la réponse particulière du benchmark ;
-- augmenter le budget de tokens seulement si des axes déjà présents dans les preuves sont omis ou si
+- augmenter le budget de tokens seulement si des dimensions déjà présentes dans les preuves sont omises ou si
   une troncature est observée ;
-- rejeter une réponse plus longue qui n’améliore pas la couverture, la précision des citations ou la
+- rejeter une réponse plus longue qui n’améliore pas la complétude utile, la précision des citations ou la
   densité scientifique ;
 - ne promouvoir aucun candidat qui dégrade la traçabilité, l’abstention ou la fidélité aux preuves.
+
+Les échecs de planification structurée distinguent désormais `invalid_json` et
+`schema_validation`. Le diagnostic persistant peut contenir le chemin et le type de validation
+Pydantic, mais jamais la question, la sortie générée, une valeur fautive ou le texte d'une preuve.
+Les budgets de caractères des filtres sémantiques s'appliquent au payload assemblé, séparateurs
+compris ; un extrait multi-passages ne doit jamais dépasser silencieusement la borne du modèle.
 
 ## 7. Traçabilité des décisions consolidées
 
@@ -487,5 +740,8 @@ Avant de conclure une tâche concernée par ce guide, vérifier :
 - les écritures importantes ont une sauvegarde et une stratégie de reprise ;
 - un changement de comportement possède un test de non-régression représentatif ;
 - chaque champ rédactionnel visible a été contrôlé séparément dans la langue de la question, y compris
-  les limitations, abstentions et brouillons multi-axes ;
+  les limitations et abstentions ;
+- la réponse hypothétique n'a été utilisée que pour le retrieval, et aucune recherche complémentaire
+  automatique ni preuve externe non persistée n'a atteint la synthèse ;
+- la fenêtre intra-article est hiérarchique et bornée, sans lecture complète par défaut ;
 - toute nouvelle règle durable explicitement demandée a été ajoutée à ce fichier.

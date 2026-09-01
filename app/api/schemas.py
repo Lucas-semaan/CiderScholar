@@ -59,6 +59,16 @@ class ArgoKeyRequest(ApiModel):
     key: str = Field(min_length=1, max_length=4098)
 
 
+class LlmProviderUpdateRequest(ApiModel):
+    key: str | None = Field(default=None, min_length=1, max_length=4098)
+    base_url: str | None = Field(default=None, min_length=8, max_length=2000)
+    model: str | None = Field(default=None, min_length=1, max_length=200)
+
+
+class ActiveLlmProviderRequest(ApiModel):
+    provider: Literal["argo", "custom"]
+
+
 class FolderIngestionRequest(ApiModel):
     folder: str = Field(min_length=1, max_length=2000)
     recursive: bool = True

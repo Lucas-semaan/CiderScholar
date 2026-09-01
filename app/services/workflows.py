@@ -5,17 +5,20 @@ from __future__ import annotations
 import hashlib
 import inspect
 import json
+import logging
 import os
 import re
+import sqlite3
 import tempfile
 import threading
 import uuid
 from collections.abc import Callable, Iterable, Mapping, Sequence
+from contextlib import closing, contextmanager, suppress
 from pathlib import Path
 from time import perf_counter, sleep
 from typing import Any, BinaryIO, Literal
 
-from app.chat_effort import AnswerEffort, answer_effort_budget
+from app.chat_effort import AnswerEffort, AnswerEffortBudget, answer_effort_budget
 from app.config import Settings
 from app.corpora import CorpusScope, corpus_paths, corpus_scope_label, settings_for_corpus
 from app.database.sqlite import Database
@@ -25,6 +28,7 @@ from app.deep_research.query_variants import (
     query_variant_weight,
     variant_matches_text,
 )
+from app.desktop.model_integrity import MODEL_MANIFEST
 from app.ingestion.embeddings import (
     EmbeddingBatchProcessor,
     EmbeddingRunReport,
@@ -42,6 +46,7 @@ from app.llm.argo_client import (
     ArgoProtocolError,
     ArgoQuotaError,
     ArgoScientificValidationError,
+    ScientificValidationReason,
 )
 from app.llm.article_evidence import ArticleEvidenceExtractor, EvidencePassageSelector
 from app.llm.figure_analysis import (
@@ -54,6 +59,7 @@ from app.llm.final_synthesis import (
     HierarchicalSynthesisService,
     SynthesisExecutionResult,
 )
+from app.llm.providers import active_llm_model
 from app.llm.response_language import question_language
 from app.llm.response_style import ResponseStyle, detect_response_style
 from app.memory import MemoryGuard, MemorySnapshot
@@ -64,6 +70,7 @@ from app.models.chatbot import (
     ChatbotTiming,
     ChatEvidencePassage,
     ChatEvidenceRecord,
+    ScientificGenerationTrace,
 )
 from app.models.synthesis import BibliographyEntry, SynthesisResult
 from app.retrieval.article_ranking import (
@@ -80,7 +87,19 @@ from app.retrieval.coverage_assessment import (
     ArgoEvidenceCoverageAssessor,
     CoverageAssessmentResult,
 )
+from app.retrieval.global_semantic_filter import (
+    ArgoGlobalSemanticEvidenceFilter,
+    GlobalSemanticFilterResult,
+)
 from app.retrieval.hybrid_search import HybridChunkResult, HybridSearchService
+from app.retrieval.hypothesis_planning import (
+    ArgoHypothesisPlanningService as ArgoQueryPlanningService,
+)
+from app.retrieval.hypothesis_planning import (
+    HypothesisPlanningResult,
+    coerce_hypothesis_planning_result,
+    deterministic_hypothesis_plan,
+)
 from app.retrieval.index_manifest import (
     assert_index_generation_mutable,
     prepare_index_generation_mutation,
@@ -89,7 +108,10 @@ from app.retrieval.index_manifest import (
 )
 from app.retrieval.lexical_search import LexicalSearchService
 from app.retrieval.query_planning import (
-    ArgoQueryPlanningService,
+    ArgoQueryPlanningService as LegacyArgoQueryPlanningService,
+)
+from app.retrieval.query_planning import (
+    QueryPlanningProtocolError,
     QueryPlanningResult,
     ResearchAxis,
     deterministic_query_plan,
@@ -99,6 +121,7 @@ from app.retrieval.reranker import (
     RerankerCandidate,
     local_reranker_model_path,
 )
+from app.retrieval.retrieval_cache import RetrievalCacheSignature, RetrievalResultCache
 from app.retrieval.scientific_intent import (
     ScientificIntent,
     analyze_scientific_intent,
@@ -147,6 +170,7 @@ ChatbotProgressCallback = Callable[[ChatbotProgressStage], None]
 SAFE_FILE_NAME = re.compile(r"[^A-Za-z0-9._ -]+")
 BIBTEX_KEY = re.compile(r"[^A-Za-z0-9_:-]+")
 _LOCAL_CHAT_RETRIEVAL_LOCK = threading.Lock()
+LOGGER = logging.getLogger("ciderscholar.services.workflows")
 
 
 class _ChatTimingCollector:
@@ -226,6 +250,9 @@ class _ChatRetrievalTraceCollector:
 
     _COUNT_FIELDS = (
         "query_variant_count",
+        "vector_query_count",
+        "cache_hit_count",
+        "cache_miss_count",
         "lexical_candidate_count",
         "dense_candidate_count",
         "rrf_unique_candidate_count",
@@ -234,6 +261,10 @@ class _ChatRetrievalTraceCollector:
         "post_rerank_candidate_count",
         "selected_article_count",
         "selected_passage_count",
+        "selected_full_text_article_count",
+        "selected_full_text_passage_count",
+        "selected_abstract_article_count",
+        "selected_abstract_passage_count",
     )
 
     def __init__(self) -> None:
@@ -261,12 +292,60 @@ class _ChatRetrievalTraceCollector:
         return list(self._values.values())
 
 
+def _chat_retrieval_corpus_fingerprint(settings: Settings) -> str:
+    """Hash retrieval-authoritative identities and revisions without copying source text."""
+
+    path = corpus_paths(settings, CorpusScope.COMMON).database_path.resolve()
+    digest = hashlib.sha256(b"ciderscholar-chat-retrieval-corpus-v1\0")
+    try:
+        with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)) as connection:
+            queries = (
+                "SELECT version FROM schema_version ORDER BY version",
+                """
+                SELECT id, sha256, COALESCE(doi, ''), title,
+                       COALESCE(abstract, ''), validation_status, COALESCE(indexed_at, '')
+                FROM articles ORDER BY id
+                """,
+                """
+                SELECT id, content_hash, embedding_status, relevance_status,
+                       COALESCE(manual_decision, ''), updated_at
+                FROM bibliographic_records ORDER BY id
+                """,
+                """
+                SELECT embedding_status, COUNT(*), MIN(id), MAX(id), SUM(id)
+                FROM chunks GROUP BY embedding_status ORDER BY embedding_status
+                """,
+                """
+                SELECT id, COALESCE(synthetic_caption, '')
+                FROM document_elements
+                WHERE synthetic_caption IS NOT NULL
+                ORDER BY id
+                """,
+            )
+            for sql in queries:
+                for row in connection.execute(sql):
+                    digest.update(
+                        json.dumps(tuple(row), ensure_ascii=True, separators=(",", ":")).encode()
+                    )
+                    digest.update(b"\n")
+    except sqlite3.Error as exc:
+        raise RuntimeError("chat retrieval cache cannot fingerprint common SQLite") from exc
+    return digest.hexdigest()
+
+
+def _manifest_sha256(path: Path) -> str | None:
+    manifest = path / MODEL_MANIFEST
+    return hashlib.sha256(manifest.read_bytes()).hexdigest() if manifest.is_file() else None
+
+
 class _ChatRetrievalResources:
     """Lazily reuse heavy local models during one complete chat answer."""
 
     def __init__(self) -> None:
         self._embedding_backend: SentenceTransformerBackend | None = None
         self._reranker: MultilingualReranker | None = None
+        self._result_cache: RetrievalResultCache | None = None
+        self._corpus_fingerprints: dict[str, str] = {}
 
     def embedding_backend(self, settings: Settings) -> SentenceTransformerBackend:
         if self._embedding_backend is None:
@@ -280,7 +359,40 @@ class _ChatRetrievalResources:
             self._reranker = MultilingualReranker.from_settings(settings)
         return self._reranker
 
+    def result_cache(self, settings: Settings) -> RetrievalResultCache:
+        if self._result_cache is None:
+            self._result_cache = RetrievalResultCache(
+                settings.paths.cache_dir / "chat_retrieval_results"
+            )
+        return self._result_cache
+
+    def corpus_fingerprint(self, settings: Settings) -> str:
+        key = str(corpus_paths(settings, CorpusScope.COMMON).database_path.resolve())
+        fingerprint = self._corpus_fingerprints.get(key)
+        if fingerprint is None:
+            fingerprint = _chat_retrieval_corpus_fingerprint(settings)
+            self._corpus_fingerprints[key] = fingerprint
+        return fingerprint
+
+    def invalidate_corpus_fingerprint(self) -> None:
+        self._corpus_fingerprints.clear()
+
+    @contextmanager
+    def qdrant_wave(self, settings: Settings) -> Iterable[QdrantLocalIndex]:
+        """Own one lazy Qdrant client shared by every collection used in a wave."""
+
+        scoped_settings = settings_for_corpus(settings, CorpusScope.COMMON)
+        owner = QdrantLocalIndex(scoped_settings)
+        try:
+            yield owner
+        finally:
+            owner.close()
+
     def close(self) -> None:
+        if self._result_cache is not None:
+            self._result_cache.close()
+            self._result_cache = None
+        self._corpus_fingerprints.clear()
         if self._reranker is not None:
             self._reranker.close()
             self._reranker = None
@@ -289,10 +401,40 @@ class _ChatRetrievalResources:
             self._embedding_backend = None
 
 
+def _chat_retrieval_cache_signature(
+    settings: Settings,
+    resources: _ChatRetrievalResources,
+    *,
+    operation: str,
+    query: str,
+    variants: Sequence[str],
+    filters_limits: Mapping[str, Any],
+) -> RetrievalCacheSignature:
+    embedding_path = local_model_path(settings, settings.embeddings.model_name)
+    reranker_path = local_reranker_model_path(settings)
+    return RetrievalCacheSignature.build(
+        query=query,
+        variants=tuple(variants),
+        corpus_fingerprint=resources.corpus_fingerprint(settings),
+        scope=CorpusScope.COMMON.value,
+        retrieval_config=settings.retrieval.model_dump(mode="json"),
+        embedding={
+            "config": settings.embeddings.model_dump(mode="json"),
+            "manifest_sha256": _manifest_sha256(embedding_path),
+        },
+        reranker={
+            "config": settings.reranker.model_dump(mode="json"),
+            "manifest_sha256": _manifest_sha256(reranker_path),
+        },
+        filters_limits={"operation": operation, **dict(filters_limits)},
+    )
+
+
 def _evidence_rag_service(
     client: Any,
     answer_effort: AnswerEffort,
     correction_temperature: float,
+    max_input_characters: int,
 ) -> CiderEvidenceRagService:
     """Keep injected legacy test/adaptor factories compatible with the new option."""
 
@@ -307,7 +449,24 @@ def _evidence_rag_service(
         parameter.name == "correction_temperature" for parameter in parameters
     ):
         options["correction_temperature"] = correction_temperature
+    if supports_kwargs or any(parameter.name == "max_input_characters" for parameter in parameters):
+        options["max_input_characters"] = max_input_characters
     return CiderEvidenceRagService(client, **options)
+
+
+def _chat_llm_client(settings: Settings, request_timeout_seconds: float) -> ArgoClient:
+    """Keep injected legacy clients compatible while bounding real HTTP calls."""
+
+    parameters = inspect.signature(ArgoClient).parameters.values()
+    supports_timeout = any(
+        parameter.name == "request_timeout_seconds"
+        or parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters
+    )
+    options = (
+        {"request_timeout_seconds": max(1.0, request_timeout_seconds)} if supports_timeout else {}
+    )
+    return ArgoClient(settings, **options)
 
 
 def _serialized_chat_retrieval(
@@ -317,7 +476,24 @@ def _serialized_chat_retrieval(
     timing_stage: str = "local_retrieval",
     **kwargs: Any,
 ) -> Any:
-    """Keep local model/index access exclusive without serializing ARGO generation."""
+    """Keep local model/index access exclusive without serializing LLM generation."""
+
+    with _serialized_chat_retrieval_scope(timing=timing):
+        return _timed_chat_retrieval_operation(
+            operation,
+            *args,
+            timing=timing,
+            timing_stage=timing_stage,
+            **kwargs,
+        )
+
+
+@contextmanager
+def _serialized_chat_retrieval_scope(
+    *,
+    timing: _ChatTimingCollector | None = None,
+) -> Iterable[None]:
+    """Acquire the local retrieval lock once for a coherent multi-stage wave."""
 
     wait_started = perf_counter()
     wait_memory = timing.snapshot() if timing is not None else None
@@ -328,17 +504,49 @@ def _serialized_chat_retrieval(
                 perf_counter() - wait_started,
                 before=wait_memory,
             )
-        operation_started = perf_counter()
-        operation_memory = timing.snapshot() if timing is not None else None
-        try:
-            return operation(*args, **kwargs)
-        finally:
-            if timing is not None:
-                timing.add(
-                    timing_stage,
-                    perf_counter() - operation_started,
-                    before=operation_memory,
-                )
+        yield
+
+
+def _timed_chat_retrieval_operation(
+    operation: Callable[..., Any],
+    *args: Any,
+    timing: _ChatTimingCollector | None = None,
+    timing_stage: str = "local_retrieval",
+    **kwargs: Any,
+) -> Any:
+    """Measure one operation inside an already acquired retrieval scope."""
+
+    operation_started = perf_counter()
+    operation_memory = timing.snapshot() if timing is not None else None
+    try:
+        return operation(*args, **kwargs)
+    finally:
+        if timing is not None:
+            timing.add(
+                timing_stage,
+                perf_counter() - operation_started,
+                before=operation_memory,
+            )
+
+
+def _initial_retrieval_candidate_limit(
+    settings: Settings,
+    effort_budget: AnswerEffortBudget,
+) -> int:
+    """Size the exact first wave from its requested output, not a generic wide default."""
+
+    return min(
+        settings.retrieval.hybrid_candidate_limit,
+        max(40, effort_budget.abstract_result_limit * 3),
+    )
+
+
+def _full_text_intermediate_pool_sizes(article_count: int) -> tuple[int, int]:
+    """Keep a diverse preselection while bounding costly cold-start reranking."""
+
+    candidate_articles = min(max(article_count * 3, 18), 60)
+    axis_candidates = min(max(article_count + 4, 10), 24)
+    return candidate_articles, axis_candidates
 
 
 def apply_runtime_overrides(
@@ -518,8 +726,9 @@ def index_pending_chunks(
     article_ids: Sequence[str] | None = None,
     retry_failed: bool = False,
     _manifest_is_building: bool = False,
+    qdrant_client_owner: QdrantLocalIndex | None = None,
 ) -> EmbeddingRunReport:
-    index = QdrantLocalIndex(settings)
+    index = QdrantLocalIndex(settings, client_owner=qdrant_client_owner)
     backend: SentenceTransformerBackend | None = None
     try:
         has_pending_chunks = bool(
@@ -759,6 +968,92 @@ def rerank_bibliographic_candidates(
     ]
 
 
+def _abstract_search_failure_code(stage: str, error: Exception) -> str:
+    if isinstance(error, sqlite3.Error):
+        category = "sqlite"
+    elif isinstance(error, ValueError):
+        category = "invalid_data"
+    elif isinstance(error, OSError):
+        category = "resource"
+    else:
+        category = "unexpected"
+    return f"abstract_{stage}_{category}"[:80]
+
+
+def _abstract_search_warning(
+    question: str,
+    *,
+    has_results: bool,
+    supplemental: bool = False,
+) -> str:
+    is_french = question_language(question) == "fr"
+    if is_french:
+        scope = "complémentaire " if supplemental else ""
+        if has_results:
+            return (
+                f"La recherche {scope}dans les résumés bibliographiques a été partiellement "
+                "dégradée ; les résultats valides et les passages locaux restent utilisables."
+            )
+        return (
+            f"La recherche {scope}dans les résumés bibliographiques n'a pas abouti ; les "
+            "autres passages locaux disponibles restent utilisables."
+        )
+    scope = "supplemental " if supplemental else ""
+    if has_results:
+        return (
+            f"The {scope}bibliographic abstract search was partially degraded; valid results "
+            "and other local passages remain usable."
+        )
+    return (
+        f"The {scope}bibliographic abstract search did not complete; other available local "
+        "passages remain usable."
+    )
+
+
+def _evidence_level_trace_counts(
+    evidence: Sequence[ChatEvidenceRecord],
+) -> dict[str, int]:
+    full_text = [record for record in evidence if record.evidence_level == "full_text"]
+    abstracts = [record for record in evidence if record.evidence_level == "abstract"]
+    return {
+        "selected_full_text_article_count": len(full_text),
+        "selected_full_text_passage_count": sum(len(record.passages) for record in full_text),
+        "selected_abstract_article_count": len(abstracts),
+        "selected_abstract_passage_count": sum(len(record.passages) for record in abstracts),
+    }
+
+
+def _abstract_route_warning(
+    question: str,
+    *,
+    diagnostics: Sequence[str],
+    abstract_result_count: int,
+    full_text_records: Sequence[ChatEvidenceRecord],
+    supplemental: bool = False,
+) -> str | None:
+    """Describe an abstract degradation without obscuring successful full-text retrieval."""
+
+    if not diagnostics:
+        return None
+    full_text_articles = len(full_text_records)
+    full_text_passages = sum(len(record.passages) for record in full_text_records)
+    scope_fr = "complémentaire " if supplemental else ""
+    scope_en = "supplemental " if supplemental else ""
+    if question_language(question) == "fr":
+        return (
+            f"La voie {scope_fr}des résumés bibliographiques a été partiellement dégradée "
+            f"({abstract_result_count} résultat(s) valide(s) conservé(s)). La recherche distincte "
+            f"dans les textes intégraux a néanmoins retenu {full_text_articles} article(s) et "
+            f"{full_text_passages} passage(s) avant la fusion des preuves."
+        )
+    return (
+        f"The {scope_en}bibliographic-abstract route was partially degraded "
+        f"({abstract_result_count} valid result(s) retained). The separate full-text search still "
+        f"retained {full_text_articles} article(s) and {full_text_passages} passage(s) before "
+        "evidence merging."
+    )
+
+
 def search_common_corpus_abstracts(
     settings: Settings,
     *,
@@ -767,9 +1062,14 @@ def search_common_corpus_abstracts(
     search_queries: Sequence[str] = (),
     intent_override: ScientificIntent | None = None,
     max_query_variants: int | None = None,
+    max_vector_query_variants: int | None = None,
+    candidate_limit: int | None = None,
+    prefix_matching: bool | None = None,
     retrieval_resources: _ChatRetrievalResources | None = None,
     retrieval_trace: _ChatRetrievalTraceCollector | None = None,
+    qdrant_client_owner: QdrantLocalIndex | None = None,
     supplemental: bool = False,
+    diagnostics: list[str] | None = None,
 ) -> list[BibliographicHybridResult]:
     """Search full articles and verified abstract-only records in the common corpus."""
 
@@ -782,37 +1082,112 @@ def search_common_corpus_abstracts(
     query_limit = max_query_variants or scoped_settings.retrieval.hybrid_max_query_variants
     if not 1 <= query_limit <= scoped_settings.retrieval.hybrid_max_query_variants:
         raise ValueError("abstract query variant limit is outside configured bounds")
+    if max_vector_query_variants is not None and not 0 <= max_vector_query_variants <= query_limit:
+        raise ValueError("abstract vector query variant limit is outside configured bounds")
     queries = list(
         dict.fromkeys(" ".join(item.split()) for item in [query, *search_queries] if item.strip())
     )[:query_limit]
+    trace_stage = "supplemental_abstract_search" if supplemental else "abstract_search"
+    failure_counts: dict[str, int] = {}
+
+    def record_failure(stage: str, error: Exception) -> None:
+        code = _abstract_search_failure_code(stage, error)
+        failure_counts[code] = failure_counts.get(code, 0) + 1
+        if diagnostics is not None and code not in diagnostics:
+            diagnostics.append(code)
+        LOGGER.warning(
+            "abstract_search_degraded stage=%s error_type=%s",
+            stage,
+            type(error).__name__,
+        )
+
+    cache_signature: RetrievalCacheSignature | None = None
+    if retrieval_resources is not None:
+        try:
+            cache_signature = _chat_retrieval_cache_signature(
+                scoped_settings,
+                retrieval_resources,
+                operation=trace_stage,
+                query=query,
+                variants=queries,
+                filters_limits={
+                    "limit": limit,
+                    "max_vector_query_variants": max_vector_query_variants,
+                    "candidate_limit": candidate_limit,
+                    "prefix_matching": prefix_matching,
+                    "intent": (
+                        intent_override.model_dump(mode="json")
+                        if intent_override is not None
+                        else None
+                    ),
+                },
+            )
+            cached = retrieval_resources.result_cache(scoped_settings).get_typed(
+                cache_signature,
+                list[BibliographicHybridResult],
+            )
+        except Exception as exc:
+            record_failure("cache", exc)
+            cache_signature = None
+        else:
+            if cached is not None:
+                if retrieval_trace is not None:
+                    retrieval_trace.add(
+                        trace_stage,
+                        query_variant_count=len(queries),
+                        cache_hit_count=1,
+                        selected_article_count=len(cached),
+                        selected_abstract_article_count=len(cached),
+                    )
+                return cached
+            if retrieval_trace is not None:
+                retrieval_trace.add(trace_stage, cache_miss_count=1)
     title_rows = []
     seen_title_ids: set[str] = set()
     for search_query in queries:
-        for row in database.article_abstracts_by_title(search_query, limit=limit):
+        try:
+            matched_title_rows = database.article_abstracts_by_title(search_query, limit=limit)
+        except Exception as exc:
+            record_failure("title_query", exc)
+            continue
+        for row in matched_title_rows:
             article_id = str(row["id"])
             if article_id in seen_title_ids:
                 continue
             seen_title_ids.add(article_id)
             title_rows.append(row)
-    candidate_limit = min(max(limit * 10, 50), 500)
+    lexical_retrieval_limit = (
+        min(max(limit * 10, 50), 500)
+        if candidate_limit is None
+        else min(max(candidate_limit, limit), 500)
+    )
     maximum_query_length = scoped_settings.retrieval.lexical_max_query_characters
     lexical_service = LexicalSearchService(scoped_settings, database)
     lexical_by_article: dict[str, Any] = {}
     lexical_scores: dict[str, float] = {}
     lexical_candidate_count = 0
-    for search_query in queries:
-        lexical = lexical_service.search(
-            expand_cider_query(search_query)[:maximum_query_length],
-            limit=candidate_limit,
-            mode="any",
-        )
-        lexical_candidate_count += len(lexical.results)
-        for result in lexical.results:
-            lexical_by_article.setdefault(result.article_id, result)
-            lexical_scores[result.article_id] = lexical_scores.get(
-                result.article_id,
-                0.0,
-            ) + 1.0 / (60.0 + result.rank)
+    try:
+        with lexical_service.read_session() as lexical_session:
+            for search_query in queries:
+                try:
+                    lexical = lexical_session.search(
+                        expand_cider_query(search_query)[:maximum_query_length],
+                        limit=lexical_retrieval_limit,
+                        mode="any",
+                        prefix_matching=prefix_matching,
+                    )
+                except Exception as exc:
+                    record_failure("article_fts_query", exc)
+                    continue
+                lexical_candidate_count += len(lexical.results)
+                for result in lexical.results:
+                    lexical_by_article.setdefault(result.article_id, result)
+                    lexical_scores[result.article_id] = lexical_scores.get(
+                        result.article_id,
+                        0.0,
+                    ) + 1.0 / (60.0 + result.rank)
+    except Exception as exc:
+        record_failure("article_fts_session", exc)
     ordered_lexical_ids = sorted(
         lexical_by_article,
         key=lambda article_id: (
@@ -831,7 +1206,10 @@ def search_common_corpus_abstracts(
         )
     )
     rows = {str(row["id"]): row for row in title_rows}
-    rows.update(database.article_details_by_ids(ordered_ids))
+    try:
+        rows.update(database.article_details_by_ids(ordered_ids))
+    except Exception as exc:
+        record_failure("article_details", exc)
     article_results: list[BibliographicHybridResult] = []
     for article_id in ordered_ids:
         row = rows.get(article_id)
@@ -843,29 +1221,35 @@ def search_common_corpus_abstracts(
             authors = []
         lexical_hit = lexical_by_article.get(article_id)
         doi = _verified_normalized_doi(row["doi"])
-        article_results.append(
-            BibliographicHybridResult(
-                rank=len(article_results) + 1,
-                record_id=f"common:{article_id}",
-                title=str(row["title"]),
-                abstract=str(row["abstract"]),
-                authors=[str(author) for author in authors],
-                journal=str(row["journal"]) if row["journal"] else None,
-                publication_year=(
-                    int(row["publication_year"]) if row["publication_year"] is not None else None
-                ),
-                doi=doi,
-                url=f"https://doi.org/{doi}" if doi else None,
-                sources=[str(row["source"])] if row["source"] else [],
-                lexical_rank=lexical_hit.rank if lexical_hit is not None else 1,
-                vector_rank=None,
-                score=(
-                    lexical_scores[article_id] / maximum_lexical_score
-                    if lexical_hit is not None
-                    else 1.0
-                ),
+        try:
+            article_results.append(
+                BibliographicHybridResult(
+                    rank=len(article_results) + 1,
+                    record_id=f"common:{article_id}",
+                    title=str(row["title"]),
+                    abstract=str(row["abstract"]),
+                    authors=[str(author) for author in authors],
+                    journal=str(row["journal"]) if row["journal"] else None,
+                    publication_year=(
+                        int(row["publication_year"])
+                        if row["publication_year"] is not None
+                        else None
+                    ),
+                    doi=doi,
+                    url=f"https://doi.org/{doi}" if doi else None,
+                    sources=[str(row["source"])] if row["source"] else [],
+                    lexical_rank=lexical_hit.rank if lexical_hit is not None else 1,
+                    vector_rank=None,
+                    score=(
+                        lexical_scores[article_id] / maximum_lexical_score
+                        if lexical_hit is not None
+                        else 1.0
+                    ),
+                )
             )
-        )
+        except (TypeError, ValueError) as exc:
+            record_failure("article_conversion", exc)
+            continue
         if len(article_results) >= min(max(limit * 2, 30), 100):
             break
 
@@ -873,70 +1257,151 @@ def search_common_corpus_abstracts(
     abstract_lexical_candidates = 0
     abstract_dense_candidates = 0
     abstract_rrf_candidates = 0
+    abstract_vector_query_count = 0
+    abstract_vector_search_degraded = False
     unverified_abstract_count = 0
     abstract_store = BibliographicHarvestStore(database)
-    if abstract_store.statistics()["abstracts"]:
-        backend = (
-            retrieval_resources.embedding_backend(scoped_settings)
-            if retrieval_resources is not None
-            else SentenceTransformerBackend(scoped_settings)
-        )
-        service = BibliographicHybridSearchService(
-            scoped_settings,
-            abstract_store,
-            backend,
-            BibliographicVectorIndex(scoped_settings),
-        )
+    try:
+        has_harvested_abstracts = bool(abstract_store.statistics()["abstracts"])
+    except Exception as exc:
+        record_failure("harvest_statistics", exc)
+        has_harvested_abstracts = False
+    if has_harvested_abstracts:
+        service: BibliographicHybridSearchService | None = None
         try:
+            backend = (
+                retrieval_resources.embedding_backend(scoped_settings)
+                if retrieval_resources is not None
+                else SentenceTransformerBackend(scoped_settings)
+            )
+            service = BibliographicHybridSearchService(
+                scoped_settings,
+                abstract_store,
+                backend,
+                BibliographicVectorIndex(
+                    scoped_settings,
+                    qdrant_client_owner=qdrant_client_owner,
+                ),
+            )
+        except Exception as exc:
+            record_failure("hybrid_setup", exc)
+        if service is not None:
             collected_abstracts: dict[str, BibliographicHybridResult] = {}
-            for search_query in queries:
-                response = service.search(
-                    search_query,
-                    limit=min(max(limit * 2, 30), 60),
+            vector_query_limit = (
+                len(queries) if max_vector_query_variants is None else max_vector_query_variants
+            )
+            response_entries: list[tuple[int, BibliographicHybridResponse]] = []
+            hybrid_limit = min(max(limit * 2, 30), 60)
+            hybrid_candidate_limit = (
+                min(lexical_retrieval_limit, 200) if candidate_limit is not None else None
+            )
+            try:
+                response_entries = list(
+                    enumerate(
+                        service.search_many(
+                            queries,
+                            limit=hybrid_limit,
+                            vector_query_limit=vector_query_limit,
+                            prefix_matching=prefix_matching,
+                            candidate_limit=hybrid_candidate_limit,
+                        )
+                    )
                 )
+            except Exception as exc:
+                record_failure("grouped_hybrid", exc)
+                for query_index, search_query in enumerate(queries):
+                    try:
+                        response_entries.append(
+                            (
+                                query_index,
+                                service.search(
+                                    search_query,
+                                    limit=hybrid_limit,
+                                    vector_enabled=query_index < vector_query_limit,
+                                    prefix_matching=prefix_matching,
+                                    candidate_limit=hybrid_candidate_limit,
+                                ),
+                            )
+                        )
+                    except Exception as query_exc:
+                        record_failure("hybrid_query", query_exc)
+            for query_index, response in response_entries:
+                for code in response.degradation_codes:
+                    failure_counts[code] = failure_counts.get(code, 0) + 1
+                    if diagnostics is not None and code not in diagnostics:
+                        diagnostics.append(code)
                 abstract_lexical_candidates += response.lexical_candidate_count
                 abstract_dense_candidates += response.dense_candidate_count
                 abstract_rrf_candidates += response.rrf_unique_candidate_count
+                abstract_vector_search_degraded = (
+                    abstract_vector_search_degraded or response.vector_search_degraded
+                )
+                abstract_vector_query_count += int(
+                    query_index < vector_query_limit and not response.vector_search_degraded
+                )
                 for result in response.results:
-                    doi = _verified_normalized_doi(result.doi)
-                    if doi is None:
-                        unverified_abstract_count += 1
+                    try:
+                        doi = _verified_normalized_doi(result.doi)
+                        if doi is None:
+                            unverified_abstract_count += 1
+                            continue
+                        converted = result.model_copy(
+                            update={
+                                "record_id": f"common-abstract:{result.record_id}",
+                                "doi": doi,
+                                "url": f"https://doi.org/{doi}",
+                            }
+                        )
+                        key = _bibliographic_key(converted)
+                    except (TypeError, ValueError) as exc:
+                        record_failure("harvest_conversion", exc)
                         continue
-                    converted = result.model_copy(
-                        update={
-                            "record_id": f"common-abstract:{result.record_id}",
-                            "doi": doi,
-                            "url": f"https://doi.org/{doi}",
-                        }
-                    )
-                    key = _bibliographic_key(converted)
                     current = collected_abstracts.get(key)
                     if current is None or converted.score > current.score:
                         collected_abstracts[key] = converted
             abstract_results = list(collected_abstracts.values())
-        finally:
-            if retrieval_resources is None:
-                service.close()
-            else:
-                service.index.close()
+            try:
+                if retrieval_resources is None:
+                    service.close()
+                else:
+                    service.index.close()
+            except Exception as exc:
+                record_failure("hybrid_close", exc)
 
-    full_text_dois = {
-        doi
-        for row in database.list_articles()
-        if (doi := _verified_normalized_doi(row["doi"])) is not None
-    }
+    try:
+        full_text_dois = {
+            doi
+            for row in database.list_articles()
+            if (doi := _verified_normalized_doi(row["doi"])) is not None
+        }
+    except Exception as exc:
+        record_failure("full_text_doi_lookup", exc)
+        full_text_dois = set()
     filtered_abstracts = [result for result in abstract_results if result.doi not in full_text_dois]
     reranker_input_count = len(article_results) + len(filtered_abstracts)
-    ranked = rerank_bibliographic_candidates(
-        query,
-        [*article_results, *filtered_abstracts],
-        limit=limit,
-        intent_override=intent_override,
-    )
+    reranker_candidates = [*article_results, *filtered_abstracts]
+    try:
+        ranked = rerank_bibliographic_candidates(
+            query,
+            reranker_candidates,
+            limit=limit,
+            intent_override=intent_override,
+        )
+    except Exception as exc:
+        record_failure("reranking", exc)
+        ranked = [
+            result.model_copy(update={"rank": rank})
+            for rank, result in enumerate(
+                sorted(reranker_candidates, key=lambda item: (-item.score, item.record_id))[:limit],
+                start=1,
+            )
+        ]
     if retrieval_trace is not None:
         retrieval_trace.add(
-            "supplemental_abstract_search" if supplemental else "abstract_search",
+            trace_stage,
             query_variant_count=len(queries),
+            vector_query_count=abstract_vector_query_count,
+            vector_search_degraded=abstract_vector_search_degraded,
             lexical_candidate_count=(lexical_candidate_count + abstract_lexical_candidates),
             dense_candidate_count=abstract_dense_candidates,
             rrf_unique_candidate_count=abstract_rrf_candidates,
@@ -944,12 +1409,20 @@ def search_common_corpus_abstracts(
             pre_rerank_candidate_count=reranker_input_count,
             post_rerank_candidate_count=len(ranked),
             selected_article_count=len(ranked),
+            selected_abstract_article_count=len(ranked),
             rejection_counts={
                 "abstract_without_verified_doi": unverified_abstract_count,
                 "duplicate_of_full_text": len(abstract_results) - len(filtered_abstracts),
                 "not_selected_after_reranking": max(0, reranker_input_count - len(ranked)),
+                **failure_counts,
             },
         )
+    if retrieval_resources is not None and cache_signature is not None:
+        with suppress(Exception):
+            retrieval_resources.result_cache(scoped_settings).put(
+                cache_signature,
+                [result.model_dump(mode="json") for result in ranked],
+            )
     return ranked
 
 
@@ -962,44 +1435,50 @@ def _lexical_full_text_ranking(
     article_count: int,
     central_concepts: Sequence[str] | None,
     article_ids: Sequence[str] | None,
+    candidate_limit: int | None = None,
+    prefix_matching: bool | None = None,
 ) -> ArticleRankingResponse:
     """Keep a deterministic fallback for tests or a missing local vector model."""
 
-    candidate_limit = max(120, article_count * 12)
+    resolved_candidate_limit = max(candidate_limit or 120, article_count * 12)
     lexical_service = LexicalSearchService(settings, database)
     fused: dict[tuple[str, int], dict[str, Any]] = {}
     lexical_candidate_count = 0
-    for variant_index, variant in enumerate(variants):
-        lexical = lexical_service.search(
-            variant.text[: settings.retrieval.lexical_max_query_characters],
-            limit=candidate_limit,
-            mode="any",
-            article_ids=article_ids,
-        )
-        lexical_candidate_count += len(lexical.results)
-        for result in lexical.results:
-            if not variant_matches_text(
-                variant,
-                result.text,
-                title=result.article_title,
-            ):
-                continue
-            key = (result.article_id, result.chunk_id)
-            candidate = fused.setdefault(
-                key,
-                {
-                    "result": result,
-                    "source_ranks": {},
-                    "source_contributions": {},
-                    "matched_queries": [],
-                },
+    with lexical_service.read_session() as lexical_session:
+        for variant_index, variant in enumerate(variants):
+            lexical = lexical_session.search(
+                variant.text[: settings.retrieval.lexical_max_query_characters],
+                limit=resolved_candidate_limit,
+                mode="any",
+                prefix_matching=prefix_matching,
+                article_ids=article_ids,
             )
-            source = f"lexical:{variant_index}"
-            contribution = query_variant_weight(variant) / (settings.retrieval.rrf_k + result.rank)
-            candidate["source_ranks"][source] = result.rank
-            candidate["source_contributions"][source] = contribution
-            if variant.text not in candidate["matched_queries"]:
-                candidate["matched_queries"].append(variant.text)
+            lexical_candidate_count += len(lexical.results)
+            for result in lexical.results:
+                if not variant_matches_text(
+                    variant,
+                    result.text,
+                    title=result.article_title,
+                ):
+                    continue
+                key = (result.article_id, result.chunk_id)
+                candidate = fused.setdefault(
+                    key,
+                    {
+                        "result": result,
+                        "source_ranks": {},
+                        "source_contributions": {},
+                        "matched_queries": [],
+                    },
+                )
+                source = f"lexical:{variant_index}"
+                contribution = query_variant_weight(variant) / (
+                    settings.retrieval.rrf_k + result.rank
+                )
+                candidate["source_ranks"][source] = result.rank
+                candidate["source_contributions"][source] = contribution
+                if variant.text not in candidate["matched_queries"]:
+                    candidate["matched_queries"].append(variant.text)
     ordered = sorted(
         fused.values(),
         key=lambda candidate: (
@@ -1062,19 +1541,24 @@ def search_common_corpus_full_text_evidence(
     axis_queries: Mapping[str, Sequence[str]] | None = None,
     intent_override: ScientificIntent | None = None,
     max_query_variants: int | None = None,
+    max_vector_query_variants: int | None = None,
+    candidate_limit: int | None = None,
+    prefix_matching: bool | None = None,
+    include_fallback_variants: bool = True,
     passage_count: int | None = None,
     candidate_chunks_per_article: int | None = None,
     context_radius: int = 1,
     retrieval_resources: _ChatRetrievalResources | None = None,
     retrieval_trace: _ChatRetrievalTraceCollector | None = None,
+    qdrant_client_owner: QdrantLocalIndex | None = None,
     supplemental: bool = False,
 ) -> list[ChatEvidenceRecord]:
     """Hybrid-search full articles, causally rerank them, then hydrate passages."""
 
     if not query.strip():
         raise ValueError("common corpus full-text query cannot be empty")
-    if not 1 <= article_count <= 10:
-        raise ValueError("chat full-text article count must be between 1 and 10")
+    if not 1 <= article_count <= 20:
+        raise ValueError("chat full-text article count must be between 1 and 20")
     scoped_settings = settings_for_corpus(settings, CorpusScope.COMMON)
     database = Database(corpus_paths(settings, CorpusScope.COMMON).database_path)
     intent = intent_override or analyze_scientific_intent(query)
@@ -1086,6 +1570,11 @@ def search_common_corpus_full_text_evidence(
     )
     if not 1 <= maximum_variant_count <= scoped_settings.retrieval.hybrid_max_query_variants:
         raise ValueError("full-text query variant limit is outside configured bounds")
+    if (
+        max_vector_query_variants is not None
+        and not 0 <= max_vector_query_variants <= maximum_variant_count
+    ):
+        raise ValueError("full-text vector query variant limit is outside configured bounds")
     for planned_query in search_queries:
         cleaned_planned_query = " ".join(planned_query.split())[:2000]
         if (
@@ -1105,14 +1594,17 @@ def search_common_corpus_full_text_evidence(
             )
         )
         known_variant_texts.add(cleaned_planned_query.casefold())
-    for fallback_variant in fallback_variants[1:]:
-        if len(variants) >= maximum_variant_count:
-            break
-        if fallback_variant.text.casefold() in known_variant_texts:
-            continue
-        variants.append(fallback_variant)
-        known_variant_texts.add(fallback_variant.text.casefold())
-    candidate_article_count = min(max(article_count * 5, 40), 100)
+    if include_fallback_variants:
+        for fallback_variant in fallback_variants[1:]:
+            if len(variants) >= maximum_variant_count:
+                break
+            if fallback_variant.text.casefold() in known_variant_texts:
+                continue
+            variants.append(fallback_variant)
+            known_variant_texts.add(fallback_variant.text.casefold())
+    candidate_article_count, axis_candidate_count = _full_text_intermediate_pool_sizes(
+        article_count
+    )
     cleaned_axis_queries = {
         axis_key.strip(): list(
             dict.fromkeys(
@@ -1132,7 +1624,57 @@ def search_common_corpus_full_text_evidence(
     # One axis does not need a separate pool: the global search already covers it.
     if len(cleaned_axis_queries) < 2:
         cleaned_axis_queries = {}
-    axis_candidate_count = min(max(article_count * 2, 12), 30)
+    trace_stage = "supplemental_full_text_search" if supplemental else "full_text_search"
+    cache_signature: RetrievalCacheSignature | None = None
+    if retrieval_resources is not None:
+        try:
+            cache_signature = _chat_retrieval_cache_signature(
+                scoped_settings,
+                retrieval_resources,
+                operation=trace_stage,
+                query=query,
+                variants=[
+                    *(variant.text for variant in variants),
+                    *(
+                        f"{axis_key}:{axis_query}"
+                        for axis_key, queries in cleaned_axis_queries.items()
+                        for axis_query in queries
+                    ),
+                ],
+                filters_limits={
+                    "article_count": article_count,
+                    "article_ids": list(article_ids or ()),
+                    "max_query_variants": maximum_variant_count,
+                    "max_vector_query_variants": max_vector_query_variants,
+                    "candidate_limit": candidate_limit,
+                    "prefix_matching": prefix_matching,
+                    "include_fallback_variants": include_fallback_variants,
+                    "passage_count": passage_count,
+                    "candidate_chunks_per_article": candidate_chunks_per_article,
+                    "context_radius": context_radius,
+                    "intent": intent.model_dump(mode="json"),
+                },
+            )
+            cached = retrieval_resources.result_cache(scoped_settings).get_typed(
+                cache_signature,
+                list[ChatEvidenceRecord],
+            )
+        except Exception:
+            cache_signature = None
+        else:
+            if cached is not None:
+                if retrieval_trace is not None:
+                    retrieval_trace.add(
+                        trace_stage,
+                        query_variant_count=len(variants),
+                        cache_hit_count=1,
+                        selected_article_count=len(cached),
+                        selected_passage_count=sum(len(record.passages) for record in cached),
+                        **_evidence_level_trace_counts(cached),
+                    )
+                return cached
+            if retrieval_trace is not None:
+                retrieval_trace.add(trace_stage, cache_miss_count=1)
     axis_rankings: dict[str, Sequence[RankedArticle]] = {}
     if local_model_path(scoped_settings).is_dir():
         backend = (
@@ -1150,7 +1692,10 @@ def search_common_corpus_full_text_evidence(
                 VectorSearchService(
                     database,
                     backend,
-                    QdrantLocalIndex(scoped_settings),
+                    QdrantLocalIndex(
+                        scoped_settings,
+                        client_owner=qdrant_client_owner,
+                    ),
                     close_backend=retrieval_resources is None,
                 ),
             ),
@@ -1163,6 +1708,9 @@ def search_common_corpus_full_text_evidence(
                 diversity_mode="none",
                 central_concepts=intent.central_concepts() or None,
                 article_ids=article_ids,
+                max_vector_query_variants=max_vector_query_variants,
+                candidate_limit=candidate_limit,
+                prefix_matching=prefix_matching,
             )
             for axis_key, queries in cleaned_axis_queries.items():
                 axis_query = queries[0]
@@ -1172,6 +1720,9 @@ def search_common_corpus_full_text_evidence(
                     article_count=axis_candidate_count,
                     diversity_mode="none",
                     article_ids=article_ids,
+                    max_vector_query_variants=0,
+                    candidate_limit=candidate_limit,
+                    prefix_matching=prefix_matching,
                 )
                 axis_rankings[axis_key] = axis_ranking.articles
                 if retrieval_trace is not None:
@@ -1182,6 +1733,7 @@ def search_common_corpus_full_text_evidence(
                             else "full_text_axis_search"
                         ),
                         query_variant_count=axis_ranking.query_variant_count,
+                        vector_query_count=axis_ranking.vector_query_count,
                         lexical_candidate_count=axis_ranking.lexical_candidate_count,
                         dense_candidate_count=axis_ranking.dense_candidate_count,
                         rrf_unique_candidate_count=axis_ranking.rrf_unique_candidate_count,
@@ -1200,6 +1752,8 @@ def search_common_corpus_full_text_evidence(
             article_count=candidate_article_count,
             central_concepts=intent.central_concepts() or None,
             article_ids=article_ids,
+            candidate_limit=candidate_limit,
+            prefix_matching=prefix_matching,
         )
         for axis_key, queries in cleaned_axis_queries.items():
             axis_variants = [
@@ -1221,6 +1775,8 @@ def search_common_corpus_full_text_evidence(
                 article_count=axis_candidate_count,
                 central_concepts=None,
                 article_ids=article_ids,
+                candidate_limit=candidate_limit,
+                prefix_matching=prefix_matching,
             )
             axis_rankings[axis_key] = axis_ranking.articles
             if retrieval_trace is not None:
@@ -1231,6 +1787,7 @@ def search_common_corpus_full_text_evidence(
                         else "full_text_axis_search"
                     ),
                     query_variant_count=axis_ranking.query_variant_count,
+                    vector_query_count=axis_ranking.vector_query_count,
                     lexical_candidate_count=axis_ranking.lexical_candidate_count,
                     dense_candidate_count=axis_ranking.dense_candidate_count,
                     rrf_unique_candidate_count=axis_ranking.rrf_unique_candidate_count,
@@ -1241,8 +1798,9 @@ def search_common_corpus_full_text_evidence(
 
     if retrieval_trace is not None:
         retrieval_trace.add(
-            "supplemental_full_text_search" if supplemental else "full_text_search",
+            trace_stage,
             query_variant_count=ranking.query_variant_count,
+            vector_query_count=ranking.vector_query_count,
             lexical_candidate_count=ranking.lexical_candidate_count,
             dense_candidate_count=ranking.dense_candidate_count,
             rrf_unique_candidate_count=ranking.rrf_unique_candidate_count,
@@ -1452,6 +2010,7 @@ def search_common_corpus_full_text_evidence(
             post_rerank_candidate_count=len(selected_articles[:article_count]),
             selected_article_count=len(records),
             selected_passage_count=sum(len(record.passages) for record in records),
+            **_evidence_level_trace_counts(records),
             rejection_counts={
                 "not_selected_after_scientific_ranking": max(
                     0, len(assessed_articles) - len(selected_articles[:article_count])
@@ -1461,6 +2020,12 @@ def search_common_corpus_full_text_evidence(
                 ),
             },
         )
+    if retrieval_resources is not None and cache_signature is not None:
+        with suppress(Exception):
+            retrieval_resources.result_cache(scoped_settings).put(
+                cache_signature,
+                [record.model_dump(mode="json") for record in records],
+            )
     return records
 
 
@@ -1512,8 +2077,8 @@ def merge_chat_evidence(
 ) -> list[ChatEvidenceRecord]:
     """Select causal, facet-covering evidence regardless of storage level."""
 
-    if not 1 <= limit <= 20:
-        raise ValueError("chat evidence limit must be between 1 and 20")
+    if not 1 <= limit <= 48:
+        raise ValueError("chat evidence limit must be between 1 and 48")
     records = [*full_text_records, *abstract_records]
     if query is None:
         chosen: list[ChatEvidenceRecord] = []
@@ -1621,6 +2186,7 @@ def acquire_common_full_text_for_chat(
     candidates: Sequence[BibliographicHybridResult],
     *,
     max_downloads: int = 2,
+    qdrant_client_owner: QdrantLocalIndex | None = None,
 ) -> tuple[list[str], list[str]]:
     """Acquire selected abstract notices and permanently index them in the common corpus."""
 
@@ -1651,6 +2217,7 @@ def acquire_common_full_text_for_chat(
                 database,
                 article_ids=harvest.article_ids,
                 retry_failed=True,
+                qdrant_client_owner=qdrant_client_owner,
             )
         except Exception as exc:
             warnings.append(
@@ -1766,10 +2333,14 @@ def _semantic_filter_and_coverage(
     on_argo_reserved: Callable[[], None] | None,
     on_coverage_started: Callable[[], None] | None = None,
     timings: _ChatTimingCollector | None = None,
+    request_timeout_seconds: float | None = None,
 ) -> tuple[SemanticFilterResult, CoverageAssessmentResult]:
     """Filter evidence by scientific meaning, then assess each planned axis."""
 
-    with ArgoClient(settings) as llm:
+    with _chat_llm_client(
+        settings,
+        request_timeout_seconds or settings.argo.request_timeout_seconds,
+    ) as llm:
         semantic_started = perf_counter()
         semantic_memory = timings.snapshot() if timings is not None else None
         try:
@@ -1829,6 +2400,7 @@ def _run_semantic_filter_and_coverage(
     on_argo_reserved: Callable[[], None] | None,
     on_coverage_started: Callable[[], None] | None,
     timings: _ChatTimingCollector,
+    request_timeout_seconds: float,
 ) -> tuple[SemanticFilterResult, CoverageAssessmentResult]:
     """Supply latency telemetry when supported by an injected semantic adaptor."""
 
@@ -1841,6 +2413,15 @@ def _run_semantic_filter_and_coverage(
         )
         else {}
     )
+    timeout_options = (
+        {"request_timeout_seconds": request_timeout_seconds}
+        if any(
+            parameter.name == "request_timeout_seconds"
+            or parameter.kind is inspect.Parameter.VAR_KEYWORD
+            for parameter in parameters
+        )
+        else {}
+    )
     return _semantic_filter_and_coverage(
         settings,
         question=question,
@@ -1849,6 +2430,7 @@ def _run_semantic_filter_and_coverage(
         on_argo_reserved=on_argo_reserved,
         on_coverage_started=on_coverage_started,
         **timing_options,
+        **timeout_options,
     )
 
 
@@ -1857,6 +2439,7 @@ def _coverage_follow_up_queries(
     coverage: CoverageAssessmentResult,
     *,
     include_all_axes: bool = False,
+    target_axis_keys: set[str] | None = None,
     exclude_queries: Sequence[str] = (),
 ) -> dict[str, list[str]]:
     """Return bounded follow-up queries only for axes not proven covered."""
@@ -1866,7 +2449,14 @@ def _coverage_follow_up_queries(
     follow_up: dict[str, list[str]] = {}
     for axis in axes:
         assessment = coverage_by_key.get(axis.key)
-        if not include_all_axes and assessment is not None and assessment.status == "covered":
+        if target_axis_keys is not None and axis.key not in target_axis_keys:
+            continue
+        if (
+            target_axis_keys is None
+            and not include_all_axes
+            and assessment is not None
+            and assessment.status == "covered"
+        ):
             continue
         generated = [] if assessment is None else assessment.suggested_queries
         queries = list(
@@ -1880,6 +2470,49 @@ def _coverage_follow_up_queries(
         if queries:
             follow_up[axis.key] = queries
     return follow_up
+
+
+def _first_query_per_axis(axes: Sequence[ResearchAxis]) -> dict[str, list[str]]:
+    """Build the cheap first wave: one distinct planned query for every axis."""
+
+    selected: dict[str, list[str]] = {}
+    seen: set[str] = set()
+    for axis in axes:
+        for query in axis.search_queries:
+            cleaned = " ".join(query.split())[:600]
+            normalized = cleaned.casefold()
+            if len(cleaned) < 2 or normalized in seen:
+                continue
+            selected[axis.key] = [cleaned]
+            seen.add(normalized)
+            break
+    return selected
+
+
+def _incomplete_coverage_axis_keys(
+    axes: Sequence[ResearchAxis],
+    coverage: CoverageAssessmentResult | None,
+    semantic_filter: SemanticFilterResult | None,
+    *,
+    minimum_candidates_per_axis: int,
+) -> set[str]:
+    """Identify axes that lack reliable coverage or enough semantic A/B candidates."""
+
+    if (
+        coverage is None
+        or coverage.used_fallback
+        or semantic_filter is None
+        or semantic_filter.used_fallback
+    ):
+        return {axis.key for axis in axes}
+    coverage_by_axis = {assessment.axis_key: assessment for assessment in coverage.axes}
+    return {
+        axis.key
+        for axis in axes
+        if (assessment := coverage_by_axis.get(axis.key)) is None
+        or assessment.status != "covered"
+        or len(set(semantic_filter.eligible_ids_for_axis(axis.key))) < minimum_candidates_per_axis
+    }
 
 
 def _coverage_notes(
@@ -1920,6 +2553,63 @@ def _argo_diagnostic_code(error: ArgoError) -> str:
     return "argo_unavailable"
 
 
+def _argo_diagnostic_codes(error: ArgoError) -> list[str]:
+    if isinstance(error, ArgoScientificValidationError):
+        return [reason.value for reason in error.reasons]
+    return [_argo_diagnostic_code(error)]
+
+
+def _argo_failed_generation_usage(
+    error: ArgoError,
+) -> tuple[int, int, list[ScientificGenerationTrace]]:
+    if not isinstance(error, ArgoScientificValidationError):
+        return 0, 0, []
+    traces = [
+        trace for trace in error.generation_traces if isinstance(trace, ScientificGenerationTrace)
+    ]
+    return error.prompt_tokens, error.completion_tokens, traces
+
+
+def _generation_quality_warnings(question: str, codes: Sequence[str]) -> list[str]:
+    unique = list(dict.fromkeys(code for code in codes if code))
+    if not unique:
+        return []
+    missing_coverage = "missing_required_evidence" in unique
+    if question_language(question) == "fr":
+        if missing_coverage:
+            return [
+                "La réponse affichée est scientifiquement sûre mais partielle : certains passages "
+                "pertinents retrouvés n'ont pas pu être intégrés après les repasses de correction."
+            ]
+        return [
+            "La réponse affichée conserve un avertissement de forme ou de niveau de détail après "
+            "les repasses de correction ; ses affirmations citées restent utilisables."
+        ]
+    if missing_coverage:
+        return [
+            "The displayed answer is scientifically safe but partial: some relevant retrieved "
+            "passages could not be integrated after the correction passes."
+        ]
+    return [
+        "The displayed answer retains a form or detail warning after the correction passes; its "
+        "cited claims remain usable."
+    ]
+
+
+def _query_planning_diagnostic_code(error: ArgoError) -> str:
+    """Expose only the stable validation location, never generated plan content."""
+
+    if not isinstance(error, QueryPlanningProtocolError):
+        return _argo_diagnostic_code(error)
+    diagnostic = error.diagnostic
+    parts = ["argo_protocol", diagnostic.category]
+    if diagnostic.pydantic_path:
+        parts.extend(str(item) for item in diagnostic.pydantic_path)
+    if diagnostic.pydantic_type:
+        parts.append(diagnostic.pydantic_type)
+    return ".".join(parts)[:100]
+
+
 def _fallback_chatbot_result(
     *,
     message: str,
@@ -1940,16 +2630,38 @@ def _fallback_chatbot_result(
     answer_effort: AnswerEffort = AnswerEffort.BALANCED,
     timings: Sequence[ChatbotTiming] = (),
     retrieval_traces: Sequence[ChatbotRetrievalTrace] = (),
+    generation_traces: Sequence[ScientificGenerationTrace] = (),
+    diagnostic_codes: Sequence[str] = (),
 ) -> ChatbotResult:
     """Return the normal answer shape without presenting raw candidates as a synthesis."""
 
-    selected = list(evidence[:5])
+    selected = list(evidence)
     is_french = question_language(message) == "fr"
     abstained = diagnostic_code == "semantic_filter_empty"
-    status: Literal["abstained", "diagnostic_only"] = (
-        "abstained" if abstained else "diagnostic_only"
+    scientific_validation_failed = diagnostic_code in {
+        reason.value for reason in ScientificValidationReason
+    }
+    status: Literal["abstained", "diagnostic_only", "validation_failed"] = (
+        "abstained"
+        if abstained
+        else "validation_failed"
+        if scientific_validation_failed
+        else "diagnostic_only"
     )
     expected_style = detect_response_style(message)
+    context_trace = next(
+        (trace for trace in reversed(retrieval_traces) if trace.stage == "llm_context"),
+        None,
+    )
+    full_text_articles = (
+        context_trace.selected_full_text_article_count if context_trace is not None else 0
+    )
+    full_text_passages = (
+        context_trace.selected_full_text_passage_count if context_trace is not None else 0
+    )
+    abstract_articles = (
+        context_trace.selected_abstract_article_count if context_trace is not None else 0
+    )
     if is_french:
         direct = (
             "Les preuves sélectionnées ne permettent pas d'établir une réponse scientifique "
@@ -1958,7 +2670,11 @@ def _fallback_chatbot_result(
             else "Aucune réponse scientifique validée ne peut être fournie pour cette exécution."
         )
         limitation = (
-            "Aucune affirmation n'est présentée, car elle ne pourrait pas être reliée à une "
+            "Les passages pertinents ont été trouvés, mais la synthèse n'a pas satisfait tous "
+            "les contrôles scientifiques bloquants après les repasses de correction autorisées. "
+            "Les affirmations non validées ne sont pas affichées."
+            if scientific_validation_failed
+            else "Aucune affirmation n'est présentée, car elle ne pourrait pas être reliée à une "
             "preuve validée. Une nouvelle recherche ou une relance peut être nécessaire."
         )
         headings = (
@@ -1969,6 +2685,14 @@ def _fallback_chatbot_result(
         )
         no_effect = "Aucun effet directement documenté ne peut être affirmé."
         no_reference = "Aucune référence n'est citée."
+        retrieved_not_cited = (
+            f"Le contexte de synthèse contenait {full_text_articles} article(s) en texte intégral "
+            f"({full_text_passages} passage(s)) et {abstract_articles} notice(s) sur abstract. "
+            "Ces documents ont été retrouvés, mais ne sont pas présentés comme références citées "
+            "faute de synthèse scientifiquement validée."
+            if context_trace is not None
+            else ""
+        )
     else:
         direct = (
             "The selected evidence does not support a sufficiently grounded scientific answer."
@@ -1976,12 +2700,24 @@ def _fallback_chatbot_result(
             else "No validated scientific answer can be provided for this execution."
         )
         limitation = (
-            "No claim is presented because it could not be linked to validated evidence. "
+            "Relevant passages were found, but the synthesis did not satisfy every completeness, "
+            "writing, and citation check after the allowed correction passes. Unvalidated claims "
+            "are not displayed."
+            if scientific_validation_failed
+            else "No claim is presented because it could not be linked to validated evidence. "
             "A new search or retry may be required."
         )
         headings = ("Summary answer", "Documented effects", "Evidence limitations", "References")
         no_effect = "No directly documented effect can be stated."
         no_reference = "No reference is cited."
+        retrieved_not_cited = (
+            f"The synthesis context contained {full_text_articles} full-text article(s) "
+            f"({full_text_passages} passage(s)) and {abstract_articles} abstract-only record(s). "
+            "These documents were retrieved but are not presented as cited references because no "
+            "scientifically validated synthesis was produced."
+            if context_trace is not None
+            else ""
+        )
     rendered_direct = f"- {direct}" if expected_style is ResponseStyle.BULLET_LIST else direct
     lines = [
         f"## {headings[0]}",
@@ -1995,6 +2731,7 @@ def _fallback_chatbot_result(
         f"## {headings[2]}",
         "",
         limitation,
+        *(["", retrieved_not_cited] if retrieved_not_cited else []),
         "",
         f"## {headings[3]}",
         "",
@@ -2007,14 +2744,7 @@ def _fallback_chatbot_result(
         retrieval_query=retrieval_query,
         answer_markdown="\n".join(lines),
         sources=sources,
-        warnings=[
-            *warnings,
-            (
-                f"Sortie de secours activée ({diagnostic_code})."
-                if is_french
-                else f"Fallback output enabled ({diagnostic_code})."
-            ),
-        ],
+        warnings=[*warnings, limitation],
         model=model,
         local_result_count=sum(record.origin == "local_rag" for record in selected),
         external_result_count=external_result_count,
@@ -2024,6 +2754,7 @@ def _fallback_chatbot_result(
         duration_seconds=perf_counter() - started,
         generation_status=status,
         diagnostic_code=diagnostic_code,
+        diagnostic_codes=list(diagnostic_codes or [diagnostic_code]),
         interaction_mode=interaction_mode,
         reused_previous_sources=reused_previous_sources,
         figure_analysis_requested=figure_analysis_requested,
@@ -2033,6 +2764,7 @@ def _fallback_chatbot_result(
         answer_effort=answer_effort,
         timings=list(timings),
         retrieval_traces=list(retrieval_traces),
+        generation_traces=list(generation_traces),
     )
 
 
@@ -2102,10 +2834,665 @@ def _answer_chatbot(
     timings: _ChatTimingCollector,
     retrieval_traces: _ChatRetrievalTraceCollector,
 ) -> ChatbotResult:
+    """Run the hypothesis-guided, single-wave, SQLite-authoritative chat pipeline."""
+
+    del database  # Corpus helpers resolve the configured common SQLite authority.
+    started = perf_counter()
+    effort_budget = answer_effort_budget(answer_effort)
+    active_experimental_profile = experimental_profile or settings.app.experimental_chat_profile
+    context = conversation_context(history)
+    retrieval_query = contextualize_retrieval_query(message, context)
+    warnings: list[str] = []
+
+    def reserve_llm_request() -> None:
+        if on_argo_reserved is not None:
+            on_argo_reserved()
+
+    def llm_request_timeout_seconds() -> float:
+        return 60.0
+
+    def publish_progress(stage: ChatbotProgressStage) -> None:
+        if on_progress is not None:
+            on_progress(stage)
+
+    def generation_result(
+        evidence: Sequence[ChatEvidenceRecord],
+        *,
+        planning: HypothesisPlanningResult,
+        semantic_prompt_tokens: int,
+        semantic_completion_tokens: int,
+        external_result_count: int,
+        reused_previous_sources: bool,
+        figure_analysis_count: int = 0,
+        figure_analysis_duration: float = 0.0,
+        figure_analysis_model: str | None = None,
+    ) -> ChatbotResult:
+        evidence = list(evidence)
+        publish_progress("generation")
+        generation_started = perf_counter()
+        generation_memory = timings.snapshot()
+        try:
+            with _chat_llm_client(settings, llm_request_timeout_seconds()) as llm:
+                rag = _evidence_rag_service(
+                    llm,
+                    answer_effort,
+                    settings.argo.scientific_correction_temperature,
+                    settings.argo.max_input_characters,
+                )
+                rag.experimental_profile = active_experimental_profile
+                answer = rag.answer(
+                    message,
+                    evidence,
+                    conversation_history=context,
+                    # Compatibility only: no coverage controller populates this field.
+                    coverage_notes=(),
+                    concept_definition=(
+                        planning.plan.concept_definition or planning.plan.interpreted_question
+                    ),
+                    ambiguities=planning.plan.ambiguities,
+                    excluded_concepts=planning.plan.excluded_concepts,
+                    on_argo_reserved=reserve_llm_request,
+                    on_argo_response=on_argo_response,
+                )
+        except ArgoQuotaError:
+            timings.add(
+                "argo_generation",
+                perf_counter() - generation_started,
+                before=generation_memory,
+            )
+            return _fallback_chatbot_result(
+                message=message,
+                retrieval_query=retrieval_query,
+                evidence=evidence,
+                warnings=warnings,
+                diagnostic_code="provider_quota_after_retrieval",
+                started=started,
+                external_result_count=external_result_count,
+                prompt_tokens=planning.prompt_tokens + semantic_prompt_tokens,
+                completion_tokens=planning.completion_tokens + semantic_completion_tokens,
+                interaction_mode=interaction_mode,
+                reused_previous_sources=reused_previous_sources,
+                figure_analysis_requested=analyze_figures,
+                figure_analysis_count=figure_analysis_count,
+                figure_analysis_duration_seconds=figure_analysis_duration,
+                figure_analysis_model=figure_analysis_model,
+                answer_effort=answer_effort,
+                timings=timings.models(),
+                retrieval_traces=retrieval_traces.models(),
+            )
+        except ArgoError as exc:
+            timings.add(
+                "argo_generation",
+                perf_counter() - generation_started,
+                before=generation_memory,
+            )
+            failed_prompt_tokens, failed_completion_tokens, failed_traces = (
+                _argo_failed_generation_usage(exc)
+            )
+            timings.add_tokens(
+                "argo_generation",
+                prompt_tokens=failed_prompt_tokens,
+                completion_tokens=failed_completion_tokens,
+            )
+            return _fallback_chatbot_result(
+                message=message,
+                retrieval_query=retrieval_query,
+                evidence=evidence,
+                warnings=warnings,
+                diagnostic_code=_argo_diagnostic_code(exc),
+                started=started,
+                external_result_count=external_result_count,
+                prompt_tokens=(
+                    planning.prompt_tokens + semantic_prompt_tokens + failed_prompt_tokens
+                ),
+                completion_tokens=(
+                    planning.completion_tokens
+                    + semantic_completion_tokens
+                    + failed_completion_tokens
+                ),
+                interaction_mode=interaction_mode,
+                reused_previous_sources=reused_previous_sources,
+                figure_analysis_requested=analyze_figures,
+                figure_analysis_count=figure_analysis_count,
+                figure_analysis_duration_seconds=figure_analysis_duration,
+                figure_analysis_model=figure_analysis_model,
+                answer_effort=answer_effort,
+                timings=timings.models(),
+                retrieval_traces=retrieval_traces.models(),
+                generation_traces=failed_traces,
+                diagnostic_codes=_argo_diagnostic_codes(exc),
+            )
+        timings.add(
+            "argo_generation",
+            perf_counter() - generation_started,
+            before=generation_memory,
+        )
+        timings.add_tokens(
+            "argo_generation",
+            prompt_tokens=answer.prompt_tokens,
+            completion_tokens=answer.completion_tokens,
+        )
+        sources = chatbot_sources_from_evidence(evidence, answer.cited_evidence_ids)
+        return ChatbotResult(
+            message=" ".join(message.split()),
+            retrieval_query=retrieval_query,
+            answer_markdown=answer.answer_markdown,
+            sources=sources,
+            warnings=[
+                *warnings,
+                *_generation_quality_warnings(
+                    message,
+                    getattr(answer, "validation_warning_codes", []),
+                ),
+            ],
+            model=answer.model,
+            local_result_count=len(evidence),
+            external_result_count=external_result_count,
+            external_enrichment_used=False,
+            prompt_tokens=(planning.prompt_tokens + semantic_prompt_tokens + answer.prompt_tokens),
+            completion_tokens=(
+                planning.completion_tokens + semantic_completion_tokens + answer.completion_tokens
+            ),
+            duration_seconds=perf_counter() - started,
+            interaction_mode=interaction_mode,
+            reused_previous_sources=reused_previous_sources,
+            facet_drafts=[],
+            figure_analysis_requested=analyze_figures,
+            figure_analysis_count=figure_analysis_count,
+            figure_analysis_duration_seconds=figure_analysis_duration,
+            figure_analysis_model=figure_analysis_model,
+            generation_status=getattr(answer, "generation_status", "generated"),
+            diagnostic_codes=getattr(answer, "validation_warning_codes", []),
+            answer_effort=answer_effort,
+            timings=timings.models(),
+            retrieval_traces=retrieval_traces.models(),
+            generation_traces=getattr(answer, "generation_traces", []),
+        )
+
+    # Conversation reuse is allowed only for persisted full-text chunks. Abstract
+    # snippets copied into a previous response are not treated as a second authority.
+    if interaction_mode == "conversation":
+        try:
+            reused_evidence = [
+                record
+                for record in chat_evidence_from_previous_sources(
+                    settings,
+                    query=retrieval_query,
+                    sources=previous_sources,
+                )
+                if record.origin == "local_rag"
+                and record.scope is not None
+                and record.evidence_level == "full_text"
+            ]
+        except Exception as exc:
+            reused_evidence = []
+            warnings.append(
+                "Les passages SQLite de la conversation n'ont pas pu être rechargés "
+                f"({type(exc).__name__}); une nouvelle recherche locale est exécutée."
+            )
+        if reused_evidence:
+            retrieval_traces.add(
+                "llm_context",
+                selected_article_count=len(reused_evidence),
+                selected_passage_count=sum(len(record.passages) for record in reused_evidence),
+                **_evidence_level_trace_counts(reused_evidence),
+            )
+            planning = deterministic_hypothesis_plan(retrieval_query, effort=answer_effort)
+            return generation_result(
+                reused_evidence,
+                planning=planning,
+                semantic_prompt_tokens=0,
+                semantic_completion_tokens=0,
+                external_result_count=0,
+                reused_previous_sources=True,
+            )
+
+    publish_progress("planning")
+    planning_started = perf_counter()
+    planning_memory = timings.snapshot()
+    try:
+        with _chat_llm_client(settings, llm_request_timeout_seconds()) as planning_client:
+            planner = ArgoQueryPlanningService(planning_client)
+            plan_parameters = inspect.signature(planner.plan).parameters.values()
+            supports_kwargs = any(
+                parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in plan_parameters
+            )
+            planning_options: dict[str, Any] = {}
+            if supports_kwargs or any(parameter.name == "effort" for parameter in plan_parameters):
+                planning_options["effort"] = answer_effort
+            elif any(parameter.name == "deep" for parameter in plan_parameters):
+                planning_options["deep"] = answer_effort is AnswerEffort.DEEP
+            if supports_kwargs or any(
+                parameter.name == "conversation_history" for parameter in plan_parameters
+            ):
+                planning_options["conversation_history"] = context
+            if supports_kwargs or any(
+                parameter.name == "on_argo_reserved" for parameter in plan_parameters
+            ):
+                planning_options["on_argo_reserved"] = reserve_llm_request
+            raw_planning = planner.plan(retrieval_query, **planning_options)
+            planning = coerce_hypothesis_planning_result(
+                raw_planning,
+                retrieval_query,
+                effort=answer_effort,
+            )
+    except ArgoQuotaError:
+        raise
+    except ArgoError as exc:
+        planning = deterministic_hypothesis_plan(retrieval_query, effort=answer_effort)
+        warnings.append(
+            "La préparation hypothétique Argo est indisponible "
+            f"({_query_planning_diagnostic_code(exc)}); utilisation du plan local prudent."
+        )
+    except Exception as exc:
+        planning = deterministic_hypothesis_plan(retrieval_query, effort=answer_effort)
+        warnings.append(
+            "La préparation hypothétique de la recherche est indisponible "
+            f"({type(exc).__name__}); utilisation du plan local prudent."
+        )
+    finally:
+        timings.add(
+            "argo_planning",
+            perf_counter() - planning_started,
+            before=planning_memory,
+        )
+    timings.add_tokens(
+        "argo_planning",
+        prompt_tokens=planning.prompt_tokens,
+        completion_tokens=planning.completion_tokens,
+    )
+
+    intent = planning.plan.scientific_intent(
+        retrieval_query,
+        deep=answer_effort is AnswerEffort.DEEP,
+    )
+    maximum_variants = min(
+        effort_budget.max_query_variants,
+        settings_for_corpus(settings, CorpusScope.COMMON).retrieval.hybrid_max_query_variants,
+    )
+    grouped_queries = planning.plan.retrieval_queries(
+        retrieval_query,
+        limit=maximum_variants,
+    )
+    grouped_expansions = grouped_queries[1:]
+    candidate_limit = _initial_retrieval_candidate_limit(settings, effort_budget)
+
+    publish_progress("search")
+    retrieval_failed = False
+    abstract_diagnostics: list[str] = []
+    with (
+        _serialized_chat_retrieval_scope(timing=timings),
+        retrieval_resources.qdrant_wave(settings) as qdrant_client_owner,
+    ):
+        try:
+            local_results = _timed_chat_retrieval_operation(
+                search_common_corpus_abstracts,
+                settings,
+                query=retrieval_query,
+                limit=effort_budget.abstract_result_limit,
+                search_queries=grouped_expansions,
+                intent_override=intent,
+                max_query_variants=maximum_variants,
+                max_vector_query_variants=min(
+                    effort_budget.max_vector_query_variants,
+                    len(grouped_queries),
+                ),
+                candidate_limit=candidate_limit,
+                prefix_matching=False,
+                retrieval_resources=retrieval_resources,
+                retrieval_trace=retrieval_traces,
+                qdrant_client_owner=qdrant_client_owner,
+                diagnostics=abstract_diagnostics,
+                timing=timings,
+                timing_stage="abstract_search",
+            )
+        except Exception as exc:
+            retrieval_failed = True
+            local_results = []
+            code = _abstract_search_failure_code("unhandled", exc)
+            abstract_diagnostics.append(code)
+            retrieval_traces.add("abstract_search", rejection_counts={code: 1})
+            LOGGER.warning(
+                "abstract_search_unhandled error_type=%s",
+                type(exc).__name__,
+            )
+
+        if use_external_sources:
+            publish_progress("enrichment")
+        if use_external_sources and settings.full_text.enabled:
+            acquired_article_ids, acquisition_warnings = _timed_chat_retrieval_operation(
+                acquire_common_full_text_for_chat,
+                settings,
+                local_results,
+                max_downloads=2,
+                qdrant_client_owner=qdrant_client_owner,
+                timing=timings,
+                timing_stage="full_text_acquisition",
+            )
+            warnings.extend(acquisition_warnings)
+            if acquired_article_ids:
+                retrieval_resources.invalidate_corpus_fingerprint()
+
+        try:
+            full_text_records = _timed_chat_retrieval_operation(
+                search_common_corpus_full_text_evidence,
+                settings,
+                query=retrieval_query,
+                article_count=effort_budget.article_count,
+                search_queries=grouped_expansions,
+                axis_queries=None,
+                intent_override=intent,
+                max_query_variants=maximum_variants,
+                max_vector_query_variants=min(
+                    effort_budget.max_vector_query_variants,
+                    len(grouped_queries),
+                ),
+                candidate_limit=candidate_limit,
+                prefix_matching=False,
+                include_fallback_variants=False,
+                passage_count=effort_budget.passages_per_article,
+                candidate_chunks_per_article=effort_budget.candidate_chunks_per_article,
+                context_radius=effort_budget.context_radius,
+                retrieval_resources=retrieval_resources,
+                retrieval_trace=retrieval_traces,
+                qdrant_client_owner=qdrant_client_owner,
+                timing=timings,
+                timing_stage="full_text_search",
+            )
+        except Exception as exc:
+            retrieval_failed = True
+            full_text_records = []
+            warnings.append(
+                "La recherche groupée dans les textes intégraux SQLite est indisponible "
+                f"({type(exc).__name__}); repli sur les abstracts persistés."
+            )
+
+    if abstract_warning := _abstract_route_warning(
+        message,
+        diagnostics=abstract_diagnostics,
+        abstract_result_count=len(local_results),
+        full_text_records=full_text_records,
+    ):
+        warnings.append(abstract_warning)
+
+    external_result_count = 0
+    if use_external_sources:
+        enrichment_started = perf_counter()
+        enrichment_memory = timings.snapshot()
+        try:
+            external_report = discover_bibliographic_records(
+                settings,
+                query=retrieval_query,
+                limit_per_source=4,
+            )
+        except Exception as exc:
+            warnings.append(
+                f"L'enrichissement bibliographique externe est indisponible ({type(exc).__name__})."
+            )
+        else:
+            external_result_count = len(external_report.records)
+            warnings.extend(
+                f"La source {error.source} n'a pas répondu à cette requête."
+                for error in external_report.errors
+            )
+            if external_report.records:
+                warnings.append(
+                    "Les notices externes découvertes ne sont pas utilisées comme preuves avant "
+                    "leur ingestion et leur validation dans SQLite."
+                )
+        finally:
+            timings.add(
+                "external_enrichment",
+                perf_counter() - enrichment_started,
+                before=enrichment_memory,
+            )
+
+    publish_progress("reranking")
+    merge_started = perf_counter()
+    merge_memory = timings.snapshot()
+    local_candidates, _ignored_external_count = merge_chatbot_candidates(
+        local_results,
+        [],
+        limit=effort_budget.abstract_result_limit,
+    )
+    abstract_evidence = abstract_candidates_to_chat_evidence(local_candidates)
+    evidence = merge_chat_evidence(
+        full_text_records,
+        abstract_evidence,
+        query=retrieval_query,
+        limit=effort_budget.evidence_record_limit,
+        intent_override=intent,
+    )
+    # Defense in depth: generated or unpersisted external snippets cannot reach
+    # semantic validation or final synthesis.
+    evidence = [
+        record for record in evidence if record.origin == "local_rag" and record.scope is not None
+    ]
+    timings.add("evidence_merge", perf_counter() - merge_started, before=merge_memory)
+    merge_input_count = len(full_text_records) + len(abstract_evidence)
+    retrieval_traces.add(
+        "evidence_merge",
+        pre_rerank_candidate_count=merge_input_count,
+        post_rerank_candidate_count=len(evidence),
+        selected_article_count=len(evidence),
+        selected_passage_count=sum(len(record.passages) for record in evidence),
+        **_evidence_level_trace_counts(evidence),
+        rejection_counts={
+            "duplicate_unpersisted_or_not_selected": max(
+                0,
+                merge_input_count - len(evidence),
+            )
+        },
+    )
+    if not evidence:
+        return _fallback_chatbot_result(
+            message=message,
+            retrieval_query=retrieval_query,
+            evidence=[],
+            warnings=warnings,
+            diagnostic_code=(
+                "retrieval_unavailable" if retrieval_failed else "retrieval_no_qualified_evidence"
+            ),
+            started=started,
+            external_result_count=external_result_count,
+            prompt_tokens=planning.prompt_tokens,
+            completion_tokens=planning.completion_tokens,
+            figure_analysis_requested=analyze_figures,
+            answer_effort=answer_effort,
+            timings=timings.models(),
+            retrieval_traces=retrieval_traces.models(),
+        )
+
+    retrieved_evidence = evidence
+    semantic_prompt_tokens = 0
+    semantic_completion_tokens = 0
+    semantic_unassessed_count = 0
+    publish_progress("evidence_selection")
+    semantic_started = perf_counter()
+    semantic_memory = timings.snapshot()
+    try:
+        with _chat_llm_client(settings, llm_request_timeout_seconds()) as semantic_client:
+            semantic_filter: GlobalSemanticFilterResult | None = ArgoGlobalSemanticEvidenceFilter(
+                semantic_client
+            ).filter_records(
+                retrieval_query,
+                planning.plan.verification_needs,
+                evidence,
+                on_argo_reserved=reserve_llm_request,
+            )
+    except ArgoQuotaError:
+        semantic_filter = None
+        warnings.append(
+            "Le quota fournisseur a été atteint après la vague locale ; les passages classés "
+            "sont conservés pour la validation stricte finale, sans nouvelle recherche."
+        )
+    except Exception as exc:
+        semantic_filter = None
+        warnings.append(
+            "La validation sémantique globale est indisponible "
+            f"({type(exc).__name__}); conservation prudente des passages SQLite."
+        )
+    finally:
+        timings.add(
+            "argo_semantic_filter",
+            perf_counter() - semantic_started,
+            before=semantic_memory,
+        )
+    if semantic_filter is not None:
+        semantic_prompt_tokens = semantic_filter.prompt_tokens
+        semantic_completion_tokens = semantic_filter.completion_tokens
+        warnings.extend(
+            warning
+            for warning in semantic_filter.warnings
+            if warning.startswith("La validation sémantique globale")
+        )
+        timings.add_tokens(
+            "argo_semantic_filter",
+            prompt_tokens=semantic_prompt_tokens,
+            completion_tokens=semantic_completion_tokens,
+        )
+        semantic_unassessed_count = sum(
+            decision.relevance == "unassessed" for decision in semantic_filter.decisions
+        )
+        evidence = semantic_filter.selected_records(evidence)
+    else:
+        semantic_unassessed_count = len(retrieved_evidence)
+    semantic_trace_input_count = len(retrieved_evidence)
+    retrieval_traces.add(
+        "semantic_filter",
+        pre_rerank_candidate_count=semantic_trace_input_count,
+        post_rerank_candidate_count=len(evidence),
+        selected_article_count=len(evidence),
+        selected_passage_count=sum(len(record.passages) for record in evidence),
+        **_evidence_level_trace_counts(evidence),
+        rejection_counts={
+            "global_semantic_grade_c_or_d": max(
+                0,
+                semantic_trace_input_count - len(evidence),
+            ),
+            **(
+                {"global_semantic_unassessed_retained": semantic_unassessed_count}
+                if semantic_unassessed_count
+                else {}
+            ),
+        },
+    )
+    if not evidence:
+        return _fallback_chatbot_result(
+            message=message,
+            retrieval_query=retrieval_query,
+            evidence=retrieved_evidence,
+            warnings=warnings,
+            diagnostic_code="semantic_filter_empty",
+            started=started,
+            external_result_count=external_result_count,
+            prompt_tokens=planning.prompt_tokens + semantic_prompt_tokens,
+            completion_tokens=planning.completion_tokens + semantic_completion_tokens,
+            figure_analysis_requested=analyze_figures,
+            answer_effort=answer_effort,
+            timings=timings.models(),
+            retrieval_traces=retrieval_traces.models(),
+        )
+
+    # Every semantically relevant record retained by the RAG reaches generation.
+    # The generation service preserves all of their presented evidence identities
+    # and only shortens passage text when required by the provider input contract.
+
+    figure_analysis_count = 0
+    figure_analysis_duration = 0.0
+    figure_analysis_model: str | None = None
+    if analyze_figures:
+        figure_started = perf_counter()
+        figure_memory = timings.snapshot()
+
+        def publish_figure_analysis() -> None:
+            publish_progress("figure_analysis")
+            if on_figure_analysis is not None:
+                on_figure_analysis()
+
+        try:
+            with OllamaFigureAnalysisService(settings) as figure_service:
+                figure_batch = figure_service.analyze(
+                    retrieval_query,
+                    figure_references_from_chat_records(evidence),
+                    on_analysis_started=publish_figure_analysis,
+                )
+        except FigureAnalysisUnavailable as exc:
+            warnings.append(str(exc))
+        except Exception as exc:
+            warnings.append(
+                "L'analyse locale des figures est indisponible "
+                f"({type(exc).__name__}); la réponse reste fondée sur les passages SQLite."
+            )
+        else:
+            warnings.extend(figure_batch.warnings)
+            figure_analysis_count = len(figure_batch.admitted)
+            figure_analysis_duration = figure_batch.duration_seconds
+            figure_analysis_model = figure_batch.model_name
+            if figure_batch.admitted:
+                warnings.append(
+                    "Les observations visuelles ont été analysées et persistées pour revue, "
+                    "mais ne sont pas utilisées dans cette synthèse : seuls les passages "
+                    "originaux SQLite font autorité."
+                )
+        finally:
+            timings.add(
+                "figure_analysis",
+                perf_counter() - figure_started,
+                before=figure_memory,
+            )
+
+    retrieval_traces.add(
+        "llm_context",
+        selected_article_count=len(evidence),
+        selected_passage_count=sum(len(record.passages) for record in evidence),
+        **_evidence_level_trace_counts(evidence),
+    )
+    return generation_result(
+        evidence,
+        planning=planning,
+        semantic_prompt_tokens=semantic_prompt_tokens,
+        semantic_completion_tokens=semantic_completion_tokens,
+        external_result_count=external_result_count,
+        reused_previous_sources=False,
+        figure_analysis_count=figure_analysis_count,
+        figure_analysis_duration=figure_analysis_duration,
+        figure_analysis_model=figure_analysis_model,
+    )
+
+
+def _answer_chatbot_axis_legacy(
+    settings: Settings,
+    database: Database,
+    *,
+    message: str,
+    history: Sequence[Mapping[str, str]],
+    use_external_sources: bool,
+    analyze_figures: bool = False,
+    interaction_mode: str = "research",
+    previous_sources: Sequence[ChatbotSource] = (),
+    on_figure_analysis: Callable[[], None] | None = None,
+    on_argo_reserved: Callable[[], None] | None = None,
+    on_argo_response: Callable[[], None] | None = None,
+    on_progress: ChatbotProgressCallback | None = None,
+    experimental_profile: Literal["p0", "p1", "p2"] | None = None,
+    answer_effort: AnswerEffort = AnswerEffort.BALANCED,
+    retrieval_resources: _ChatRetrievalResources,
+    timings: _ChatTimingCollector,
+    retrieval_traces: _ChatRetrievalTraceCollector,
+) -> ChatbotResult:
     """Answer with local full-text passages, abstract fallback and bounded enrichment."""
 
     started = perf_counter()
     effort_budget = answer_effort_budget(answer_effort)
+
+    def reserve_llm_request() -> None:
+        if on_argo_reserved is not None:
+            on_argo_reserved()
+
+    def llm_request_timeout_seconds() -> float:
+        # Bound each remote call independently without imposing a whole-answer deadline.
+        return 60.0
 
     def publish_progress(stage: ChatbotProgressStage) -> None:
         if on_progress is not None:
@@ -2137,23 +3524,25 @@ def _answer_chatbot(
             "llm_context",
             selected_article_count=len(reused_evidence),
             selected_passage_count=sum(len(record.passages) for record in reused_evidence),
+            **_evidence_level_trace_counts(reused_evidence),
         )
         publish_progress("generation")
         generation_started = perf_counter()
         generation_memory = timings.snapshot()
         try:
-            with ArgoClient(settings) as llm:
+            with _chat_llm_client(settings, llm_request_timeout_seconds()) as llm:
                 rag = _evidence_rag_service(
                     llm,
                     answer_effort,
                     settings.argo.scientific_correction_temperature,
+                    settings.argo.max_input_characters,
                 )
                 rag.experimental_profile = active_experimental_profile
                 answer = rag.answer(
                     message,
                     reused_evidence,
                     conversation_history=context,
-                    on_argo_reserved=on_argo_reserved,
+                    on_argo_reserved=reserve_llm_request,
                     on_argo_response=on_argo_response,
                 )
         except ArgoQuotaError:
@@ -2162,12 +3551,32 @@ def _answer_chatbot(
                 perf_counter() - generation_started,
                 before=generation_memory,
             )
-            raise
+            return _fallback_chatbot_result(
+                message=message,
+                retrieval_query=retrieval_query,
+                evidence=reused_evidence,
+                warnings=warnings,
+                diagnostic_code="provider_quota_after_retrieval",
+                started=started,
+                interaction_mode="conversation",
+                reused_previous_sources=True,
+                answer_effort=answer_effort,
+                timings=timings.models(),
+                retrieval_traces=retrieval_traces.models(),
+            )
         except ArgoError as exc:
             timings.add(
                 "argo_generation",
                 perf_counter() - generation_started,
                 before=generation_memory,
+            )
+            failed_prompt_tokens, failed_completion_tokens, failed_traces = (
+                _argo_failed_generation_usage(exc)
+            )
+            timings.add_tokens(
+                "argo_generation",
+                prompt_tokens=failed_prompt_tokens,
+                completion_tokens=failed_completion_tokens,
             )
             return _fallback_chatbot_result(
                 message=message,
@@ -2182,9 +3591,13 @@ def _answer_chatbot(
                 interaction_mode="conversation",
                 reused_previous_sources=True,
                 figure_analysis_requested=analyze_figures,
+                prompt_tokens=failed_prompt_tokens,
+                completion_tokens=failed_completion_tokens,
                 answer_effort=answer_effort,
                 timings=timings.models(),
                 retrieval_traces=retrieval_traces.models(),
+                generation_traces=failed_traces,
+                diagnostic_codes=_argo_diagnostic_codes(exc),
             )
         timings.add(
             "argo_generation",
@@ -2205,7 +3618,10 @@ def _answer_chatbot(
             retrieval_query=retrieval_query,
             answer_markdown=answer.answer_markdown,
             sources=sources,
-            warnings=[],
+            warnings=_generation_quality_warnings(
+                message,
+                getattr(answer, "validation_warning_codes", []),
+            ),
             model=answer.model,
             local_result_count=sum(record.origin == "local_rag" for record in reused_evidence),
             external_result_count=sum(
@@ -2219,6 +3635,7 @@ def _answer_chatbot(
             reused_previous_sources=True,
             figure_analysis_requested=analyze_figures,
             generation_status=getattr(answer, "generation_status", "generated"),
+            diagnostic_codes=getattr(answer, "validation_warning_codes", []),
             answer_effort=answer_effort,
             timings=timings.models(),
             retrieval_traces=retrieval_traces.models(),
@@ -2228,22 +3645,30 @@ def _answer_chatbot(
     planning_started = perf_counter()
     planning_memory = timings.snapshot()
     try:
-        with ArgoClient(settings) as planning_client:
-            planning = ArgoQueryPlanningService(planning_client).plan(
+        with _chat_llm_client(settings, llm_request_timeout_seconds()) as planning_client:
+            planning = LegacyArgoQueryPlanningService(planning_client).plan(
                 retrieval_query,
+                deep=answer_effort is AnswerEffort.DEEP,
                 conversation_history=context,
-                on_argo_reserved=on_argo_reserved,
+                on_argo_reserved=reserve_llm_request,
             )
     except ArgoQuotaError:
         raise
     except ArgoError as exc:
-        planning = deterministic_query_plan(retrieval_query)
+        planning = deterministic_query_plan(
+            retrieval_query,
+            deep=answer_effort is AnswerEffort.DEEP,
+        )
         warnings.append(
-            "La planification ARGO est indisponible "
-            f"({_argo_diagnostic_code(exc)}); utilisation du planificateur local de secours."
+            "La planification LLM est indisponible "
+            f"({_query_planning_diagnostic_code(exc)}); utilisation du planificateur local "
+            "de secours."
         )
     except Exception as exc:
-        planning = deterministic_query_plan(retrieval_query)
+        planning = deterministic_query_plan(
+            retrieval_query,
+            deep=answer_effort is AnswerEffort.DEEP,
+        )
         warnings.append(
             "La compréhension adaptative de la requête est indisponible "
             f"({type(exc).__name__}); utilisation du planificateur local de secours."
@@ -2259,70 +3684,117 @@ def _answer_chatbot(
         prompt_tokens=planning.prompt_tokens,
         completion_tokens=planning.completion_tokens,
     )
-    intent = planning.plan.scientific_intent(retrieval_query)
-    search_queries = planning.plan.retrieval_queries
+    intent = planning.plan.scientific_intent(
+        retrieval_query,
+        deep=answer_effort is AnswerEffort.DEEP,
+    )
+    planned_search_queries = planning.plan.retrieval_queries
+    adaptive_retrieval = effort_budget.follow_up_incomplete_axes
+    initial_axis_queries = _first_query_per_axis(planning.plan.axes)
+    if adaptive_retrieval:
+        search_queries = list(
+            dict.fromkeys(query for queries in initial_axis_queries.values() for query in queries)
+        )
+        full_text_search_queries: Sequence[str] = ()
+        full_text_axis_queries: Mapping[str, Sequence[str]] = initial_axis_queries
+        initial_candidate_limit = _initial_retrieval_candidate_limit(settings, effort_budget)
+        initial_prefix_matching: bool | None = False
+    else:
+        search_queries = planned_search_queries
+        full_text_search_queries = search_queries
+        full_text_axis_queries = {axis.key: axis.search_queries for axis in planning.plan.axes}
+        initial_candidate_limit = None
+        initial_prefix_matching = None
 
     publish_progress("search")
     retrieval_failed = False
-    try:
-        local_results = _serialized_chat_retrieval(
-            search_common_corpus_abstracts,
-            settings,
-            query=retrieval_query,
-            limit=effort_budget.abstract_result_limit,
-            search_queries=search_queries,
-            intent_override=intent,
-            max_query_variants=effort_budget.max_query_variants,
-            retrieval_resources=retrieval_resources,
-            retrieval_trace=retrieval_traces,
-            timing=timings,
-            timing_stage="abstract_search",
-        )
-    except Exception as exc:
-        retrieval_failed = True
-        local_results = []
-        warnings.append(
-            "La recherche dans les abstracts du corpus commun est indisponible "
-            f"({type(exc).__name__})."
-        )
-    if use_external_sources:
-        publish_progress("enrichment")
-    if use_external_sources and settings.full_text.enabled:
-        _acquired_article_ids, acquisition_warnings = _serialized_chat_retrieval(
-            acquire_common_full_text_for_chat,
-            settings,
-            local_results,
-            max_downloads=2,
-            timing=timings,
-            timing_stage="full_text_acquisition",
-        )
-        warnings.extend(acquisition_warnings)
+    abstract_diagnostics: list[str] = []
+    # Keep the initial abstract/full-text wave coherent under one lock.  This avoids
+    # rejoining the local-model queue between two stages of the same user request.
+    with (
+        _serialized_chat_retrieval_scope(timing=timings),
+        retrieval_resources.qdrant_wave(settings) as qdrant_client_owner,
+    ):
+        try:
+            local_results = _timed_chat_retrieval_operation(
+                search_common_corpus_abstracts,
+                settings,
+                query=retrieval_query,
+                limit=effort_budget.abstract_result_limit,
+                search_queries=search_queries,
+                intent_override=intent,
+                max_query_variants=effort_budget.max_query_variants,
+                max_vector_query_variants=effort_budget.max_vector_query_variants,
+                candidate_limit=initial_candidate_limit,
+                prefix_matching=initial_prefix_matching,
+                retrieval_resources=retrieval_resources,
+                retrieval_trace=retrieval_traces,
+                qdrant_client_owner=qdrant_client_owner,
+                diagnostics=abstract_diagnostics,
+                timing=timings,
+                timing_stage="abstract_search",
+            )
+        except Exception as exc:
+            retrieval_failed = True
+            local_results = []
+            code = _abstract_search_failure_code("unhandled", exc)
+            abstract_diagnostics.append(code)
+            retrieval_traces.add("abstract_search", rejection_counts={code: 1})
+            LOGGER.warning("abstract_search_unhandled error_type=%s", type(exc).__name__)
+        if use_external_sources:
+            publish_progress("enrichment")
+        if use_external_sources and settings.full_text.enabled:
+            acquired_article_ids, acquisition_warnings = _timed_chat_retrieval_operation(
+                acquire_common_full_text_for_chat,
+                settings,
+                local_results,
+                max_downloads=2,
+                qdrant_client_owner=qdrant_client_owner,
+                timing=timings,
+                timing_stage="full_text_acquisition",
+            )
+            warnings.extend(acquisition_warnings)
+            if acquired_article_ids:
+                retrieval_resources.invalidate_corpus_fingerprint()
 
-    try:
-        full_text_records = _serialized_chat_retrieval(
-            search_common_corpus_full_text_evidence,
-            settings,
-            query=retrieval_query,
-            article_count=effort_budget.article_count,
-            search_queries=search_queries,
-            axis_queries={axis.key: axis.search_queries for axis in planning.plan.axes},
-            intent_override=intent,
-            max_query_variants=effort_budget.max_query_variants,
-            passage_count=effort_budget.passages_per_article,
-            candidate_chunks_per_article=effort_budget.candidate_chunks_per_article,
-            context_radius=effort_budget.context_radius,
-            retrieval_resources=retrieval_resources,
-            retrieval_trace=retrieval_traces,
-            timing=timings,
-            timing_stage="full_text_search",
-        )
-    except Exception as exc:
-        retrieval_failed = True
-        full_text_records = []
-        warnings.append(
-            "La recherche dans les textes intégraux est indisponible pour cette réponse "
-            f"({type(exc).__name__}); repli sur les abstracts."
-        )
+        try:
+            full_text_records = _timed_chat_retrieval_operation(
+                search_common_corpus_full_text_evidence,
+                settings,
+                query=retrieval_query,
+                article_count=effort_budget.article_count,
+                search_queries=full_text_search_queries,
+                axis_queries=full_text_axis_queries,
+                intent_override=intent,
+                max_query_variants=effort_budget.max_query_variants,
+                max_vector_query_variants=effort_budget.max_vector_query_variants,
+                candidate_limit=initial_candidate_limit,
+                prefix_matching=initial_prefix_matching,
+                include_fallback_variants=not adaptive_retrieval,
+                passage_count=effort_budget.passages_per_article,
+                candidate_chunks_per_article=effort_budget.candidate_chunks_per_article,
+                context_radius=effort_budget.context_radius,
+                retrieval_resources=retrieval_resources,
+                retrieval_trace=retrieval_traces,
+                qdrant_client_owner=qdrant_client_owner,
+                timing=timings,
+                timing_stage="full_text_search",
+            )
+        except Exception as exc:
+            retrieval_failed = True
+            full_text_records = []
+            warnings.append(
+                "La recherche dans les textes intégraux est indisponible pour cette réponse "
+                f"({type(exc).__name__}); repli sur les abstracts."
+            )
+
+    if abstract_warning := _abstract_route_warning(
+        message,
+        diagnostics=abstract_diagnostics,
+        abstract_result_count=len(local_results),
+        full_text_records=full_text_records,
+    ):
+        warnings.append(abstract_warning)
 
     external_report: BibliographicSearchReport | None = None
     if use_external_sources:
@@ -2353,7 +3825,7 @@ def _answer_chatbot(
     candidates, external_count = merge_chatbot_candidates(
         local_results,
         external_records,
-        limit=16,
+        limit=effort_budget.abstract_result_limit,
     )
     abstract_evidence = abstract_candidates_to_chat_evidence(candidates)
     evidence = merge_chat_evidence(
@@ -2371,6 +3843,7 @@ def _answer_chatbot(
         post_rerank_candidate_count=len(evidence),
         selected_article_count=len(evidence),
         selected_passage_count=sum(len(record.passages) for record in evidence),
+        **_evidence_level_trace_counts(evidence),
         rejection_counts={"duplicate_or_not_selected": max(0, merge_input_count - len(evidence))},
     )
     if not evidence:
@@ -2397,6 +3870,7 @@ def _answer_chatbot(
             for error in external_report.errors
         )
 
+    retrieved_evidence = evidence
     semantic_prompt_tokens = 0
     semantic_completion_tokens = 0
     coverage_prompt_tokens = 0
@@ -2410,12 +3884,16 @@ def _answer_chatbot(
             question=retrieval_query,
             axes=planning.plan.axes,
             evidence=evidence,
-            on_argo_reserved=on_argo_reserved,
+            on_argo_reserved=reserve_llm_request,
             on_coverage_started=lambda: publish_progress("coverage"),
             timings=timings,
+            request_timeout_seconds=llm_request_timeout_seconds(),
         )
     except ArgoQuotaError:
-        raise
+        warnings.append(
+            "Le quota fournisseur a été atteint après la recherche ; la sélection locale "
+            "est conservée sans recommencer le pipeline."
+        )
     except Exception as exc:
         warnings.append(
             "Le contrôle sémantique des preuves est indisponible "
@@ -2436,8 +3914,6 @@ def _answer_chatbot(
                 "La couverture documentaire n'a pas pu être vérifiée par l'API ; "
                 "la synthèse conserve le classement scientifique local."
             )
-
-    retrieved_evidence = evidence
     semantic_trace_input_count = len(evidence)
     filtered_evidence = (
         evidence if semantic_filter is None else semantic_filter.selected_records(evidence)
@@ -2462,11 +3938,21 @@ def _answer_chatbot(
         # return a precise, topic-aware abstention instead of fabricating an answer.
         if locally_eligible:
             filtered_evidence = locally_eligible
+    minimum_candidates_per_axis = 2 if answer_effort is AnswerEffort.DEEP else 1
+    incomplete_coverage_axis_keys = _incomplete_coverage_axis_keys(
+        planning.plan.axes,
+        coverage,
+        semantic_filter,
+        minimum_candidates_per_axis=minimum_candidates_per_axis,
+    )
+    adaptive_coverage_sufficient = not incomplete_coverage_axis_keys
     needs_follow_up = (
-        semantic_filter is not None
+        effort_budget.max_retrieval_waves > 1
+        and semantic_filter is not None
         and coverage is not None
         and (
             not filtered_evidence
+            or (adaptive_retrieval and not adaptive_coverage_sufficient)
             or (
                 effort_budget.follow_up_incomplete_axes
                 and not coverage.used_fallback
@@ -2475,62 +3961,90 @@ def _answer_chatbot(
         )
     )
     if needs_follow_up:
+        include_all_follow_up_axes = not filtered_evidence or coverage.used_fallback
         follow_up_by_axis = _coverage_follow_up_queries(
             planning.plan.axes,
             coverage,
-            include_all_axes=not filtered_evidence,
+            include_all_axes=include_all_follow_up_axes,
+            target_axis_keys=(
+                None if include_all_follow_up_axes else incomplete_coverage_axis_keys
+            ),
             exclude_queries=[retrieval_query, *search_queries],
         )
         follow_up_queries = list(
             dict.fromkeys(query for queries in follow_up_by_axis.values() for query in queries)
         )[: effort_budget.follow_up_query_limit]
         if follow_up_queries:
-            try:
-                supplemental_abstracts = _serialized_chat_retrieval(
-                    search_common_corpus_abstracts,
-                    settings,
-                    query=follow_up_queries[0],
-                    limit=effort_budget.abstract_result_limit,
-                    search_queries=follow_up_queries,
-                    intent_override=intent,
-                    max_query_variants=effort_budget.max_query_variants,
-                    retrieval_resources=retrieval_resources,
-                    retrieval_trace=retrieval_traces,
-                    supplemental=True,
-                    timing=timings,
-                    timing_stage="supplemental_abstract_search",
-                )
-            except Exception as exc:
-                supplemental_abstracts = []
-                warnings.append(
-                    "La recherche complémentaire dans les abstracts est indisponible "
-                    f"({type(exc).__name__}); conservation de la première sélection."
-                )
-            try:
-                supplemental_full_text = _serialized_chat_retrieval(
-                    search_common_corpus_full_text_evidence,
-                    settings,
-                    query=follow_up_queries[0],
-                    article_count=effort_budget.article_count,
-                    search_queries=follow_up_queries,
-                    axis_queries=follow_up_by_axis,
-                    intent_override=intent,
-                    max_query_variants=effort_budget.max_query_variants,
-                    passage_count=effort_budget.passages_per_article,
-                    candidate_chunks_per_article=(effort_budget.candidate_chunks_per_article),
-                    context_radius=effort_budget.context_radius,
-                    retrieval_resources=retrieval_resources,
-                    retrieval_trace=retrieval_traces,
-                    supplemental=True,
-                    timing=timings,
-                    timing_stage="supplemental_full_text_search",
-                )
-            except Exception as exc:
-                supplemental_full_text = []
-                warnings.append(
-                    "La recherche complémentaire dans les textes intégraux est indisponible "
-                    f"({type(exc).__name__}); les abstracts complémentaires sont conservés."
-                )
+            supplemental_abstract_diagnostics: list[str] = []
+            with (
+                _serialized_chat_retrieval_scope(timing=timings),
+                retrieval_resources.qdrant_wave(settings) as qdrant_client_owner,
+            ):
+                try:
+                    supplemental_abstracts = _timed_chat_retrieval_operation(
+                        search_common_corpus_abstracts,
+                        settings,
+                        query=follow_up_queries[0],
+                        limit=effort_budget.abstract_result_limit,
+                        search_queries=follow_up_queries,
+                        intent_override=intent,
+                        max_query_variants=effort_budget.max_query_variants,
+                        max_vector_query_variants=effort_budget.max_vector_query_variants,
+                        retrieval_resources=retrieval_resources,
+                        retrieval_trace=retrieval_traces,
+                        qdrant_client_owner=qdrant_client_owner,
+                        supplemental=True,
+                        diagnostics=supplemental_abstract_diagnostics,
+                        timing=timings,
+                        timing_stage="supplemental_abstract_search",
+                    )
+                except Exception as exc:
+                    supplemental_abstracts = []
+                    code = _abstract_search_failure_code("supplemental_unhandled", exc)
+                    supplemental_abstract_diagnostics.append(code)
+                    retrieval_traces.add(
+                        "supplemental_abstract_search",
+                        rejection_counts={code: 1},
+                    )
+                    LOGGER.warning(
+                        "supplemental_abstract_search_unhandled error_type=%s",
+                        type(exc).__name__,
+                    )
+                try:
+                    supplemental_full_text = _timed_chat_retrieval_operation(
+                        search_common_corpus_full_text_evidence,
+                        settings,
+                        query=follow_up_queries[0],
+                        article_count=effort_budget.article_count,
+                        search_queries=follow_up_queries,
+                        axis_queries=follow_up_by_axis,
+                        intent_override=intent,
+                        max_query_variants=effort_budget.max_query_variants,
+                        max_vector_query_variants=effort_budget.max_vector_query_variants,
+                        passage_count=effort_budget.passages_per_article,
+                        candidate_chunks_per_article=(effort_budget.candidate_chunks_per_article),
+                        context_radius=effort_budget.context_radius,
+                        retrieval_resources=retrieval_resources,
+                        retrieval_trace=retrieval_traces,
+                        qdrant_client_owner=qdrant_client_owner,
+                        supplemental=True,
+                        timing=timings,
+                        timing_stage="supplemental_full_text_search",
+                    )
+                except Exception as exc:
+                    supplemental_full_text = []
+                    warnings.append(
+                        "La recherche complémentaire dans les textes intégraux est indisponible "
+                        f"({type(exc).__name__}); les abstracts complémentaires sont conservés."
+                    )
+            if supplemental_warning := _abstract_route_warning(
+                message,
+                diagnostics=supplemental_abstract_diagnostics,
+                abstract_result_count=len(supplemental_abstracts),
+                full_text_records=supplemental_full_text,
+                supplemental=True,
+            ):
+                warnings.append(supplemental_warning)
             expanded_evidence = merge_chat_evidence(
                 [
                     *(record for record in evidence if record.evidence_level == "full_text"),
@@ -2556,6 +4070,7 @@ def _answer_chatbot(
                 post_rerank_candidate_count=len(expanded_evidence),
                 selected_article_count=len(expanded_evidence),
                 selected_passage_count=sum(len(record.passages) for record in expanded_evidence),
+                **_evidence_level_trace_counts(expanded_evidence),
                 rejection_counts={
                     "duplicate_or_not_selected": max(
                         0, expanded_input_count - len(expanded_evidence)
@@ -2574,12 +4089,16 @@ def _answer_chatbot(
                         question=retrieval_query,
                         axes=planning.plan.axes,
                         evidence=expanded_evidence,
-                        on_argo_reserved=on_argo_reserved,
+                        on_argo_reserved=reserve_llm_request,
                         on_coverage_started=lambda: publish_progress("coverage"),
                         timings=timings,
+                        request_timeout_seconds=llm_request_timeout_seconds(),
                     )
                 except ArgoQuotaError:
-                    raise
+                    warnings.append(
+                        "Le quota fournisseur a interrompu le contrôle complémentaire ; "
+                        "la première sélection validée est conservée sans reprise du pipeline."
+                    )
                 except Exception as exc:
                     warnings.append(
                         "Le second contrôle sémantique est indisponible "
@@ -2621,6 +4140,7 @@ def _answer_chatbot(
         post_rerank_candidate_count=len(evidence),
         selected_article_count=len(evidence),
         selected_passage_count=sum(len(record.passages) for record in evidence),
+        **_evidence_level_trace_counts(evidence),
         rejection_counts={
             "semantic_or_scientific_grade_rejected": max(
                 0, semantic_trace_input_count - len(evidence)
@@ -2702,17 +4222,19 @@ def _answer_chatbot(
         "llm_context",
         selected_article_count=len(evidence),
         selected_passage_count=sum(len(record.passages) for record in evidence),
+        **_evidence_level_trace_counts(evidence),
     )
 
     publish_progress("generation")
     generation_started = perf_counter()
     generation_memory = timings.snapshot()
     try:
-        with ArgoClient(settings) as llm:
+        with _chat_llm_client(settings, llm_request_timeout_seconds()) as llm:
             rag = _evidence_rag_service(
                 llm,
                 answer_effort,
                 settings.argo.scientific_correction_temperature,
+                settings.argo.max_input_characters,
             )
             rag.experimental_profile = active_experimental_profile
             if planning.plan.requires_faceted_answer:
@@ -2722,12 +4244,25 @@ def _answer_chatbot(
                     facets=intent.facets,
                     conversation_history=context,
                     coverage_notes=coverage_notes,
+                    axis_coverage=(
+                        coverage.axes if coverage is not None and not coverage.used_fallback else ()
+                    ),
+                    axis_candidate_ids=(
+                        {
+                            assessment.axis_key: semantic_filter.eligible_ids_for_axis(
+                                assessment.axis_key
+                            )
+                            for assessment in semantic_filter.axes
+                        }
+                        if semantic_filter is not None
+                        else None
+                    ),
                     concept_definition=(
                         planning.plan.concept_definition or planning.plan.interpreted_question
                     ),
                     ambiguities=planning.plan.ambiguities,
                     excluded_concepts=planning.plan.excluded_concepts,
-                    on_argo_reserved=on_argo_reserved,
+                    on_argo_reserved=reserve_llm_request,
                     on_argo_response=on_argo_response,
                 )
             else:
@@ -2741,17 +4276,10 @@ def _answer_chatbot(
                     ),
                     ambiguities=planning.plan.ambiguities,
                     excluded_concepts=planning.plan.excluded_concepts,
-                    on_argo_reserved=on_argo_reserved,
+                    on_argo_reserved=reserve_llm_request,
                     on_argo_response=on_argo_response,
                 )
     except ArgoQuotaError:
-        timings.add(
-            "argo_generation",
-            perf_counter() - generation_started,
-            before=generation_memory,
-        )
-        raise
-    except ArgoError as exc:
         timings.add(
             "argo_generation",
             perf_counter() - generation_started,
@@ -2762,7 +4290,7 @@ def _answer_chatbot(
             retrieval_query=retrieval_query,
             evidence=evidence,
             warnings=warnings,
-            diagnostic_code=_argo_diagnostic_code(exc),
+            diagnostic_code="provider_quota_after_retrieval",
             started=started,
             external_result_count=external_count,
             prompt_tokens=(
@@ -2771,6 +4299,44 @@ def _answer_chatbot(
             completion_tokens=(
                 planning.completion_tokens + semantic_completion_tokens + coverage_completion_tokens
             ),
+            answer_effort=answer_effort,
+            timings=timings.models(),
+            retrieval_traces=retrieval_traces.models(),
+        )
+    except ArgoError as exc:
+        timings.add(
+            "argo_generation",
+            perf_counter() - generation_started,
+            before=generation_memory,
+        )
+        failed_prompt_tokens, failed_completion_tokens, failed_traces = (
+            _argo_failed_generation_usage(exc)
+        )
+        timings.add_tokens(
+            "argo_generation",
+            prompt_tokens=failed_prompt_tokens,
+            completion_tokens=failed_completion_tokens,
+        )
+        return _fallback_chatbot_result(
+            message=message,
+            retrieval_query=retrieval_query,
+            evidence=evidence,
+            warnings=warnings,
+            diagnostic_code=_argo_diagnostic_code(exc),
+            started=started,
+            external_result_count=external_count,
+            prompt_tokens=(
+                planning.prompt_tokens
+                + semantic_prompt_tokens
+                + coverage_prompt_tokens
+                + failed_prompt_tokens
+            ),
+            completion_tokens=(
+                planning.completion_tokens
+                + semantic_completion_tokens
+                + coverage_completion_tokens
+                + failed_completion_tokens
+            ),
             figure_analysis_requested=analyze_figures,
             figure_analysis_count=figure_analysis_count,
             figure_analysis_duration_seconds=figure_analysis_duration,
@@ -2778,6 +4344,8 @@ def _answer_chatbot(
             answer_effort=answer_effort,
             timings=timings.models(),
             retrieval_traces=retrieval_traces.models(),
+            generation_traces=failed_traces,
+            diagnostic_codes=_argo_diagnostic_codes(exc),
         )
     timings.add(
         "argo_generation",
@@ -2795,7 +4363,13 @@ def _answer_chatbot(
         retrieval_query=retrieval_query,
         answer_markdown=answer.answer_markdown,
         sources=sources,
-        warnings=warnings,
+        warnings=[
+            *warnings,
+            *_generation_quality_warnings(
+                message,
+                getattr(answer, "validation_warning_codes", []),
+            ),
+        ],
         model=answer.model,
         local_result_count=sum(record.origin == "local_rag" for record in evidence),
         external_result_count=external_count,
@@ -2821,6 +4395,7 @@ def _answer_chatbot(
         figure_analysis_duration_seconds=figure_analysis_duration,
         figure_analysis_model=figure_analysis_model,
         generation_status=getattr(answer, "generation_status", "generated"),
+        diagnostic_codes=getattr(answer, "validation_warning_codes", []),
         answer_effort=answer_effort,
         timings=timings.models(),
         retrieval_traces=retrieval_traces.models(),
@@ -2847,7 +4422,7 @@ def extract_ranked_evidence(
         original_query=question.strip(),
         expanded_queries=variants or [],
         selected_article_ids=article_ids,
-        model_version=settings.argo.model,
+        model_version=active_llm_model(settings),
     )
     selector = EvidencePassageSelector(settings, database)
     completed: list[str] = []

@@ -105,6 +105,13 @@ def test_query_builder_supports_all_phrase_and_prefix_modes(settings) -> None:
     assert builder.build("the and de la").fts5_expression == ""
 
 
+def test_query_builder_can_disable_prefix_matching_for_a_first_retrieval_wave(settings) -> None:
+    builder = LexicalQueryBuilder(settings)
+
+    assert builder.build("temperature").fts5_expression == '"temperature"*'
+    assert builder.build("temperature", prefix_matching=False).fts5_expression == '"temperature"'
+
+
 def test_search_is_accent_insensitive_and_page_traceable(settings) -> None:
     response = _service(settings).search(
         "Comment les polyphenols évoluent-ils pendant le stockage ?", limit=10
@@ -152,3 +159,70 @@ def test_meaningless_or_empty_question_returns_no_match(settings) -> None:
         service.search("temperature", limit=0)
     with pytest.raises(ValueError, match="character limit"):
         service.search("x" * 2001)
+
+
+def test_read_session_reuses_bounded_readonly_connection_and_preserves_results(settings) -> None:
+    service = _service(settings)
+    expected = service.search("température").results
+
+    session = service.read_session()
+    with session:
+        actual = session.search("température").results
+        connection = session._session.connection  # noqa: SLF001 - verifies SQLite session contract.
+        assert connection.execute("PRAGMA query_only").fetchone()[0] == 1
+        assert connection.execute("PRAGMA temp_store").fetchone()[0] == 2
+        assert connection.execute("PRAGMA cache_size").fetchone()[0] == -(16 * 1024)
+
+    assert actual == expected
+    with pytest.raises(RuntimeError, match="not active"):
+        session.search("température")
+
+
+def test_read_session_skips_empty_caption_match_then_detects_new_caption(settings) -> None:
+    service = _service(settings)
+    database = service.database
+    statements: list[str] = []
+
+    with service.read_session() as session:
+        connection = session._session.connection  # noqa: SLF001 - trace only the session connection.
+        connection.set_trace_callback(statements.append)
+        assert session.search("caption-inexistante").results == []
+        assert not any(
+            "document_element_captions_fts MATCH" in statement for statement in statements
+        )
+
+        with database.transaction() as writer:
+            chunk_id = writer.execute(
+                "SELECT id FROM chunks WHERE article_id = ? LIMIT 1", ("polyphenol-article",)
+            ).fetchone()[0]
+            writer.execute(
+                """
+                INSERT INTO document_elements (
+                    id, article_id, local_element_id, kind, page_number, bbox_json,
+                    source_kind, synthetic_caption
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "caption-element",
+                    "polyphenol-article",
+                    "figure-1",
+                    "figure",
+                    3,
+                    "[0, 0, 1, 1]",
+                    "pdf_embedded",
+                    "marqueur-caption-unique",
+                ),
+            )
+            writer.execute(
+                """
+                INSERT INTO document_element_relations (
+                    element_id, relation, page_number, related_chunk_id, source_excerpt,
+                    source_excerpt_sha256
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                ("caption-element", "nearest_page_text", 3, chunk_id, "source", "a" * 64),
+            )
+
+        result = session.search("marqueur-caption-unique").results
+
+    assert [item.article_id for item in result] == ["polyphenol-article"]

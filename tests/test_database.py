@@ -51,6 +51,7 @@ def test_schema_creates_required_tables_and_fts(settings) -> None:
         "bibliographic_harvest_runs",
         "bibliographic_harvest_hits",
         "rejected_bibliographic_archive",
+        "rejected_bibliographic_record_sources",
         "chat_conversations",
         "chat_messages",
         "argo_request_events",
@@ -71,6 +72,9 @@ def test_schema_creates_required_tables_and_fts(settings) -> None:
             row[1] for row in connection.execute("PRAGMA table_info(bibliographic_records)")
         }
         article_columns = {row[1] for row in connection.execute("PRAGMA table_info(articles)")}
+        source_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(bibliographic_record_sources)")
+        }
         assert {
             "manual_decision",
             "manual_reviewed_at",
@@ -78,6 +82,7 @@ def test_schema_creates_required_tables_and_fts(settings) -> None:
             "publisher",
         } <= bibliographic_columns
         assert {"work_type", "publisher"} <= article_columns
+        assert "source_title" in source_columns
         unique_indexes = {
             row[0]
             for row in connection.execute(
@@ -104,6 +109,12 @@ def test_schema_repairs_partial_version_30_type_columns() -> None:
                 work_type TEXT,
                 publisher TEXT
             );
+            CREATE TABLE bibliographic_record_sources (
+                record_id TEXT NOT NULL,
+                source TEXT NOT NULL,
+                source_id TEXT NOT NULL,
+                PRIMARY KEY(record_id, source, source_id)
+            );
             CREATE TABLE articles (id TEXT PRIMARY KEY);
             """
         )
@@ -118,7 +129,7 @@ def test_schema_repairs_partial_version_30_type_columns() -> None:
 
     assert {"work_type", "publisher"} <= article_columns
     assert {"work_type", "publisher"} <= bibliographic_columns
-    assert version == 31
+    assert version == 33
 
 
 def test_argo_request_events_store_only_quota_metadata(settings) -> None:

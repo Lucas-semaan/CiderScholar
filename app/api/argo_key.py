@@ -53,6 +53,13 @@ def test_argo_key_connection(
     key = ArgoKeyStore(settings).load()
     if key is None:
         return argo_connection_status(key_configured=False, health=None)
-    with ArgoClient(settings, api_key=key or "") as client:
+    try:
+        client_context = ArgoClient(settings, api_key=key or "", provider_id="argo")
+    except TypeError as error:
+        # Compatibility for injected legacy clients during upgrades and tests.
+        if "provider_id" not in str(error):
+            raise
+        client_context = ArgoClient(settings, api_key=key or "")
+    with client_context as client:
         health = client.health()
     return argo_connection_status(key_configured=True, health=health)

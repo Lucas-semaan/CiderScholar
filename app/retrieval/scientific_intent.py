@@ -215,6 +215,31 @@ STORAGE_PROCESS_EN = (
     "storage duration",
 )
 
+MASH_MACERATION_PROCESS_FR = (
+    "cuvage",
+    "cuvage cidricole",
+    "maceration de la pulpe",
+    "maceration des pommes broyees",
+    "maceration avant pressurage",
+    "maintien de la pulpe avant pressurage",
+)
+MASH_MACERATION_PROCESS_EN = (
+    "mash maceration",
+    "apple mash maceration",
+    "pre-press maceration",
+    "prepress maceration",
+    "crushed apple maceration",
+    "mash contact before pressing",
+)
+MASH_MACERATION_FALSE_FRIENDS = (
+    "maceration carbonique",
+    "maceration alcoolique du raisin",
+    "carbonic maceration",
+    "grape maceration",
+    "red wine maceration",
+    "wine maceration",
+)
+
 FINING_PROCESS_FR = (
     "collage",
     "agent de collage",
@@ -445,6 +470,9 @@ FINING_AGENTS_COMPARISON_FACET = ScientificFacet(
         "colles animales",
         "proteines vegetales",
         "gelatine",
+        "bentonite",
+        "argile minerale",
+        "combinaison gelatine bentonite",
         "comparaison des colles",
     ],
     terms_en=[
@@ -453,14 +481,75 @@ FINING_AGENTS_COMPARISON_FACET = ScientificFacet(
         "plant proteins",
         "animal proteins",
         "gelatin",
+        "bentonite",
+        "mineral clay",
+        "gelatin bentonite combination",
         "alternative fining agents",
         "fining agent comparison",
     ],
 )
+FINING_MECHANISMS_CONDITIONS_FACET = ScientificFacet(
+    key="fining_mechanisms_conditions",
+    label="Mécanismes, agents minéraux et conditions d'application",
+    terms_fr=[
+        "bentonite",
+        "argile minerale",
+        "gel de silice",
+        "combinaison gelatine bentonite",
+        "mecanisme de collage",
+        "adsorption",
+        "floculation",
+        "charge proteique",
+        "dose de collage",
+        "ph",
+        "temperature",
+        "temps de contact",
+    ],
+    terms_en=[
+        "bentonite",
+        "mineral clay",
+        "silica sol",
+        "gelatin bentonite combination",
+        "fining mechanism",
+        "adsorption",
+        "flocculation",
+        "protein charge",
+        "fining dose",
+        "pH",
+        "temperature",
+        "contact time",
+    ],
+)
+FINING_TRADEOFFS_LIMITS_FACET = ScientificFacet(
+    key="fining_tradeoffs_limits",
+    label="Compromis et limites d'application du collage",
+    terms_fr=[
+        "limite du collage",
+        "compromis",
+        "perte de polyphenols",
+        "impact sensoriel",
+        "allergene",
+        "reglementation",
+        "surcollage",
+    ],
+    terms_en=[
+        "fining limitation",
+        "trade-off",
+        "phenolic loss",
+        "sensory impact",
+        "allergen",
+        "regulatory",
+        "overfining",
+    ],
+)
 
 
-def analyze_scientific_intent(question: str) -> ScientificIntent:
-    """Decompose frequent cider-science questions without an external model call."""
+def analyze_scientific_intent(question: str, *, deep: bool = False) -> ScientificIntent:
+    """Decompose frequent cider-science questions without an external model call.
+
+    ``deep`` deliberately widens only explicit comparative process questions.  It
+    does not change the default intent used by existing retrieval callers.
+    """
 
     cleaned = " ".join(question.split())
     if len(cleaned) < 2:
@@ -479,11 +568,18 @@ def analyze_scientific_intent(question: str) -> ScientificIntent:
         primary = [term for term in CALVADOS_CLOSE if _contains_any(normalized, (term,))]
         close = [term for term in CALVADOS_CLOSE if term not in primary]
         distant = list(CALVADOS_DISTANT)
-    elif _contains_any(normalized, ("cidre", "cider")):
+    cider_requested = _contains_any(normalized, ("cidre", "cidres", "cider", "ciders"))
+    apple_juice_requested = _contains_any(normalized, ("jus de pomme", "apple juice"))
+    if not primary and cider_requested and apple_juice_requested:
+        primary = ["jus de pomme", "apple juice", "cidre", "cider"]
+        close = ["apple must", "apple cider", "hard cider"]
+        distant = ["apple wine", "wine", "model apple juice", "model solution"]
+        excluded = list(APPLE_JUICE_FALSE_FRIENDS)
+    elif not primary and cider_requested:
         primary = ["cidre", "cider"]
         close = ["apple cider", "hard cider"]
         distant = ["apple juice", "apple wine", "wine"]
-    elif _contains_any(normalized, ("jus de pomme", "apple juice")):
+    elif not primary and apple_juice_requested:
         primary = ["jus de pomme", "apple juice"]
         close = ["apple must", "apple concentrate"]
         distant = ["model apple juice", "model solution"]
@@ -491,7 +587,14 @@ def analyze_scientific_intent(question: str) -> ScientificIntent:
 
     process_fr: list[str] = []
     process_en: list[str] = []
-    if _contains_any(normalized, WOOD_PROCESS_FR) or _contains_any(normalized, WOOD_PROCESS_EN):
+    if _contains_any(normalized, MASH_MACERATION_PROCESS_FR) or _contains_any(
+        normalized,
+        MASH_MACERATION_PROCESS_EN,
+    ):
+        process_fr = list(MASH_MACERATION_PROCESS_FR)
+        process_en = list(MASH_MACERATION_PROCESS_EN)
+        excluded = list(dict.fromkeys([*excluded, *MASH_MACERATION_FALSE_FRIENDS]))
+    elif _contains_any(normalized, WOOD_PROCESS_FR) or _contains_any(normalized, WOOD_PROCESS_EN):
         process_fr = list(WOOD_PROCESS_FR)
         process_en = list(WOOD_PROCESS_EN)
     elif _contains_any(normalized, STORAGE_PROCESS_FR) or _contains_any(
@@ -519,13 +622,20 @@ def analyze_scientific_intent(question: str) -> ScientificIntent:
         facets.append(FINING_EFFECTS_FACET)
         if "apple juice" in primary:
             close = list(dict.fromkeys([*close, "cider", "apple cider", "wine"]))
-    if (
+    comparative_fining_requested = (
         fining_requested
         and _contains_any(normalized, FINING_COMPARISON_MARKERS)
         and _contains_any(normalized, PLANT_FINING_TERMS)
         and _contains_any(normalized, ANIMAL_FINING_TERMS)
-    ):
+    )
+    if comparative_fining_requested:
         facets.append(FINING_AGENTS_COMPARISON_FACET)
+    if comparative_fining_requested:
+        # A useful origin comparison must also cover mineral and combined
+        # treatments: bentonite is a clay, not a plant- or animal-derived protein.
+        facets.append(FINING_MECHANISMS_CONDITIONS_FACET)
+        if deep:
+            facets.append(FINING_TRADEOFFS_LIMITS_FACET)
     if (
         process_fr
         and STRUCTURE_FACET not in facets
@@ -560,8 +670,17 @@ def intent_query_variants(
         ("overall", intent.question, "strict")
     ]
     process = list(intent.process_terms_en[:7])
-    exact_matrix = list(intent.matrix_primary[:2])
+    exact_matrix = list(intent.matrix_primary[:4])
     near_matrix = list(intent.matrix_close[:5])
+
+    # A named matrix + process is already a useful controlled scientific query,
+    # even when the user asks for a broad "impact" and names no outcome facet.
+    # Keeping this deterministic backstop prevents a generated plan from drifting
+    # entirely toward neighbouring processes.
+    if process and (exact_matrix or near_matrix):
+        query_matrix = exact_matrix or near_matrix[:3]
+        query = " ".join(dict.fromkeys([*query_matrix, *process[:3]]))
+        variants.append(("overall", query, "strict" if exact_matrix else "near_matrix"))
 
     for facet in intent.facets:
         matrix = [*exact_matrix, *near_matrix]

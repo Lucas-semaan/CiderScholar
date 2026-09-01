@@ -19,8 +19,9 @@ from app.deep_research.iteration import _ASSESSMENT_SYSTEM_PROMPT as GAP_PROMPT
 from app.deep_research.verification import _SYSTEM_PROMPT as VERIFICATION_PROMPT
 from app.desktop.model_integrity import MODEL_MANIFEST
 from app.ingestion.embeddings import local_model_path
+from app.llm.providers import LlmProviderStore
 
-_CACHE_SCHEMA_VERSION = 3
+_CACHE_SCHEMA_VERSION = 4
 _RENDERING_CONTRACT_VERSION = "sqlite-renderer-v1"
 _NUMERIC_VERIFICATION_CONTRACT = {
     "algorithm_version": 1,
@@ -83,7 +84,7 @@ def _local_model_manifest(settings: Settings, model_name: str) -> str | None:
 class DeepResearchCacheSignature(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: Literal[3] = _CACHE_SCHEMA_VERSION
+    schema_version: Literal[4] = _CACHE_SCHEMA_VERSION
     question_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     common_corpus_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     models_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
@@ -125,7 +126,7 @@ class DeepResearchCacheSignature(BaseModel):
 class DeepResearchCacheEntry(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: Literal[3] = _CACHE_SCHEMA_VERSION
+    schema_version: Literal[4] = _CACHE_SCHEMA_VERSION
     signature: DeepResearchCacheSignature
     answer_markdown: str = Field(min_length=1)
     details: dict[str, object]
@@ -150,8 +151,11 @@ class DeepResearchResponseCache:
         self.root = root
 
     def signature(self, question: str) -> DeepResearchCacheSignature:
+        llm_profile = LlmProviderStore(self.settings).active_profile()
         models = {
-            "argo": self.settings.argo.model,
+            "argo": llm_profile.model,
+            "llm_provider": llm_profile.id,
+            "llm_endpoint": llm_profile.base_url,
             "embedding": self.settings.embeddings.model_name,
             "embedding_manifest_sha256": _local_model_manifest(
                 self.settings,

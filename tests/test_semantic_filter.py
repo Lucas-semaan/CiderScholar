@@ -9,8 +9,10 @@ from app.llm.contracts import GenerationMetrics, GenerationResponse
 from app.models.chatbot import ChatEvidencePassage, ChatEvidenceRecord
 from app.retrieval.query_planning import ResearchAxis
 from app.retrieval.semantic_filter import (
+    MAX_CANDIDATE_TEXT_CHARACTERS,
     ArgoSemanticEvidenceFilter,
     CandidateSemanticDecision,
+    SemanticCandidate,
     SemanticFilterResult,
 )
 
@@ -72,6 +74,24 @@ def _record(record_id: str, title: str, text: str) -> ChatEvidenceRecord:
             )
         ],
     )
+
+
+def test_semantic_candidate_bounds_multi_passage_text_including_separators() -> None:
+    record = ChatEvidenceRecord(
+        record_id="multi-passage",
+        origin="local_rag",
+        evidence_level="abstract",
+        title="Multi-passage evidence",
+        passages=[
+            ChatEvidencePassage(evidence_id="first", section="results", text="a" * 800),
+            ChatEvidencePassage(evidence_id="second", section="discussion", text="b" * 800),
+        ],
+    )
+
+    candidate = SemanticCandidate.from_evidence_record(record)
+
+    assert len(candidate.text) == MAX_CANDIDATE_TEXT_CHARACTERS
+    assert candidate.text == "a" * 800 + "\n" + "b" * 799
 
 
 def test_semantic_filter_uses_meaning_and_selects_direct_and_supportive_candidates() -> None:
@@ -197,6 +217,49 @@ def test_semantic_filter_api_failure_is_a_safe_recall_preserving_fallback() -> N
     assert result.warnings == [
         "Semantic filtering unavailable for axis haze (TimeoutError); candidates retained."
     ]
+
+
+def test_semantic_filter_batches_more_than_twenty_candidates_without_truncation() -> None:
+    records = [
+        _record(f"candidate-{index}", f"Apple haze {index}", "Haze-active apple proteins.")
+        for index in range(32)
+    ]
+    payloads = [
+        {
+            "axis_key": "haze",
+            "decisions": [
+                {
+                    "candidate_id": f"candidate-{index}",
+                    "relevance": "direct",
+                    "rationale": "Direct apple haze evidence.",
+                    "matched_concepts": ["protein haze"],
+                }
+                for index in range(start, min(start + 10, len(records)))
+            ],
+        }
+        for start in (0, 10, 20, 30)
+    ]
+    client = _Client(payloads)
+
+    result = ArgoSemanticEvidenceFilter(client).filter_records(
+        "Stabilité protéique du jus de pomme",
+        [_axis()],
+        records,
+    )
+
+    assert result.used_fallback is False
+    assert result.selected_candidate_ids == [record.record_id for record in records]
+    assert len(client.calls) == 4
+    assert [
+        len(
+            call[1]["json_schema"]["$defs"]["CandidateSemanticDecision"]["properties"][
+                "candidate_id"
+            ]["enum"]
+        )
+        for call in client.calls
+    ] == [10, 10, 10, 2]
+    assert result.prompt_tokens == 400
+    assert result.completion_tokens == 200
 
 
 def test_semantic_filter_propagates_quota_for_deferred_retry() -> None:

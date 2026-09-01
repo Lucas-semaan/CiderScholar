@@ -111,6 +111,107 @@ def test_store_merges_sources_prefers_longer_abstract_and_indexes_fts(settings) 
     assert not store.is_due(active, now=completed)
 
 
+def test_store_persists_first_nonempty_title_for_each_source_observation(settings) -> None:
+    active = _active_settings(settings)
+    database = Database(active.paths.database_path)
+    database.initialize()
+    store = BibliographicHarvestStore(database)
+    run_id, _ = store.start_run(
+        active,
+        themes={"microbiologie": "cider yeast"},
+        sources=["scopus"],
+    )
+    base = {
+        "source": "scopus",
+        "source_id": "EID-1",
+        "title": "Cider yeast ecology",
+        "abstract": "A relevant abstract about cider fermentation yeast.",
+        "publication_year": 2024,
+        "doi": "10.1000/cider-source-title",
+    }
+    record_id = store.upsert_hit(
+        run_id=run_id,
+        theme="microbiologie",
+        rank=1,
+        record=BibliographicRecord(**base, journal="Food, Culture and Society"),
+    )
+    store.upsert_hit(
+        run_id=run_id,
+        theme="microbiologie",
+        rank=2,
+        record=BibliographicRecord(**base, journal="Conflicting later value"),
+    )
+
+    with database.connect() as connection:
+        row = connection.execute(
+            """
+            SELECT source_title FROM bibliographic_record_sources
+            WHERE record_id = ? AND source = 'scopus' AND source_id = 'EID-1'
+            """,
+            (record_id,),
+        ).fetchone()
+
+    assert row["source_title"] == "Food, Culture and Society"
+
+
+def test_store_keeps_source_observation_for_an_archived_excluded_doi(settings) -> None:
+    active = _active_settings(settings)
+    database = Database(active.paths.database_path)
+    database.initialize()
+    store = BibliographicHarvestStore(database)
+    with database.transaction() as connection:
+        connection.execute(
+            """
+            INSERT INTO rejected_bibliographic_archive (
+                original_record_id, canonical_key, doi, title, sources, harvest_run_ids
+            ) VALUES (
+                'archived-1', 'doi:10.1000/archived', '10.1000/archived',
+                'Archived cider source', '[]', '[]'
+            )
+            """
+        )
+    store.doi_exclusions.exclude_many(
+        [
+            {
+                "doi": "10.1000/archived",
+                "title": "Archived cider source",
+                "reason": "test exclusion",
+                "origin": "test",
+            }
+        ]
+    )
+    run_id, _ = store.start_run(
+        active,
+        themes={"microbiologie": "cider yeast"},
+        sources=["scopus"],
+    )
+
+    record_id = store.upsert_hit(
+        run_id=run_id,
+        theme="microbiologie",
+        rank=1,
+        record=BibliographicRecord(
+            source="scopus",
+            source_id="ARCHIVED-EID",
+            title="Archived cider source",
+            journal="Food, Culture and Society",
+            publication_year=2020,
+            doi="10.1000/archived",
+        ),
+    )
+
+    assert record_id is None
+    with database.connect() as connection:
+        row = connection.execute(
+            """
+            SELECT source_id, source_title
+            FROM rejected_bibliographic_record_sources
+            WHERE original_record_id = 'archived-1' AND source = 'scopus'
+            """
+        ).fetchone()
+    assert tuple(row) == ("ARCHIVED-EID", "Food, Culture and Society")
+
+
 def test_store_recovers_interrupted_run_without_discarding_hits(settings) -> None:
     active = _active_settings(settings)
     database = Database(active.paths.database_path)
@@ -253,6 +354,8 @@ def test_store_uses_doi_before_title_fallback_and_browses_all_statuses(settings)
     assert store.browse_records(query="OpenAlex, 2024")["records"][0]["id"] == first_id
     assert store.browse_records(query="W-DOI-A microbiologie")["records"][0]["id"] == first_id
     assert store.search_metadata("Poupard 2024")[0]["id"] == first_id
+    long_metadata_query = " ".join(["Poupard"] * 60)
+    assert store.search_metadata(long_metadata_query)[0]["id"] == first_id
     assert store.browse_filter_options() == {
         "themes": ["microbiologie"],
         "sources": ["Crossref", "OpenAlex"],
@@ -473,6 +576,41 @@ def test_rejected_records_are_archived_with_doi_and_title_before_purge(settings)
         "archive_total": 1,
         "remaining_rejected_records": 0,
     }
+
+
+def test_rejected_cleanup_batches_more_than_sqlite_parameter_limit(settings) -> None:
+    active = _active_settings(settings)
+    database = Database(active.paths.database_path)
+    database.initialize()
+    store = BibliographicHarvestStore(database)
+    record_ids = [f"rejected-batch-{index:04d}" for index in range(1_001)]
+    with database.transaction() as connection:
+        connection.executemany(
+            """
+            INSERT INTO bibliographic_records (
+                id, canonical_key, doi, title, content_hash,
+                relevance_status, relevance_score, relevance_reason
+            ) VALUES (?, ?, ?, ?, ?, 'rejected', 0.0, 'irrelevant')
+            """,
+            (
+                (
+                    record_id,
+                    f"source:test:{record_id}",
+                    f"10.1000/{record_id}",
+                    f"Rejected article {record_id}",
+                    "0" * 64,
+                )
+                for record_id in record_ids
+            ),
+        )
+
+    assert len(store.archive_rejected_records()) == len(record_ids)
+    assert store.purge_archived_rejected_records(record_ids) == len(record_ids)
+    assert store.browse_records(statuses=["rejected"])["total"] == 0
+    assert all(
+        store.doi_exclusions.is_excluded(f"10.1000/{record_id}")
+        for record_id in (record_ids[0], record_ids[-1])
+    )
 
 
 def test_abstractless_records_are_rejected_and_purged_after_enrichment(settings) -> None:
@@ -903,6 +1041,31 @@ def test_relevance_gate_keeps_a_concise_legitimate_cider_article() -> None:
     assert assessment.status == "accepted"
 
 
+@pytest.mark.parametrize(
+    "title",
+    [
+        "Scientific Cider Making",
+        "Detection of Cider in Wine",
+        "Apple Syrup and Concentrated Cider",
+    ],
+)
+def test_relevance_gate_keeps_explicit_technical_cider_titles_without_abstract(
+    title: str,
+) -> None:
+    assessment = assess_cider_relevance(
+        BibliographicRecord(
+            source="test",
+            source_id=title,
+            title=title,
+            publication_year=1918,
+            doi="10.1000/historical-cider-technique",
+        ),
+        "aromes_procede",
+    )
+
+    assert assessment.status == "accepted"
+
+
 def test_relevance_gate_keeps_calvados_with_explicit_spirit_context() -> None:
     assessment = assess_cider_relevance(
         BibliographicRecord(
@@ -1149,10 +1312,14 @@ def test_harvested_abstracts_are_indexed_in_a_separate_vector_collection(
         model_name = active.embeddings.model_name
         dimension = 2
 
+        def __init__(self) -> None:
+            self.query_calls = 0
+
         def encode_documents(self, texts):
             return [[1.0, 0.0] if "Yeast" in text else [0.0, 1.0] for text in texts]
 
         def encode_queries(self, _texts):
+            self.query_calls += 1
             return [[1.0, 0.0]]
 
         def close(self):
@@ -1172,8 +1339,144 @@ def test_harvested_abstracts_are_indexed_in_a_separate_vector_collection(
         assert response.lexical_candidate_count >= 1
         assert response.dense_candidate_count == 2
         assert response.rrf_unique_candidate_count == 2
+        assert index.search_many([[1.0, 0.0], [0.0, 1.0]], limit=2) == [
+            index.search([1.0, 0.0], limit=2),
+            index.search([0.0, 1.0], limit=2),
+        ]
+        lexical_only = service.search("yeast fermentation", limit=2, vector_enabled=False)
+        assert lexical_only.dense_candidate_count == 0
+        assert backend.query_calls == 1
     finally:
         service.close()
+
+
+def test_grouped_abstract_search_keeps_sqlite_results_when_vector_search_fails(
+    settings,
+) -> None:
+    active = _active_settings(settings)
+    # The raw query fits, while its deterministic cider expansion exceeds this bound.
+    # Grouped abstract retrieval must truncate the expansion just like full-text retrieval.
+    active.retrieval.lexical_max_query_characters = 24
+    database = Database(active.paths.database_path)
+    database.initialize()
+    store = BibliographicHarvestStore(database)
+    run_id, _ = store.start_run(
+        active,
+        themes={"microbiologie": "yeast"},
+        sources=["openalex"],
+    )
+    store.upsert_hit(
+        run_id=run_id,
+        theme="microbiologie",
+        rank=1,
+        record=BibliographicRecord(
+            source="OpenAlex",
+            source_id="W-vector-fallback",
+            title="Yeast ecology in cider fermentation",
+            abstract="Yeast fermentation controls cider aroma.",
+            doi="10.1000/vector-fallback",
+        ),
+    )
+
+    class FakeBackend:
+        model_name = active.embeddings.model_name
+        dimension = 2
+
+        @staticmethod
+        def encode_queries(texts):
+            return [[1.0, 0.0] for _text in texts]
+
+        @staticmethod
+        def close():
+            return None
+
+    class FailingIndex:
+        @staticmethod
+        def search_many(_vectors, *, limit):
+            raise ValueError(f"stale vector dimension at limit {limit}")
+
+        @staticmethod
+        def close():
+            return None
+
+    service = BibliographicHybridSearchService(
+        active,
+        store,
+        FakeBackend(),  # type: ignore[arg-type]
+        FailingIndex(),  # type: ignore[arg-type]
+    )
+
+    responses = service.search_many(
+        ["yeast fermentation", "cider aroma"],
+        limit=2,
+    )
+
+    assert len(responses) == 2
+    assert all(response.vector_search_degraded for response in responses)
+    assert all(response.dense_candidate_count == 0 for response in responses)
+    assert responses[0].results[0].doi == "10.1000/vector-fallback"
+    assert responses[0].results[0].lexical_rank == 1
+
+
+def test_grouped_abstract_search_isolates_a_metadata_failure_per_query(
+    settings,
+    monkeypatch,
+) -> None:
+    active = _active_settings(settings)
+    database = Database(active.paths.database_path)
+    database.initialize()
+    store = BibliographicHarvestStore(database)
+    run_id, _ = store.start_run(
+        active,
+        themes={"microbiologie": "yeast"},
+        sources=["openalex"],
+    )
+    store.upsert_hit(
+        run_id=run_id,
+        theme="microbiologie",
+        rank=1,
+        record=BibliographicRecord(
+            source="OpenAlex",
+            source_id="W-metadata-fallback",
+            title="Yeast ecology in cider fermentation",
+            abstract="Yeast fermentation controls cider aroma.",
+            doi="10.1000/metadata-fallback",
+        ),
+    )
+
+    def failing_metadata(query, *, limit):
+        raise ValueError(f"invalid metadata branch for {query} at {limit}")
+
+    monkeypatch.setattr(store, "search_metadata", failing_metadata)
+
+    class UnusedBackend:
+        @staticmethod
+        def close():
+            return None
+
+    class UnusedIndex:
+        @staticmethod
+        def close():
+            return None
+
+    service = BibliographicHybridSearchService(
+        active,
+        store,
+        UnusedBackend(),  # type: ignore[arg-type]
+        UnusedIndex(),  # type: ignore[arg-type]
+    )
+
+    responses = service.search_many(
+        ["yeast fermentation", "cider aroma"],
+        limit=2,
+        vector_query_limit=0,
+    )
+
+    assert len(responses) == 2
+    assert all(
+        response.degradation_codes == ["abstract_metadata_query_degraded"] for response in responses
+    )
+    assert responses[0].results[0].doi == "10.1000/metadata-fallback"
 
 
 def test_harvest_rotates_queries_then_pages_results(settings, monkeypatch) -> None:

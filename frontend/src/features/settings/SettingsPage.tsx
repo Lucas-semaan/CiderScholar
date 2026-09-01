@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/Button";
 import { ErrorState, LoadingState } from "@/components/ui/Feedback";
 import { PageHeader } from "@/components/ui/PageHeader";
 import { AdminMaintenanceCard } from "@/features/settings/AdminMaintenanceCard";
-import { ArgoKeySettingsCard } from "@/features/settings/ArgoKeySettingsCard";
+import { LlmProviderSettingsCards } from "@/features/settings/LlmProviderSettingsCards";
 import { PublisherAccessCard } from "@/features/settings/PublisherAccessCard";
 import { RuntimeSummary } from "@/features/settings/RuntimeSummary";
 import { SessionSettingsCard } from "@/features/settings/SessionSettingsCard";
@@ -14,13 +14,16 @@ import { SettingsFeedback } from "@/features/settings/SettingsFeedback";
 import { SettingsStatusCards } from "@/features/settings/SettingsStatusCards";
 import { useRemoteData } from "@/hooks/useRemoteData";
 import { api } from "@/lib/api";
+import type { LlmProviderId } from "@/types/api";
 
 const errorMessage = (caught: unknown, fallback: string) =>
   caught instanceof Error ? caught.message : fallback;
 
 export function SettingsPage() {
   const loadSettings = useCallback(() => api.system.settings(), []);
+  const loadProviders = useCallback(() => api.llmProviders.list(), []);
   const runtime = useRemoteData(loadSettings);
+  const providers = useRemoteData(loadProviders);
   const [busy, setBusy] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -46,13 +49,18 @@ export function SettingsPage() {
     }
   };
 
-  if (runtime.loading && !runtime.data)
+  if ((runtime.loading && !runtime.data) || (providers.loading && !providers.data))
     return <LoadingState label="Lecture de la configuration…" />;
   if (runtime.error && !runtime.data)
     return <ErrorState message={runtime.error} retry={runtime.refresh} />;
-  if (!runtime.data) return null;
+  if (providers.error && !providers.data)
+    return <ErrorState message={providers.error} retry={providers.refresh} />;
+  if (!runtime.data || !providers.data) return null;
 
-  const refreshSettings = () => void runtime.refresh();
+  const refreshSettings = () => {
+    runtime.refresh();
+    providers.refresh();
+  };
   const showMessageAndRefresh = (result: { message: string }) => {
     setMessage(result.message);
     refreshSettings();
@@ -92,47 +100,64 @@ export function SettingsPage() {
       "L’arrêt n’a pas pu être demandé.",
     );
   };
-  const replaceArgoKey = (event: FormEvent<HTMLFormElement>) => {
+  const saveProvider = (provider: LlmProviderId, event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const form = event.currentTarget;
-    const key = String(new FormData(form).get("argo_key") ?? "");
+    const values = new FormData(form);
+    const key = String(values.get("key") ?? "").trim();
+    const baseUrl = String(values.get("base_url") ?? "").trim();
+    const model = String(values.get("model") ?? "").trim();
     setMessage(null);
     void runAction(
-      "argo-key-save",
-      async () => {
-        await api.argoKey.save(key);
-        return api.argoKey.test();
-      },
-      (result) => {
-        if (result.state !== "ready") {
-          setError(result.message);
-          return;
-        }
+      `llm-provider-${provider}-save`,
+      () =>
+        api.llmProviders.save(provider, {
+          ...(key ? { key } : {}),
+          ...(provider === "custom" ? { base_url: baseUrl, model } : {}),
+        }),
+      () => {
         form.reset();
-        setMessage("Clé ARGO vérifiée et chiffrée pour ce compte Windows.");
+        setMessage(
+          `${provider === "argo" ? "Clé ARGO INRAE" : "Fournisseur personnalisé"} enregistré. Vous pouvez maintenant tester la connexion.`,
+        );
         refreshSettings();
       },
-      "La clé n’a pas pu être remplacée.",
+      "La configuration du fournisseur n’a pas pu être enregistrée.",
     );
   };
-  const testArgoKey = () => {
+  const testProvider = (provider: LlmProviderId) => {
     void runAction(
-      "argo-key-test",
-      api.argoKey.test,
+      `llm-provider-${provider}-test`,
+      () => api.llmProviders.test(provider),
       (result) =>
         result.state === "ready" ? setMessage(result.message) : setError(result.message),
-      "Le test ARGO a échoué.",
+      "Le test du fournisseur a échoué.",
     );
   };
-  const deleteArgoKey = () => {
+  const deleteProvider = (provider: LlmProviderId) => {
     void runAction(
-      "argo-key-delete",
-      api.argoKey.remove,
+      `llm-provider-${provider}-delete`,
+      () => api.llmProviders.remove(provider),
       () => {
-        setMessage("Clé ARGO supprimée de ce compte Windows.");
+        setMessage(
+          `Clé ${provider === "argo" ? "ARGO INRAE" : "du fournisseur personnalisé"} supprimée.`,
+        );
         refreshSettings();
       },
-      "La clé n’a pas pu être supprimée.",
+      "La clé du fournisseur n’a pas pu être supprimée.",
+    );
+  };
+  const activateProvider = (provider: LlmProviderId) => {
+    void runAction(
+      "llm-provider-activate",
+      () => api.llmProviders.activate(provider),
+      () => {
+        setMessage(
+          `${provider === "argo" ? "ARGO INRAE" : "Le fournisseur personnalisé"} est maintenant actif.`,
+        );
+        refreshSettings();
+      },
+      "Le fournisseur n’a pas pu être sélectionné.",
     );
   };
   const savePublisherCredentials = (event: FormEvent<HTMLFormElement>) => {
@@ -202,10 +227,14 @@ export function SettingsPage() {
   };
 
   const settings = runtime.data;
+  const providerSettings = providers.data;
+  const activeProvider = providerSettings.providers.find(
+    (provider) => provider.id === providerSettings.active_provider,
+  );
   return (
     <div className="space-y-8">
       <PageHeader
-        description="Contrôlez ARGO et les paramètres de session sans exposer de clé ni réécrire la configuration locale."
+        description="Choisissez votre fournisseur LLM et contrôlez les paramètres de session sans exposer de clé."
         eyebrow="Exploitation locale"
         title="Paramètres"
         actions={
@@ -215,7 +244,7 @@ export function SettingsPage() {
           </Button>
         }
       />
-      <RuntimeSummary settings={settings} />
+      <RuntimeSummary provider={activeProvider} settings={settings} />
       <SettingsFeedback
         error={error}
         health={health}
@@ -223,12 +252,13 @@ export function SettingsPage() {
         modelName={settings.llm_model}
       />
       {settings.administrator && <AdminMaintenanceCard />}
-      <ArgoKeySettingsCard
+      <LlmProviderSettingsCards
         busy={busy}
-        configured={settings.llm_key_configured}
-        onDelete={deleteArgoKey}
-        onSave={replaceArgoKey}
-        onTest={testArgoKey}
+        onActivate={activateProvider}
+        onDelete={deleteProvider}
+        onSave={saveProvider}
+        onTest={testProvider}
+        providers={providerSettings.providers}
       />
       <div className="grid items-start gap-6 xl:grid-cols-[minmax(0,42rem)_minmax(18rem,1fr)]">
         <SessionSettingsCard busy={busy === "save"} onSave={save} settings={settings} />

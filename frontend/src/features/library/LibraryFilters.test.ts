@@ -25,4 +25,26 @@ describe("LibraryFilters", () => {
     );
     expect(markup).toContain(">Appliquer</button>");
   });
+
+  it("offers the two persisted acquisition queues without exposing document types", () => {
+    const markup = renderToStaticMarkup(
+      createElement(LibraryFilters, {
+        filters: {
+          ...initialLibraryFilters,
+          statuses: ["accepted", "review"],
+          availability: "metadata_only",
+        },
+        mode: "acquisition",
+        themes: [],
+        onChange: () => undefined,
+        onSubmit: () => undefined,
+      }),
+    );
+
+    expect(markup).toContain("Statut de la notice");
+    expect(markup).toContain(">Acceptées sans contenu</option>");
+    expect(markup).toContain(">À réviser sans contenu</option>");
+    expect(markup).not.toContain(">Full article</option>");
+    expect(markup).not.toContain(">Abstract only</option>");
+  });
 });

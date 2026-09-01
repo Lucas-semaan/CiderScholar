@@ -19,6 +19,19 @@ export const initialLibraryFilters: LibraryRecordFilters = {
   offset: 0,
 };
 
+export const acquisitionLibraryFilters: LibraryRecordFilters = {
+  ...initialLibraryFilters,
+  statuses: ["accepted", "review"],
+  abstract: "without",
+  availability: "metadata_only",
+};
+
+export function documentTypeLabel(type: LibraryRecord["document_type"]): string {
+  if (type === "full_text") return "Full article";
+  if (type === "abstract_only") return "Abstract only";
+  return "Notice à acquérir";
+}
+
 const themeLabels: Record<string, string> = {
   aromes_procede: "Arômes et procédés",
   biochimie: "Biochimie",

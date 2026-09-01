@@ -19,6 +19,7 @@ from app.llm.contracts import (
     GenerationResponse,
 )
 from app.models.evidence import ArticleEvidence
+from app.retrieval.hierarchical_index import SqliteHierarchicalIndex
 from app.retrieval.lexical_search import STOPWORDS, TOKEN_PATTERN
 
 LOGGER = logging.getLogger(__name__)
@@ -326,16 +327,23 @@ class EvidencePassageSelector:
         candidate_limit = config.candidate_chunks_per_article
         if max_candidate_chunks is not None:
             candidate_limit = min(candidate_limit, max_candidate_chunks)
+        query_terms = _terms(cleaned_query)
+        methods_requested = bool(METHOD_QUERY_TERMS.intersection(query_terms))
         pool: dict[int, Mapping[str, Any]] = {
             chunk_id: ranked_details[chunk_id] for chunk_id in ranked_ids
         }
-        for row in self.database.chunks_for_article(article_id, limit=candidate_limit):
+        hierarchical_rows, _hierarchy_trace = SqliteHierarchicalIndex(self.database).navigate(
+            article_id=article_id,
+            anchor_chunk_ids=ranked_ids,
+            candidate_limit=candidate_limit,
+            neighborhood_radius=neighborhood_radius,
+            include_methods=methods_requested,
+        )
+        for row in hierarchical_rows:
             pool.setdefault(int(row["id"]), row)
         if not pool:
             raise EvidenceSourceValidationError("article has no available chunks")
 
-        query_terms = _terms(cleaned_query)
-        methods_requested = bool(METHOD_QUERY_TERMS.intersection(query_terms))
         ranked_positions = {chunk_id: position for position, chunk_id in enumerate(ranked_ids)}
         anchor_indexes = (
             [int(row["chunk_index"]) for row in ranked_details.values()]

@@ -5,7 +5,7 @@ import logging
 import sqlite3
 from datetime import UTC, datetime, timedelta
 from threading import Event
-from time import sleep
+from time import monotonic, sleep
 from uuid import uuid4
 
 import pytest
@@ -124,24 +124,48 @@ def test_worker_renews_lease_while_a_long_handler_runs(tmp_path) -> None:
         )
 
     class SlowHandler:
-        def handle(self, _job, _context) -> JobHandlerResult:
-            sleep(0.35)
+        def handle(self, leased_job, _context) -> JobHandlerResult:
+            deadline = monotonic() + 5
+            while monotonic() < deadline:
+                current = repository.get(leased_job.id)
+                if (
+                    current is not None
+                    and current.heartbeat_at is not None
+                    and leased_job.heartbeat_at is not None
+                    and current.heartbeat_at > leased_job.heartbeat_at
+                ):
+                    break
+                sleep(0.02)
+            else:
+                raise AssertionError("worker heartbeat was not renewed")
             return JobHandlerResult(
                 assistant_content="Résultat après traitement long.",
                 assistant_response={"ok": True},
-                response_time_milliseconds=350,
+                response_time_milliseconds=500,
             )
 
     worker = DurableJobWorker(
         repository=repository,
         registry=JobHandlerRegistry({JobType.CHAT_ANSWER: SlowHandler()}),
         worker_id="heartbeat-test",
-        lease_duration=timedelta(seconds=0.15),
+        lease_duration=timedelta(seconds=1.5),
     )
     completed = worker.run_once()
 
     assert completed is not None
     assert completed.state.value == "succeeded"
+
+
+def test_worker_default_lease_covers_long_atomic_local_vector_search(tmp_path) -> None:
+    repository = JobRepository(tmp_path / "queue.sqlite3")
+    repository.initialize()
+
+    worker = DurableJobWorker(
+        repository=repository,
+        registry=JobHandlerRegistry({}),
+    )
+
+    assert worker.lease_duration == timedelta(minutes=30)
 
 
 def test_closed_handler_registry_rejects_unknown_type_before_execution() -> None:
@@ -462,6 +486,53 @@ def test_chat_handler_delegates_to_existing_answer_chatbot_workflow(settings, tm
     assert result.assistant_response["timings"][0]["process_rss_after_gb"] == 0.6
     assert len(calls) == 1
     assert calls[0][2:] == ("Question durable", [], False)
+
+
+def test_chat_handler_does_not_apply_a_wall_clock_budget_to_queued_jobs(settings, tmp_path) -> None:
+    repository = JobRepository(tmp_path / "queue.sqlite3")
+    repository.initialize()
+    now = datetime(2026, 7, 22, 12, tzinfo=UTC)
+    job = _claimed_job(repository, now)
+    captured: dict[str, object] = {}
+
+    def fake_answer(
+        _settings,
+        _database,
+        *,
+        message,
+        **_options,
+    ) -> ChatbotResult:
+        captured.update(_options)
+        return ChatbotResult(
+            message=message,
+            retrieval_query=message,
+            answer_markdown="Réponse bornée.",
+            sources=[],
+            warnings=[],
+            model="test-model",
+            local_result_count=0,
+            external_result_count=0,
+            external_enrichment_used=False,
+            prompt_tokens=0,
+            completion_tokens=0,
+            duration_seconds=0.1,
+        )
+
+    handler = ChatAnswerHandler(
+        settings=settings,
+        database=repository.database,
+        answer=fake_answer,
+    )
+    context = JobProgressContext(
+        repository=repository,
+        job_id=job.id,
+        worker_id="worker-test",
+        clock=lambda: now + timedelta(minutes=3),
+    )
+
+    handler.handle(job, context)
+
+    assert "max_duration_seconds" not in captured
 
 
 def test_evaluation_job_pins_profile_and_persists_cell_identity(settings, tmp_path) -> None:

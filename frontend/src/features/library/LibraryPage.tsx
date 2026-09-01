@@ -1,6 +1,6 @@
 import { useCallback, useMemo, useState } from "react";
 
-import { BookOpenText, Database, FileText } from "lucide-react";
+import { BookOpenText, CheckCircle2, ClipboardList, Database, FileText } from "lucide-react";
 import { useSearchParams } from "react-router-dom";
 
 import { Dialog } from "@/components/ui/Dialog";
@@ -15,7 +15,10 @@ import {
   RecordDetailBody,
   RecordDetailHeader,
 } from "@/features/library/RecordDetail";
-import { initialLibraryFilters } from "@/features/library/libraryPresentation";
+import {
+  acquisitionLibraryFilters,
+  initialLibraryFilters,
+} from "@/features/library/libraryPresentation";
 import { nextReviewRecordId } from "@/features/library/reviewQueue";
 import {
   librarySplitViewMediaQuery,
@@ -29,18 +32,22 @@ import { librarySectionFromQuery } from "@/lib/navigation";
 
 const librarySections = [
   { id: "records" as const, label: "Tous les documents", icon: BookOpenText },
+  { id: "acquisition" as const, label: "Notices à acquérir", icon: ClipboardList },
   { id: "pdf" as const, label: "Imports et indexation", icon: Database },
 ];
 
 export function LibraryPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const section = librarySectionFromQuery(searchParams.get("section"));
-  const selectSection = (nextSection: "records" | "pdf") =>
+  const selectSection = (nextSection: "records" | "acquisition" | "pdf") =>
     setSearchParams((previous) => {
       const next = new URLSearchParams(previous);
       if (nextSection === "pdf") {
         next.set("section", nextSection);
         if (!next.has("tab")) next.set("tab", "articles");
+      } else if (nextSection === "acquisition") {
+        next.set("section", nextSection);
+        next.delete("tab");
       } else {
         next.delete("section");
         next.delete("tab");
@@ -71,14 +78,23 @@ export function LibraryPage() {
           </button>
         ))}
       </nav>
-      {section === "pdf" ? <CorpusPage embedded /> : <BibliographicLibrary />}
+      {section === "pdf" ? (
+        <CorpusPage embedded />
+      ) : (
+        <BibliographicLibrary
+          key={section}
+          mode={section === "acquisition" ? "acquisition" : "documents"}
+        />
+      )}
     </div>
   );
 }
 
-function BibliographicLibrary() {
-  const [draft, setDraft] = useState<LibraryRecordFilters>(initialLibraryFilters);
-  const [applied, setApplied] = useState<LibraryRecordFilters>(initialLibraryFilters);
+function BibliographicLibrary({ mode }: { mode: "documents" | "acquisition" }) {
+  const startingFilters =
+    mode === "acquisition" ? acquisitionLibraryFilters : initialLibraryFilters;
+  const [draft, setDraft] = useState<LibraryRecordFilters>({ ...startingFilters });
+  const [applied, setApplied] = useState<LibraryRecordFilters>({ ...startingFilters });
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [reviewNotice, setReviewNotice] = useState<string | null>(null);
   const splitViewVisible = useMediaQuery(librarySplitViewMediaQuery);
@@ -123,13 +139,18 @@ function BibliographicLibrary() {
   const page = Math.floor(applied.offset / applied.limit) + 1;
   const pageCount = Math.max(Math.ceil(total / applied.limit), 1);
   const statistics = summary.data.statistics;
+  const acquisitionMode = mode === "acquisition";
 
   return (
     <div className="space-y-8">
       <PageHeader
-        description="Recherchez au même endroit les articles complets et les abstracts associés à un DOI vérifié. Un PDF portant le même DOI remplace automatiquement la fiche abstract seule."
-        eyebrow="Corpus scientifique unifié"
-        title="Base documentaire"
+        description={
+          acquisitionMode
+            ? "Références conservées sans abstract ni texte intégral associé. Elles restent hors du RAG jusqu’à l’acquisition et l’indexation d’un contenu scientifique utilisable."
+            : "Recherchez au même endroit les articles complets et les notices disposant d’un abstract. Lorsqu’un texte intégral correspondant est disponible, il remplace la fiche abstract seule."
+        }
+        eyebrow={acquisitionMode ? "File d’acquisition documentaire" : "Corpus scientifique unifié"}
+        title={acquisitionMode ? "Notices à acquérir" : "Base documentaire"}
       />
       {reviewNotice && (
         <div
@@ -139,29 +160,55 @@ function BibliographicLibrary() {
           {reviewNotice}
         </div>
       )}
-      <section className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
-        <MetricCard
-          icon={Database}
-          label="Documents"
-          note="Une seule entrée par DOI vérifié"
-          value={formatNumber(statistics.documents)}
-        />
-        <MetricCard
-          icon={FileText}
-          label="Full article"
-          note="PDF complet disponible et consultable"
-          tone="sky"
-          value={formatNumber(statistics.full_texts)}
-        />
-        <MetricCard
-          icon={BookOpenText}
-          label="Abstract only"
-          note="Abstract accepté sans PDF disponible"
-          value={formatNumber(statistics.abstract_only)}
-        />
-      </section>
+      {acquisitionMode ? (
+        <section className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+          <MetricCard
+            icon={ClipboardList}
+            label="Notices à acquérir"
+            note="Sans abstract ni texte intégral associé"
+            tone="cider"
+            value={formatNumber(statistics.acquisition_notices)}
+          />
+          <MetricCard
+            icon={CheckCircle2}
+            label="Acceptées sans contenu"
+            note="Pertinence validée, contenu encore indisponible"
+            value={formatNumber(statistics.accepted_without_content)}
+          />
+          <MetricCard
+            icon={BookOpenText}
+            label="À réviser sans contenu"
+            note="Pertinence à confirmer avant acquisition"
+            tone="slate"
+            value={formatNumber(statistics.review_without_content)}
+          />
+        </section>
+      ) : (
+        <section className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+          <MetricCard
+            icon={Database}
+            label="Documents"
+            note="Une seule entrée par identité bibliographique"
+            value={formatNumber(statistics.documents)}
+          />
+          <MetricCard
+            icon={FileText}
+            label="Full article"
+            note="PDF complet disponible et consultable"
+            tone="sky"
+            value={formatNumber(statistics.full_texts)}
+          />
+          <MetricCard
+            icon={BookOpenText}
+            label="Abstract only"
+            note="Abstract disponible sans texte intégral"
+            value={formatNumber(statistics.abstract_only)}
+          />
+        </section>
+      )}
       <LibraryFilters
         filters={draft}
+        mode={mode}
         onChange={setDraft}
         onSubmit={() => setApplied({ ...draft, offset: 0 })}
         themes={summary.data.filters.themes}
@@ -171,9 +218,13 @@ function BibliographicLibrary() {
         <LoadingState label="Recherche dans la base documentaire…" />
       ) : records.data?.records.length === 0 ? (
         <EmptyState
-          description="Élargissez les filtres ou essayez un autre mot-clé, titre ou DOI."
-          icon={BookOpenText}
-          title="Aucun document trouvé"
+          description={
+            acquisitionMode
+              ? "Aucune notice sans contenu ne correspond aux filtres sélectionnés."
+              : "Élargissez les filtres ou essayez un autre mot-clé, titre ou DOI."
+          }
+          icon={acquisitionMode ? ClipboardList : BookOpenText}
+          title={acquisitionMode ? "Aucune notice à acquérir" : "Aucun document trouvé"}
         />
       ) : records.data ? (
         <div className="grid gap-6 xl:grid-cols-[minmax(0,1.45fr)_minmax(340px,.55fr)]">

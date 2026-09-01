@@ -18,6 +18,8 @@ from app.desktop.system_checks import validate_windows_11_x64
 from app.ingestion.embeddings import local_model_path
 from app.retrieval.reranker import local_reranker_model_path
 
+WORKER_RESTART_DELAY_SECONDS = 1.0
+
 
 def _message(title: str, message: str) -> None:
     ctypes.windll.user32.MessageBoxW(None, message, title, 0x10)
@@ -118,10 +120,26 @@ def main() -> int:
                 raise RuntimeError("Le worker durable s'est arrêté pendant le lancement.")
             webbrowser.open(url)
             while not stop_file.is_file():
-                if any(process.poll() is not None for process in children):
-                    raise RuntimeError(
-                        "Un processus CiderScholar s'est arrêté de manière inattendue."
+                if api.poll() is not None:
+                    raise RuntimeError("L'API locale s'est arrêtée de manière inattendue.")
+                if worker.poll() is not None:
+                    # The worker owns recover_expired_leases on its next cycle.  Restart
+                    # only this child so an unexpected worker exit cannot leave the API
+                    # serving a job permanently labelled as running.
+                    worker_log.close()
+                    time.sleep(WORKER_RESTART_DELAY_SECONDS)
+                    if stop_file.is_file():
+                        break
+                    worker, worker_log = _child(
+                        python,
+                        "scripts.run_job_worker",
+                        paths.config,
+                        stop_file,
+                        paths.logs / "worker.log",
+                        environment,
                     )
+                    children[1] = worker
+                    logs[1] = worker_log
                 time.sleep(0.25)
         except Exception as exc:
             request_shutdown(stop_file)

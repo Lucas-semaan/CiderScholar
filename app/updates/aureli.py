@@ -72,12 +72,17 @@ class AureliClient(OfficialBibliographicClient):
         year: int,
         limit: int = AURELI_MAX_PAGE_SIZE,
         offset: int = 0,
+        journal: str | None = None,
+        include_all_document_types: bool = False,
     ) -> AureliSearchPage:
-        """Search full text but return article metadata for one bounded year slice."""
+        """Search full text and return metadata for one bounded year/journal slice."""
 
         normalized_query = " ".join(query.split())
         if not normalized_query or any(character in normalized_query for character in ",;"):
             raise ValueError("Aureli query must be non-empty and contain no query separators")
+        normalized_journal = " ".join((journal or "").split()) or None
+        if normalized_journal and any(character in normalized_journal for character in ",;|"):
+            raise ValueError("Aureli journal must contain no query separators")
         current_year = datetime.now(UTC).year
         if not 1600 <= year <= current_year:
             raise ValueError("Aureli publication year is outside the supported range")
@@ -86,9 +91,12 @@ class AureliClient(OfficialBibliographicClient):
         if not 0 <= offset <= self.max_offset:
             raise ValueError(f"Aureli offset must be between 0 and {self.max_offset}")
 
-        article_and_year = (
-            f"facet_rtype,exact,articles|,|facet_searchcreationdate,exact,[{year} TO {year}]"
-        )
+        included_facets: list[str] = []
+        if not include_all_document_types:
+            included_facets.append("facet_rtype,exact,articles")
+        if normalized_journal:
+            included_facets.append(f"facet_jtitle,exact,{normalized_journal}")
+        included_facets.append(f"facet_searchcreationdate,exact,[{year} TO {year}]")
         payload = self._get_json(
             AURELI_API_URL,
             params={
@@ -96,7 +104,7 @@ class AureliClient(OfficialBibliographicClient):
                 "scope": AURELI_SCOPE,
                 "tab": "Everything",
                 "q": f"any,contains,{normalized_query}",
-                "qInclude": article_and_year,
+                "qInclude": "|,|".join(included_facets),
                 "lang": "fr",
                 "offset": offset,
                 "limit": limit,

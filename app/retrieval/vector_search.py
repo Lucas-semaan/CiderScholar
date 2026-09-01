@@ -125,6 +125,7 @@ class QdrantLocalIndex:
         model_name: str | None = None,
         path: str | Path | None = None,
         collection_name: str | None = None,
+        client_owner: QdrantLocalIndex | None = None,
     ) -> None:
         self.settings = settings
         self.model_name = model_name or settings.embeddings.model_name
@@ -132,11 +133,21 @@ class QdrantLocalIndex:
             Path(path).resolve() if path is not None else settings.paths.qdrant_dir.resolve()
         )
         self.collection_name = collection_name or settings.qdrant.collection_name
+        if client_owner is not None:
+            if client_owner.path != self.path:
+                raise ValueError("shared Qdrant indexes must use the same local path")
+            if client_owner.model_name != self.model_name:
+                raise ValueError("shared Qdrant indexes must use the same embedding model")
+            while client_owner._client_owner is not None:
+                client_owner = client_owner._client_owner
+        self._client_owner = client_owner
         self._client: QdrantClient | None = None
         self._resource_lock: ResourceFileLock | None = None
 
     @property
     def client(self) -> QdrantClient:
+        if self._client_owner is not None:
+            return self._client_owner.client
         if self._client is None:
             self.path.mkdir(parents=True, exist_ok=True)
             lock = ResourceFileLock(corpus_resource_lock_path(self.path))
@@ -164,6 +175,8 @@ class QdrantLocalIndex:
         self.close()
 
     def close(self) -> None:
+        if self._client_owner is not None:
+            return
         try:
             if self._client is not None:
                 try:
@@ -331,6 +344,96 @@ class QdrantLocalIndex:
             )
         return results
 
+    def search_many(
+        self,
+        query_vectors: Sequence[Sequence[float] | Any],
+        *,
+        limit: int | None = None,
+        article_ids: Sequence[str] | None = None,
+        sections: Sequence[str] | None = None,
+        score_threshold: float | None = None,
+        _manifest_validated: bool = False,
+    ) -> list[list[ScoredChunkReference]]:
+        """Search several vectors in one Qdrant request, preserving input order.
+
+        Each sub-request deliberately carries the same options as :meth:`search`.
+        This makes its individual result lists interchangeable with sequential
+        calls while avoiding repeated client round trips.
+        """
+
+        if not _manifest_validated:
+            assert_index_generation_ready(self)
+        vectors = [_float_vector(query_vector) for query_vector in query_vectors]
+        if not vectors:
+            return []
+        search_limit = self.settings.qdrant.default_search_limit if limit is None else limit
+        if search_limit <= 0:
+            raise ValueError("vector search limit must be positive")
+        if not self.collection_exists():
+            return [[] for _ in vectors]
+        for vector in vectors:
+            self.ensure_collection(len(vector))
+        conditions: list[models.FieldCondition] = [
+            models.FieldCondition(key="kind", match=models.MatchValue(value="chunk"))
+        ]
+        if article_ids is not None:
+            unique_ids = list(dict.fromkeys(article_ids))
+            if not unique_ids:
+                return [[] for _ in vectors]
+            conditions.append(
+                models.FieldCondition(key="article_id", match=models.MatchAny(any=unique_ids))
+            )
+        if sections is not None:
+            unique_sections = list(dict.fromkeys(sections))
+            if not unique_sections:
+                return [[] for _ in vectors]
+            conditions.append(
+                models.FieldCondition(key="section", match=models.MatchAny(any=unique_sections))
+            )
+        response = self.client.query_batch_points(
+            collection_name=self.collection_name,
+            requests=[
+                models.QueryRequest(
+                    query=vector,
+                    filter=models.Filter(must=conditions),
+                    limit=search_limit,
+                    with_payload=True,
+                    with_vector=False,
+                    score_threshold=(
+                        score_threshold
+                        if score_threshold is not None
+                        else self.settings.qdrant.score_threshold
+                    ),
+                )
+                for vector in vectors
+            ],
+        )
+        if len(response) != len(vectors):
+            raise VectorIndexCorruptionError(
+                "Qdrant batch response count differs from request count"
+            )
+        return [self._references_from_points(item.points) for item in response]
+
+    @staticmethod
+    def _references_from_points(points: Sequence[Any]) -> list[ScoredChunkReference]:
+        results: list[ScoredChunkReference] = []
+        for point in points:
+            payload = point.payload or {}
+            chunk_id = payload.get("chunk_id")
+            article_id = payload.get("article_id")
+            if not isinstance(chunk_id, int) or not isinstance(article_id, str):
+                raise VectorIndexCorruptionError("Qdrant point has invalid chunk payload")
+            if int(point.id) != chunk_id:
+                raise VectorIndexCorruptionError("Qdrant point id differs from chunk id")
+            results.append(
+                ScoredChunkReference(
+                    chunk_id=chunk_id,
+                    article_id=article_id,
+                    score=float(point.score),
+                )
+            )
+        return results
+
     def count(self) -> int:
         if not self.collection_exists():
             return 0
@@ -452,6 +555,104 @@ class VectorSearchService:
             sections=sections,
             _manifest_validated=True,
         )
+        chunks = self.database.chunks_by_ids([reference.chunk_id for reference in references])
+        results: list[VectorSearchResult] = []
+        for reference in references:
+            chunk = chunks.get(reference.chunk_id)
+            if chunk is None:
+                raise VectorIndexCorruptionError(
+                    f"chunk {reference.chunk_id} exists in Qdrant but not SQLite"
+                )
+            if str(chunk["article_id"]) != reference.article_id:
+                raise VectorIndexCorruptionError(
+                    f"chunk {reference.chunk_id} has inconsistent article id"
+                )
+            results.append(
+                VectorSearchResult(
+                    chunk_id=reference.chunk_id,
+                    article_id=reference.article_id,
+                    score=reference.score,
+                    section=chunk["section"],
+                    page_start=int(chunk["page_start"]),
+                    page_end=int(chunk["page_end"]),
+                    text=str(chunk["text"]),
+                )
+            )
+        return results
+
+    def search_many(
+        self,
+        queries: Sequence[str],
+        *,
+        limit: int | None = None,
+        article_ids: Sequence[str] | None = None,
+        sections: Sequence[str] | None = None,
+    ) -> list[list[VectorSearchResult]]:
+        """Encode uncached queries together and return one result list per query."""
+
+        model_name = str(getattr(self.backend, "model_name", "unknown"))
+        if model_name != self.index.model_name:
+            raise VectorIndexConfigurationError(
+                f"embedding backend model is {model_name!r}, expected {self.index.model_name!r}"
+            )
+        manifest = assert_index_generation_ready(self.index)
+        if manifest is None:
+            _warn_legacy_index_once(self.index)
+        else:
+            if not isinstance(self.backend, SentenceTransformerBackend):
+                raise VectorIndexConfigurationError(
+                    "managed index requires the verified local embedding backend"
+                )
+            try:
+                self.backend.verify_model_integrity(required=True)
+            except ModelIntegrityError as exc:
+                raise VectorIndexConfigurationError(
+                    "managed index local embedding model failed integrity verification"
+                ) from exc
+        if not queries:
+            return []
+
+        vectors: list[Any | None] = [None] * len(queries)
+        missing_by_key: dict[str, tuple[str, list[int]]] = {}
+        for position, query in enumerate(queries):
+            cached = _cached_query_vector(model_name, query)
+            if cached is not None:
+                vectors[position] = cached
+                self.query_cache_hits += 1
+                continue
+            cache_key = sha256(query.strip().encode("utf-8")).hexdigest()
+            entry = missing_by_key.get(cache_key)
+            if entry is None:
+                missing_by_key[cache_key] = (query, [position])
+            else:
+                entry[1].append(position)
+                self.query_cache_hits += 1
+        if missing_by_key:
+            missing_entries = list(missing_by_key.values())
+            encoded = self.backend.encode_queries([entry[0] for entry in missing_entries])
+            if len(encoded) != len(missing_entries):
+                raise VectorIndexConfigurationError(
+                    "embedding backend returned an invalid query batch"
+                )
+            for (query, positions), vector in zip(missing_entries, encoded, strict=True):
+                _remember_query_vector(model_name, query, vector)
+                for position in positions:
+                    vectors[position] = vector
+                self.query_cache_misses += 1
+        if any(vector is None for vector in vectors):
+            raise VectorIndexConfigurationError("query vector batch was not fully populated")
+        references_by_query = self.index.search_many(
+            [vector for vector in vectors if vector is not None],
+            limit=limit,
+            article_ids=article_ids,
+            sections=sections,
+            _manifest_validated=True,
+        )
+        return [self._hydrate(references) for references in references_by_query]
+
+    def _hydrate(self, references: Sequence[ScoredChunkReference]) -> list[VectorSearchResult]:
+        """Hydrate Qdrant identifiers from the authoritative SQLite corpus."""
+
         chunks = self.database.chunks_by_ids([reference.chunk_id for reference in references])
         results: list[VectorSearchResult] = []
         for reference in references:

@@ -1,4 +1,4 @@
-import { ChevronLeft, ChevronRight, FileText } from "lucide-react";
+import { ChevronLeft, ChevronRight, ClipboardList, FileText } from "lucide-react";
 
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
@@ -10,6 +10,7 @@ import type { LibraryRecord } from "@/types/api";
 
 import {
   authorPreview,
+  documentTypeLabel,
   libraryStatusLabels,
   publicationSource,
   themeLabel,
@@ -100,6 +101,12 @@ function LibraryRecordRow({
 }) {
   const authors = authorPreview(record.authors);
   const source = publicationSource(record);
+  const documentTone =
+    record.document_type === "full_text"
+      ? "info"
+      : record.document_type === "metadata_only"
+        ? "warning"
+        : "neutral";
   return (
     <button
       aria-label={`Consulter le document : ${record.title}`}
@@ -126,13 +133,17 @@ function LibraryRecordRow({
           )}
         </div>
         <div className="flex shrink-0 flex-wrap justify-end gap-2">
-          <Badge tone={record.document_type === "full_text" ? "info" : "neutral"}>
+          <Badge tone={documentTone}>
             {record.document_type === "full_text" ? (
               <>
                 <FileText aria-hidden="true" className="size-3" /> Full article
               </>
+            ) : record.document_type === "metadata_only" ? (
+              <>
+                <ClipboardList aria-hidden="true" className="size-3" /> Notice à acquérir
+              </>
             ) : (
-              "Abstract only"
+              documentTypeLabel(record.document_type)
             )}
           </Badge>
           {record.relevance_status !== "accepted" && (

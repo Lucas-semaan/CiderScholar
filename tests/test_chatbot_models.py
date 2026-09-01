@@ -62,6 +62,10 @@ def test_observability_contracts_are_non_textual_and_boundary_labeled() -> None:
         post_rerank_candidate_count=40,
         selected_article_count=6,
         selected_passage_count=18,
+        selected_full_text_article_count=4,
+        selected_full_text_passage_count=16,
+        selected_abstract_article_count=2,
+        selected_abstract_passage_count=2,
         rejection_counts={"not_selected_after_scientific_ranking": 34},
     )
     timing = ChatbotTiming(
@@ -78,9 +82,19 @@ def test_observability_contracts_are_non_textual_and_boundary_labeled() -> None:
     )
     assert timing.process_rss_before_gb == 1.0
     assert timing.process_rss_after_gb == 1.2
+    assert trace.selected_full_text_article_count == 4
+    assert trace.selected_abstract_article_count == 2
 
     with pytest.raises(ValidationError):
         ChatbotRetrievalTrace(
             stage="semantic_filter",
             rejection_counts={"free-form reason": 1},
+        )
+
+    with pytest.raises(ValidationError):
+        ChatbotRetrievalTrace(
+            stage="llm_context",
+            selected_article_count=1,
+            selected_full_text_article_count=1,
+            selected_abstract_article_count=1,
         )

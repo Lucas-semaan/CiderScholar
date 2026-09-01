@@ -13,6 +13,27 @@ l'authentification. Une session identifiée expose au plus les 2 000 premiers r�
 annuelle (offsets 0 à 1 950 par pages de 50). Le rapport conserve le total annoncé par Aureli afin de
 quantifier explicitement toute queue non accessible. Le plafond local est de 40 000 candidats bruts.
 
+Une recherche Aureli déjà limitée à plusieurs titres de revue peut être reproduite avec un
+`--journal` par titre. Les titres sont parcourus séquentiellement et dédupliqués lors de leur
+consolidation dans la même campagne. `--all-document-types` conserve comme candidats les articles,
+articles de magazine et autres types présents dans la recherche ; chaque notice repasse néanmoins
+par la décision scientifique `accepted/review/rejected` avant toute acquisition de texte intégral.
+Pour une vague explicitement dédiée au texte intégral,
+`--retain-accepted-without-abstract` conserve temporairement les notices admises par leur titre et
+dotées d'un DOI afin que l'acquisition puisse être tentée. Elles restent au niveau `Metadata only`
+et ne constituent aucune preuve tant qu'un texte intégral vérifié n'a pas été persisté.
+
+```powershell
+.\.venv\Scripts\python.exe -m scripts.harvest_aureli_cider `
+  --limit 2587 --start-year 2026 --end-year 1801 --all-document-types `
+  --retain-accepted-without-abstract `
+  --journal "Scientific American" `
+  --journal "Beverage Industry" `
+  --journal "Journal of Food Protection" `
+  --journal "Journal of Food Science" `
+  --run-dir data\exports\aureli-cider-journals-20260827
+```
+
 Lorsqu'une session identifiée est explicitement autorisée, le client lit son jeton uniquement depuis
 la variable d'environnement éphémère `CIDERSCHOLAR_AURELI_SESSION_TOKEN`. La valeur ne doit apparaître
 ni dans la configuration, ni dans le point de reprise, ni dans les journaux ou rapports. Supprimer la

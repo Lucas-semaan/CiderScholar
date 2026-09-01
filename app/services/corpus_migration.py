@@ -85,6 +85,7 @@ BIBLIOGRAPHIC_SOURCE_COLUMNS = (
     "source_id",
     "first_seen_at",
     "last_seen_at",
+    "source_title",
 )
 
 
@@ -257,8 +258,8 @@ def _migrate_legacy_abstracts(
             connection.execute(
                 """
                 INSERT OR IGNORE INTO bibliographic_record_sources (
-                    record_id, source, source_id, first_seen_at, last_seen_at
-                ) VALUES (?, ?, ?, ?, ?)
+                    record_id, source, source_id, first_seen_at, last_seen_at, source_title
+                ) VALUES (?, ?, ?, ?, ?, ?)
                 """,
                 (
                     target_id,
@@ -266,6 +267,7 @@ def _migrate_legacy_abstracts(
                     row["source_id"],
                     row["first_seen_at"],
                     row["last_seen_at"],
+                    row["source_title"],
                 ),
             )
         connection.executemany(

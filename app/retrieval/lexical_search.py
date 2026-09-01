@@ -12,7 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from app.config import Settings
 from app.corpora import CorpusScope
-from app.database.sqlite import Database
+from app.database.sqlite import Database, DatabaseReadSession
 
 QueryMode = Literal["any", "all", "phrase"]
 TOKEN_PATTERN = re.compile(r"[^\W_]+", re.UNICODE)
@@ -146,11 +146,61 @@ class LexicalSearchResponse(BaseModel):
     duration_seconds: float = Field(ge=0.0)
 
 
+class LexicalReadSession:
+    """Reuse one bounded SQLite read connection across lexical query variants."""
+
+    def __init__(self, service: LexicalSearchService) -> None:
+        self._service = service
+        self._session: DatabaseReadSession | None = None
+
+    def __enter__(self) -> LexicalReadSession:
+        cache_size_kib, mmap_size_bytes = self._service._read_session_limits()
+        self._session = self._service.database.read_session(
+            cache_size_kib=cache_size_kib,
+            mmap_size_bytes=mmap_size_bytes,
+        )
+        self._session.__enter__()
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        if self._session is not None:
+            self._session.__exit__(*args)
+            self._session = None
+
+    def search(
+        self,
+        query: str,
+        *,
+        limit: int | None = None,
+        mode: QueryMode = "any",
+        prefix_matching: bool | None = None,
+        article_ids: Sequence[str] | None = None,
+        sections: Sequence[str] | None = None,
+    ) -> LexicalSearchResponse:
+        if self._session is None:
+            raise RuntimeError("lexical read session is not active")
+        return self._service._search(
+            query,
+            limit=limit,
+            mode=mode,
+            prefix_matching=prefix_matching,
+            article_ids=article_ids,
+            sections=sections,
+            database=self._session,
+        )
+
+
 class LexicalQueryBuilder:
     def __init__(self, settings: Settings) -> None:
         self.config = settings.retrieval
 
-    def build(self, query: str, mode: QueryMode = "any") -> PreparedLexicalQuery:
+    def build(
+        self,
+        query: str,
+        mode: QueryMode = "any",
+        *,
+        prefix_matching: bool | None = None,
+    ) -> PreparedLexicalQuery:
         original = query.strip()
         if mode not in {"any", "all", "phrase"}:
             raise ValueError(f"unsupported lexical query mode: {mode}")
@@ -175,6 +225,9 @@ class LexicalQueryBuilder:
             if len(terms) >= self.config.lexical_max_terms:
                 break
 
+        use_prefix_matching = (
+            self.config.lexical_prefix_matching if prefix_matching is None else prefix_matching
+        )
         if not terms:
             expression = ""
         elif mode == "phrase":
@@ -185,7 +238,7 @@ class LexicalQueryBuilder:
             for term in terms:
                 encoded = f'"{term}"'
                 if (
-                    self.config.lexical_prefix_matching
+                    use_prefix_matching
                     and len(term) >= self.config.lexical_prefix_min_length
                     and not term.isdigit()
                 ):
@@ -208,17 +261,53 @@ class LexicalSearchService:
         self.database = database
         self.query_builder = LexicalQueryBuilder(settings)
 
+    def _read_session_limits(self) -> tuple[int, int]:
+        """Keep per-retrieval SQLite memory bounded for the configured device profile."""
+
+        if self.settings.memory.profile == "16gb":
+            return (64 * 1024, 256 * 1024 * 1024)
+        if self.settings.memory.profile == "8gb":
+            return (32 * 1024, 128 * 1024 * 1024)
+        return (16 * 1024, 64 * 1024 * 1024)
+
+    def read_session(self) -> LexicalReadSession:
+        """Create an explicitly closed session for multiple retrieval variants."""
+
+        return LexicalReadSession(self)
+
     def search(
         self,
         query: str,
         *,
         limit: int | None = None,
         mode: QueryMode = "any",
+        prefix_matching: bool | None = None,
         article_ids: Sequence[str] | None = None,
         sections: Sequence[str] | None = None,
     ) -> LexicalSearchResponse:
+        return self._search(
+            query,
+            limit=limit,
+            mode=mode,
+            prefix_matching=prefix_matching,
+            article_ids=article_ids,
+            sections=sections,
+            database=self.database,
+        )
+
+    def _search(
+        self,
+        query: str,
+        *,
+        limit: int | None,
+        mode: QueryMode,
+        prefix_matching: bool | None,
+        article_ids: Sequence[str] | None,
+        sections: Sequence[str] | None,
+        database: Database | DatabaseReadSession,
+    ) -> LexicalSearchResponse:
         started = perf_counter()
-        prepared = self.query_builder.build(query, mode)
+        prepared = self.query_builder.build(query, mode, prefix_matching=prefix_matching)
         search_limit = self.settings.retrieval.lexical_default_limit if limit is None else limit
         if search_limit <= 0 or search_limit > 1000:
             raise ValueError("lexical search limit must be between 1 and 1000")
@@ -229,7 +318,7 @@ class LexicalSearchService:
                 duration_seconds=perf_counter() - started,
             )
 
-        rows = self.database.lexical_search(
+        rows = database.lexical_search(
             prepared.fts5_expression,
             search_limit,
             article_ids=list(dict.fromkeys(article_ids)) if article_ids is not None else None,

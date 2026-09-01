@@ -25,8 +25,8 @@ def test_argo_outage_blocks_generation_and_keeps_fallback_honest(settings, monke
     assert report["ready"] is False
     assert report["checks"]["argo"] == {
         "state": "blocked",
-        "message": "Sonde ARGO indisponible.",
-        "action": "Vérifier le réseau INRAE ou le VPN, puis actualiser.",
+        "message": "Sonde LLM indisponible.",
+        "action": "Vérifier le réseau du fournisseur, puis actualiser.",
     }
     serialized = json.dumps(report, ensure_ascii=False)
     assert "provider detail" not in serialized

@@ -188,7 +188,12 @@ class DurableJobWorker:
         repository: JobRepository,
         registry: JobHandlerRegistry,
         worker_id: str | None = None,
-        lease_duration: timedelta = timedelta(minutes=5),
+        # Local Qdrant can retain the GIL for several minutes while it scans a
+        # large embedded collection under memory pressure.  The lease must
+        # outlive that atomic section; otherwise an API read can recover and
+        # duplicate a job whose worker is still computing.  Heartbeats still
+        # renew every 30 seconds whenever Python scheduling is available.
+        lease_duration: timedelta = timedelta(minutes=30),
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
         monotonic_clock: Callable[[], float] = monotonic,
         logger: logging.Logger | None = None,
@@ -248,7 +253,7 @@ class DurableJobWorker:
                 now=self.clock(),
             )
             if deferred is None:
-                raise JobLeaseLostError("ARGO quota deferral could not be persisted") from None
+                raise JobLeaseLostError("LLM quota deferral could not be persisted") from None
             return self._logged_result(deferred, cycle_started_monotonic)
         except ArgoQuotaError:
             deferred_at = self.clock()
@@ -260,7 +265,7 @@ class DurableJobWorker:
             )
             if deferred is None:
                 raise JobLeaseLostError(
-                    "remote ARGO quota deferral could not be persisted"
+                    "remote LLM quota deferral could not be persisted"
                 ) from None
             return self._logged_result(deferred, cycle_started_monotonic)
         except ArgoUnavailableError:
@@ -268,23 +273,23 @@ class DurableJobWorker:
                 job.id,
                 worker_id=self.worker_id,
                 error_code=JobErrorKind.TIMEOUT,
-                safe_message="ARGO n'a pas répondu dans le délai imparti.",
+                safe_message="Le fournisseur LLM n'a pas répondu dans le délai imparti.",
                 now=self.clock(),
             )
             if failed is None:
-                raise JobLeaseLostError("ARGO timeout could not be persisted") from None
+                raise JobLeaseLostError("LLM timeout could not be persisted") from None
             return self._logged_result(failed, cycle_started_monotonic)
         except ArgoAuthenticationError:
             failed = self.repository.fail_attempt(
                 job.id,
                 worker_id=self.worker_id,
                 error_code=JobErrorKind.AUTHENTICATION,
-                safe_message=("La clé ARGO personnelle doit être remplacée dans les paramètres."),
+                safe_message=("La clé du fournisseur LLM doit être remplacée dans les paramètres."),
                 now=self.clock(),
             )
             if failed is None:
                 raise JobLeaseLostError(
-                    "ARGO authentication failure could not be persisted"
+                    "LLM authentication failure could not be persisted"
                 ) from None
             return self._logged_result(failed, cycle_started_monotonic)
         except ArgoAuthorizationError:
@@ -293,14 +298,14 @@ class DurableJobWorker:
                 worker_id=self.worker_id,
                 error_code=JobErrorKind.VALIDATION,
                 safe_message=(
-                    "ARGO refuse cette opération ou ce modèle pour ce compte. "
-                    "Testez la connexion dans les paramètres ou contactez le support ARGO."
+                    "Le fournisseur LLM refuse cette opération ou ce modèle pour ce compte. "
+                    "Testez la connexion dans les paramètres ou contactez son support."
                 ),
                 now=self.clock(),
             )
             if failed is None:
                 raise JobLeaseLostError(
-                    "ARGO authorization failure could not be persisted"
+                    "LLM authorization failure could not be persisted"
                 ) from None
             return self._logged_result(failed, cycle_started_monotonic)
         except ArgoScientificValidationError as error:
@@ -315,7 +320,7 @@ class DurableJobWorker:
                 worker_id=self.worker_id,
                 error_code=JobErrorKind.VALIDATION,
                 safe_message=(
-                    "ARGO a produit une réponse non validable ; "
+                    "Le fournisseur LLM a produit une réponse non validable ; "
                     f"la réponse est arrêtée pour vérification ({error.reason.value})."
                 ),
                 diagnostic_code=error.reason.value,

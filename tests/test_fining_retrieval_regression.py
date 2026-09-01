@@ -16,8 +16,51 @@ def test_fining_intent_separates_process_effects_and_agent_comparison() -> None:
     assert {facet.key for facet in intent.facets} == {
         "fining_effects",
         "fining_agents_comparison",
+        "fining_mechanisms_conditions",
     }
+    mechanisms = intent.facet("fining_mechanisms_conditions")
+    assert mechanisms is not None
+    assert "bentonite" in mechanisms.terms
+    assert "minéraux" in mechanisms.label.casefold()
     assert "cashew apple juice" in intent.excluded_terms
+
+
+def test_deep_fining_comparison_covers_effects_mechanisms_comparison_and_limits() -> None:
+    intent = analyze_scientific_intent(QUESTION, deep=True)
+
+    assert [facet.key for facet in intent.facets] == [
+        "fining_effects",
+        "fining_agents_comparison",
+        "fining_mechanisms_conditions",
+        "fining_tradeoffs_limits",
+    ]
+
+
+def test_balanced_fining_comparison_keeps_mineral_agents_without_deep_limits() -> None:
+    intent = analyze_scientific_intent(QUESTION)
+
+    assert [facet.key for facet in intent.facets] == [
+        "fining_effects",
+        "fining_agents_comparison",
+        "fining_mechanisms_conditions",
+    ]
+
+
+def test_direct_apple_juice_bentonite_study_is_retained_as_mineral_fining_evidence() -> None:
+    intent = analyze_scientific_intent(QUESTION)
+
+    result = score_scientific_text(
+        intent,
+        title="The Impact of Bentonite Fining on Apple Juice Clarity and Sodium Content",
+        text=(
+            "Bentonite is a mineral clay used for apple juice fining. The treatment reduced "
+            "turbidity by adsorbing positively charged proteins, while activated bentonites "
+            "also changed sodium content."
+        ),
+    )
+
+    assert result.evidence_grade == "A"
+    assert "fining_mechanisms_conditions" in result.matched_facets
 
 
 def test_fining_comparison_beats_other_apple_juice_clarification_processes() -> None:

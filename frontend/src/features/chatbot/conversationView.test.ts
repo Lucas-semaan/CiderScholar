@@ -59,6 +59,7 @@ describe("stored conversation compatibility", () => {
 
     expect(message?.response?.interaction_mode).toBe("research");
     expect(message?.response?.reused_previous_sources).toBe(false);
+    expect(message?.response?.diagnostic_codes).toEqual([]);
     expect(source).toMatchObject({
       evidence_level: "abstract",
       article_id: null,

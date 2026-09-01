@@ -24,6 +24,7 @@ from app.updates.cleanup import archive_and_purge_rejected_records
 from app.updates.harvest import (
     CIDER_PILOT_THEMES,
     BibliographicHarvestStore,
+    RelevanceAssessment,
     assess_cider_relevance_across_themes,
 )
 from app.updates.models import BibliographicRecord
@@ -46,6 +47,10 @@ class CampaignCheckpoint(BaseModel):
     target_candidates: int = Field(ge=1, le=40_000)
     start_year: int
     end_year: int
+    journal_titles: list[str] = Field(default_factory=list)
+    include_all_document_types: bool = False
+    retain_accepted_without_abstract: bool = False
+    next_journal_index: int = Field(default=0, ge=0)
     next_year: int
     next_offset: int = Field(ge=0)
     raw_record_count: int = Field(ge=0)
@@ -69,6 +74,25 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--page-size", type=int, default=50)
     parser.add_argument("--request-delay", type=float, default=0.7)
     parser.add_argument(
+        "--journal",
+        action="append",
+        default=[],
+        help="Restrict the campaign to one journal title; repeat for an OR selection",
+    )
+    parser.add_argument(
+        "--all-document-types",
+        action="store_true",
+        help="Keep every document type returned by the selected Aureli search",
+    )
+    parser.add_argument(
+        "--retain-accepted-without-abstract",
+        action="store_true",
+        help=(
+            "Retain title-admitted DOI records as metadata-only full-text candidates "
+            "instead of archiving them before acquisition"
+        ),
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Collect and classify without changing SQLite or Qdrant",
@@ -85,6 +109,7 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
+    args.journal = _normalize_journals(args.journal)
     _validate_arguments(args)
 
     settings = settings_for_corpus(load_settings(args.config), CorpusScope.COMMON)
@@ -129,7 +154,7 @@ def main(argv: list[str] | None = None) -> int:
             _warmup_aureli_paging(client, checkpoint, args.page_size)
             while (
                 checkpoint.raw_record_count < checkpoint.target_candidates
-                and checkpoint.next_year >= checkpoint.end_year
+                and not _campaign_exhausted(checkpoint)
             ):
                 remaining = checkpoint.target_candidates - checkpoint.raw_record_count
                 page_limit = min(args.page_size, remaining)
@@ -138,19 +163,20 @@ def main(argv: list[str] | None = None) -> int:
                     year=checkpoint.next_year,
                     limit=page_limit,
                     offset=checkpoint.next_offset,
+                    journal=_current_journal(checkpoint),
+                    include_all_document_types=checkpoint.include_all_document_types,
                 )
                 page_hits: list[tuple[str, int, BibliographicRecord]] = []
                 page_screened_out: list[dict[str, Any]] = []
                 for rank, record in enumerate(page.records, start=1):
                     theme, assessment = assess_cider_relevance_across_themes(record)
-                    decision = assessment.status
-                    reason = assessment.reason
-                    if decision == "accepted" and not record.abstract:
-                        decision = "rejected"
-                        reason = f"{reason}; abstract unavailable"
-                    elif decision == "accepted" and not record.doi:
-                        decision = "review"
-                        reason = f"{reason}; verified DOI unavailable"
+                    decision, reason = _campaign_record_decision(
+                        record,
+                        assessment,
+                        retain_accepted_without_abstract=(
+                            checkpoint.retain_accepted_without_abstract
+                        ),
+                    )
                     campaign_rank = checkpoint.raw_record_count + rank
                     if args.dry_run:
                         dry_counts[decision] += 1
@@ -208,6 +234,7 @@ def main(argv: list[str] | None = None) -> int:
                     page_log_path,
                     {
                         "collected_at": datetime.now(UTC).isoformat(),
+                        "journal": _current_journal(checkpoint),
                         "year": page.year,
                         "offset": page.offset,
                         "requested": page_limit,
@@ -220,6 +247,7 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 print(
                     f"year={page.year} offset={page.offset} "
+                    f"journal={_current_journal(checkpoint) or 'all'} "
                     f"raw={page.raw_record_count} parsed={len(page.records)} "
                     f"total={checkpoint.raw_record_count}/{checkpoint.target_candidates}",
                     flush=True,
@@ -243,7 +271,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.dry_run:
         checkpoint.finished = not errors and (
             checkpoint.raw_record_count >= checkpoint.target_candidates
-            or checkpoint.next_year < checkpoint.end_year
+            or _campaign_exhausted(checkpoint)
         )
         _write_checkpoint(checkpoint_path, checkpoint)
         report = {
@@ -262,7 +290,7 @@ def main(argv: list[str] | None = None) -> int:
         raise RuntimeError("Aureli campaign has no persistent run identifier")
     abstractless_rejected = 0
     doi_less_reviewed = 0
-    if not errors:
+    if not errors and not checkpoint.retain_accepted_without_abstract:
         abstractless_rejected = store.reject_run_abstractless_records(checkpoint.run_id)
         doi_less_reviewed = store.review_run_doi_less_abstracts(checkpoint.run_id)
     completed_at = datetime.now(UTC)
@@ -301,7 +329,9 @@ def main(argv: list[str] | None = None) -> int:
         "query": checkpoint.query,
         "aureli_search": {
             "full_text_search": True,
-            "document_type": "Article",
+            "document_type": ("all" if checkpoint.include_all_document_types else "Article"),
+            "journal_titles": checkpoint.journal_titles,
+            "retain_accepted_without_abstract": (checkpoint.retain_accepted_without_abstract),
             "target_candidates": checkpoint.target_candidates,
             "raw_candidates": checkpoint.raw_record_count,
             "parsed_candidates": checkpoint.parsed_record_count,
@@ -323,6 +353,9 @@ def main(argv: list[str] | None = None) -> int:
         "content_levels": {
             "full_article_acquired_this_campaign": 0,
             "abstract_only": decisions.get("accepted_abstract_with_doi", 0),
+            "metadata_only_full_text_candidates": decisions.get(
+                "accepted_metadata_only_with_doi", 0
+            ),
             "metadata_only_review": decisions.get("review_metadata", 0),
             "abstract_review_without_doi": decisions.get("review_abstract_without_doi", 0),
         },
@@ -360,6 +393,24 @@ def _validate_arguments(args: argparse.Namespace) -> None:
         raise ValueError("Aureli page size must be between 1 and 50")
     if not 0.35 <= args.request_delay <= 30:
         raise ValueError("Aureli request delay must be between 0.35 and 30 seconds")
+    if len(args.journal) > 20:
+        raise ValueError("Aureli campaigns accept at most 20 journal titles")
+
+
+def _normalize_journals(values: list[str]) -> list[str]:
+    journals: list[str] = []
+    normalized_seen: set[str] = set()
+    for value in values:
+        journal = " ".join(value.split())
+        if not journal:
+            raise ValueError("Aureli journal must be non-empty")
+        if len(journal) > 200 or any(character in journal for character in ",;|"):
+            raise ValueError("Aureli journal contains unsupported query characters")
+        normalized = journal.casefold()
+        if normalized not in normalized_seen:
+            normalized_seen.add(normalized)
+            journals.append(journal)
+    return journals
 
 
 def _run_directory(exports_dir: Path, requested: Path | None, dry_run: bool) -> Path:
@@ -380,6 +431,9 @@ def _load_or_create_checkpoint(
             checkpoint.target_candidates != args.limit
             or checkpoint.start_year != args.start_year
             or checkpoint.end_year != args.end_year
+            or checkpoint.journal_titles != args.journal
+            or checkpoint.include_all_document_types != args.all_document_types
+            or checkpoint.retain_accepted_without_abstract != args.retain_accepted_without_abstract
         ):
             raise ValueError("resume arguments do not match the Aureli checkpoint")
         if checkpoint.baseline_statistics is None:
@@ -401,6 +455,9 @@ def _load_or_create_checkpoint(
         target_candidates=args.limit,
         start_year=args.start_year,
         end_year=args.end_year,
+        journal_titles=args.journal,
+        include_all_document_types=args.all_document_types,
+        retain_accepted_without_abstract=args.retain_accepted_without_abstract,
         next_year=args.start_year,
         next_offset=0,
         raw_record_count=0,
@@ -421,8 +478,45 @@ def _advance_checkpoint(
     if next_offset >= year_total or next_offset > aureli_max_offset():
         checkpoint.next_year -= 1
         checkpoint.next_offset = 0
+        if checkpoint.next_year < checkpoint.end_year and checkpoint.journal_titles:
+            checkpoint.next_journal_index += 1
+            checkpoint.next_year = checkpoint.start_year
     else:
         checkpoint.next_offset = next_offset
+
+
+def _current_journal(checkpoint: CampaignCheckpoint) -> str | None:
+    if not checkpoint.journal_titles:
+        return None
+    if checkpoint.next_journal_index >= len(checkpoint.journal_titles):
+        return None
+    return checkpoint.journal_titles[checkpoint.next_journal_index]
+
+
+def _campaign_exhausted(checkpoint: CampaignCheckpoint) -> bool:
+    if checkpoint.journal_titles:
+        return checkpoint.next_journal_index >= len(checkpoint.journal_titles)
+    return checkpoint.next_year < checkpoint.end_year
+
+
+def _campaign_record_decision(
+    record: BibliographicRecord,
+    assessment: RelevanceAssessment,
+    *,
+    retain_accepted_without_abstract: bool,
+) -> tuple[Literal["accepted", "review", "rejected"], str]:
+    decision = assessment.status
+    reason = assessment.reason
+    if decision == "accepted" and not record.abstract:
+        if retain_accepted_without_abstract and record.doi:
+            reason = f"{reason}; metadata-only retained for full-text acquisition"
+        else:
+            decision = "rejected"
+            reason = f"{reason}; abstract unavailable"
+    elif decision == "accepted" and not record.doi:
+        decision = "review"
+        reason = f"{reason}; verified DOI unavailable"
+    return decision, reason
 
 
 def _warmup_aureli_paging(
@@ -446,6 +540,8 @@ def _warmup_aureli_paging(
             year=checkpoint.next_year,
             limit=requested,
             offset=offset,
+            journal=_current_journal(checkpoint),
+            include_all_document_types=checkpoint.include_all_document_types,
         )
         if page.raw_record_count == 0 and offset < min(page.total_results, aureli_max_offset() + 1):
             raise RuntimeError("Aureli resume warm-up returned an unexpected empty page")
@@ -521,6 +617,7 @@ def _export_run_audit(
         "rejected": 0,
         "accepted_abstract": 0,
         "accepted_abstract_with_doi": 0,
+        "accepted_metadata_only_with_doi": 0,
         "review_metadata": 0,
         "review_abstract_without_doi": 0,
     }
@@ -553,6 +650,8 @@ def _export_run_audit(
                 decisions["accepted_abstract"] += 1
                 if row["doi"]:
                     decisions["accepted_abstract_with_doi"] += 1
+            if status == "accepted" and not has_abstract and row["doi"]:
+                decisions["accepted_metadata_only_with_doi"] += 1
             if status == "review" and not has_abstract:
                 decisions["review_metadata"] += 1
             if status == "review" and has_abstract and not row["doi"]:
@@ -648,24 +747,40 @@ def _append_jsonl_many(path: Path, payloads: list[dict[str, Any]]) -> None:
 
 
 def _aureli_inaccessible_tail(page_log_path: Path, page_size: int) -> dict[str, Any]:
-    totals_by_year: dict[int, int] = {}
+    totals_by_slice: dict[tuple[str | None, int], int] = {}
     if page_log_path.is_file():
         with page_log_path.open(encoding="utf-8") as pages:
             for line in pages:
                 page = json.loads(line)
                 year = int(page["year"])
-                totals_by_year[year] = max(totals_by_year.get(year, 0), int(page["year_total"]))
+                journal = str(page.get("journal") or "").strip() or None
+                slice_key = (journal, year)
+                totals_by_slice[slice_key] = max(
+                    totals_by_slice.get(slice_key, 0), int(page["year_total"])
+                )
     accessible_per_year = aureli_max_offset() + page_size
-    by_year = {
-        str(year): total - accessible_per_year
-        for year, total in sorted(totals_by_year.items(), reverse=True)
+    tails_by_slice = {
+        slice_key: total - accessible_per_year
+        for slice_key, total in totals_by_slice.items()
         if total > accessible_per_year
     }
-    return {
+    by_year: dict[str, int] = {}
+    for (_, year), tail in tails_by_slice.items():
+        by_year[str(year)] = by_year.get(str(year), 0) + tail
+    payload: dict[str, Any] = {
         "records": sum(by_year.values()),
-        "by_year": by_year,
+        "by_year": dict(sorted(by_year.items(), reverse=True)),
         "accessible_per_year": accessible_per_year,
     }
+    if any(journal for journal, _ in totals_by_slice):
+        payload["by_journal_year"] = {
+            f"{journal} — {year}": tail
+            for (journal, year), tail in sorted(
+                tails_by_slice.items(),
+                key=lambda item: ((item[0][0] or "").casefold(), -item[0][1]),
+            )
+        }
+    return payload
 
 
 def _write_checkpoint(path: Path, checkpoint: CampaignCheckpoint) -> None:

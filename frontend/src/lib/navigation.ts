@@ -1,5 +1,5 @@
 export type CorpusTab = "articles" | "import" | "activity";
-export type LibrarySection = "records" | "pdf";
+export type LibrarySection = "records" | "acquisition" | "pdf";
 
 export const appDestinations = {
   scientificAssistant: "/",
@@ -18,7 +18,7 @@ export function corpusDestinations() {
 }
 
 export function librarySectionFromQuery(value: string | null): LibrarySection {
-  return value === "pdf" ? value : "records";
+  return value === "acquisition" || value === "pdf" ? value : "records";
 }
 
 export function corpusTabFromQuery(value: string | null): CorpusTab {

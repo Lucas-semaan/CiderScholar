@@ -11,7 +11,9 @@ def _article(
     doi: str | None = None,
     score: float = 0.8,
     title: str | None = None,
+    chunk_ids: list[int] | None = None,
 ) -> RankedArticle:
+    selected_chunk_ids = chunk_ids or [1]
     return RankedArticle(
         rank=1,
         base_rank=1,
@@ -36,11 +38,11 @@ def _article(
             abstract_relevance=score,
             central_concept=score,
         ),
-        matched_chunk_count=1,
-        best_chunk_id=1,
+        matched_chunk_count=len(selected_chunk_ids),
+        best_chunk_id=selected_chunk_ids[0],
         best_hybrid_rank=1,
-        top_chunk_ids=[1],
-        page_ranges=["1"],
+        top_chunk_ids=selected_chunk_ids,
+        page_ranges=[str(chunk_id) for chunk_id in selected_chunk_ids],
         scope=CorpusScope.COMMON,
     )
 
@@ -80,6 +82,24 @@ def test_axis_pool_deduplicates_normalized_doi_and_keeps_all_memberships() -> No
 
     assert [article.article_id for article in pool.articles] == ["global-copy"]
     assert pool.axis_ranks["methods"] == {"doi:10.1000/duplicate": 1}
+
+
+def test_axis_pool_preserves_complementary_chunks_from_the_same_rich_article() -> None:
+    global_copy = _article("treatise", chunk_ids=[1, 2])
+    mechanism_copy = _article("treatise", chunk_ids=[3, 4])
+    conditions_copy = _article("treatise", chunk_ids=[5, 2])
+
+    pool = merge_axis_rankings(
+        [global_copy],
+        {
+            "mechanisms": [mechanism_copy],
+            "conditions": [conditions_copy],
+        },
+    )
+
+    assert len(pool.articles) == 1
+    assert pool.articles[0].top_chunk_ids == [1, 2, 3, 4, 5]
+    assert pool.articles[0].page_ranges == ["1", "2", "3", "4", "5"]
 
 
 def test_axis_pool_does_not_merge_doi_less_articles_on_title_alone() -> None:

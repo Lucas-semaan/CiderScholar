@@ -1,8 +1,7 @@
-"""Strict client for the official INRAE ARGO chat-completions API."""
+"""Strict client for the active OpenAI-compatible chat-completions provider."""
 
 from __future__ import annotations
 
-import os
 import threading
 from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime
@@ -21,6 +20,7 @@ from app.llm.contracts import (
     GenerationMetrics,
     GenerationResponse,
 )
+from app.llm.providers import LlmProviderId, LlmProviderStore
 from app.memory import MemoryGuard
 from app.services.argo_quota import ArgoQuotaService
 
@@ -78,6 +78,20 @@ class ScientificValidationReason(StrEnum):
     UNSUPPORTED_CAUSAL_CLAIM = "unsupported_causal_claim"
     UNSUPPORTED_SAFETY_CLAIM = "unsupported_safety_claim"
     UNSUPPORTED_NORMATIVE_CLAIM = "unsupported_normative_claim"
+    INVALID_EVIDENCE_REFERENCE = "invalid_evidence_reference"
+    MISSING_REQUIRED_EVIDENCE = "missing_required_evidence"
+    MISSING_CONTEXTUAL_INTRODUCTION = "missing_contextual_introduction"
+    PARAGRAPH_TOO_SHORT = "paragraph_too_short"
+    SYNTHESIS_TOO_SHORT = "synthesis_too_short"
+    INVALID_RESPONSE_STYLE = "invalid_response_style"
+    INVALID_PROSE_STRUCTURE = "invalid_prose_structure"
+    EVIDENCE_ID_LEAK = "evidence_id_leak"
+    UNSUPPORTED_EVIDENCE_GRADE = "unsupported_evidence_grade"
+    MISSING_INDIRECT_EVIDENCE_LABEL = "missing_indirect_evidence_label"
+    LANGUAGE_MISMATCH = "language_mismatch"
+    INTERNAL_PROCESS_LEAK = "internal_process_leak"
+    MISSING_DOCUMENTED_FACET = "missing_documented_facet"
+    PROMPT_BUDGET_EXCEEDED = "prompt_budget_exceeded"
     INVALID_DIRECT_ANSWER_COUNT = "invalid_direct_answer_count"
     INVALID_SCHEMA = "invalid_schema"
     QUESTION_INTEGRITY = "question_integrity"
@@ -98,8 +112,31 @@ def classify_scientific_validation_failure(message: str) -> ScientificValidation
         ("causal language", ScientificValidationReason.UNSUPPORTED_CAUSAL_CLAIM),
         ("unsupported safety", ScientificValidationReason.UNSUPPORTED_SAFETY_CLAIM),
         ("unsupported norm", ScientificValidationReason.UNSUPPORTED_NORMATIVE_CLAIM),
+        ("outside the supplied", ScientificValidationReason.INVALID_EVIDENCE_REFERENCE),
+        ("omitted one or more", ScientificValidationReason.MISSING_REQUIRED_EVIDENCE),
+        ("contextual introduction", ScientificValidationReason.MISSING_CONTEXTUAL_INTRODUCTION),
+        ("paragraph that is too short", ScientificValidationReason.PARAGRAPH_TOO_SHORT),
+        ("synthesis is too short", ScientificValidationReason.SYNTHESIS_TOO_SHORT),
+        ("response style", ScientificValidationReason.INVALID_RESPONSE_STYLE),
+        ("list marker", ScientificValidationReason.INVALID_PROSE_STRUCTURE),
+        ("heading or fragment", ScientificValidationReason.INVALID_PROSE_STRUCTURE),
+        ("leaked an evidence id", ScientificValidationReason.EVIDENCE_ID_LEAK),
+        (
+            "peripheral or irrelevant evidence",
+            ScientificValidationReason.UNSUPPORTED_EVIDENCE_GRADE,
+        ),
+        (
+            "label indirect evidence",
+            ScientificValidationReason.MISSING_INDIRECT_EVIDENCE_LABEL,
+        ),
+        ("answer language", ScientificValidationReason.LANGUAGE_MISMATCH),
+        ("internal generation or retrieval", ScientificValidationReason.INTERNAL_PROCESS_LEAK),
+        ("documented facet", ScientificValidationReason.MISSING_DOCUMENTED_FACET),
+        ("prompt content exceeds", ScientificValidationReason.PROMPT_BUDGET_EXCEEDED),
+        ("prompt has no evidence", ScientificValidationReason.PROMPT_BUDGET_EXCEEDED),
         ("direct-answer statements", ScientificValidationReason.INVALID_DIRECT_ANSWER_COUNT),
         ("validation error", ScientificValidationReason.INVALID_SCHEMA),
+        ("invalid faceted evidence answer", ScientificValidationReason.INVALID_SCHEMA),
         ("question integrity", ScientificValidationReason.QUESTION_INTEGRITY),
         ("did not return a usable", ScientificValidationReason.UNUSABLE_OUTPUT),
     )
@@ -117,8 +154,19 @@ class ArgoScientificValidationError(ArgoError):
         message: str,
         *,
         reason: ScientificValidationReason | None = None,
+        reasons: Sequence[ScientificValidationReason] = (),
+        prompt_tokens: int = 0,
+        completion_tokens: int = 0,
+        generation_traces: Sequence[object] = (),
     ) -> None:
-        self.reason = reason or classify_scientific_validation_failure(message)
+        explicit_reasons = [*([] if reason is None else [reason]), *reasons]
+        self.reasons = tuple(
+            dict.fromkeys(explicit_reasons or [classify_scientific_validation_failure(message)])
+        )
+        self.reason = self.reasons[0]
+        self.prompt_tokens = max(0, int(prompt_tokens))
+        self.completion_tokens = max(0, int(completion_tokens))
+        self.generation_traces = tuple(generation_traces)
         super().__init__(message)
 
 
@@ -177,47 +225,52 @@ class _ArgoChatResponse(BaseModel):
     usage: _ArgoUsage = Field(default_factory=_ArgoUsage)
 
 
-class ArgoClient:
-    """Synchronous, bounded ARGO client; one request runs at a time."""
+class OpenAICompatibleClient:
+    """Synchronous bounded client resolved from the current-user active profile."""
 
     def __init__(
         self,
         settings: Settings,
         *,
         api_key: str | None = None,
+        provider_id: LlmProviderId | None = None,
         transport: httpx.BaseTransport | None = None,
         quota_service: ArgoQuotaService | None = None,
+        request_timeout_seconds: float | None = None,
     ) -> None:
         self.settings = settings
         self.config = settings.argo
+        provider_store = LlmProviderStore(settings)
+        self.profile = provider_store.profile(provider_id or provider_store.active_provider())
+        self.provider = self.profile.id
+        self.provider_label = "ARGO" if self.provider == "argo" else self.profile.label
+        self.base_url = self.profile.base_url
+        self.model = self.profile.model
         self.memory = MemoryGuard(settings.memory)
-        self._quota_service = quota_service or ArgoQuotaService(
-            Database(settings.paths.database_path)
+        self._quota_service = (
+            quota_service or ArgoQuotaService(Database(settings.paths.database_path))
+            if self.provider == "argo"
+            else None
         )
         if api_key is None:
-            # Imported lazily because argo_key uses ArgoHealth in its public
-            # connection-status contract. Runtime clients must prefer the
-            # current user's DPAPI key; the environment variable is retained
-            # only as a CLI/development fallback.
-            from app.llm.argo_key import ArgoKeyStore
-
-            stored_api_key = ArgoKeyStore(settings).load()
-            api_key = (
-                stored_api_key
-                if stored_api_key is not None
-                else os.environ.get(self.config.api_key_env, "")
-            )
-        cleaned_api_key = api_key.strip()
+            api_key = provider_store.api_key(self.provider)
+        cleaned_api_key = (api_key or "").strip()
         self._api_key_configured = bool(cleaned_api_key)
         self._credential_fingerprint = sha256(cleaned_api_key.encode("utf-8")).hexdigest()
         headers = {"Accept": "application/json"}
         if cleaned_api_key:
             headers["Authorization"] = f"Bearer {cleaned_api_key}"
+        timeout_seconds = min(
+            float(self.config.request_timeout_seconds),
+            float(request_timeout_seconds or self.config.request_timeout_seconds),
+        )
+        if timeout_seconds <= 0:
+            raise ValueError("LLM request timeout must be positive")
         self._http = httpx.Client(
-            base_url=f"{self.config.base_url}/",
+            base_url=f"{self.base_url}/",
             timeout=httpx.Timeout(
-                self.config.request_timeout_seconds,
-                connect=min(10.0, self.config.request_timeout_seconds),
+                timeout_seconds,
+                connect=min(10.0, timeout_seconds),
             ),
             follow_redirects=False,
             trust_env=False,
@@ -234,7 +287,7 @@ class ArgoClient:
     def _selected_model(model: str) -> str:
         cleaned = model.strip()
         if not cleaned or any(character.isspace() for character in cleaned):
-            raise ValueError("ARGO model name is invalid")
+            raise ValueError("LLM model name is invalid")
         return cleaned
 
     def _request(
@@ -246,43 +299,48 @@ class ArgoClient:
         on_reserved: Callable[[], None] | None = None,
     ) -> dict[str, Any]:
         if self._closed:
-            raise RuntimeError("ARGO client is closed")
+            raise RuntimeError("LLM client is closed")
         if not self._api_key_configured:
-            raise ArgoAuthenticationError(
-                f"ARGO API key is missing from environment variable {self.config.api_key_env}"
-            )
-        reservation = self._quota_service.reserve(path)
-        if not reservation.allowed:
-            raise ArgoLocalQuotaError(reservation.next_allowed_at)
+            if self.provider == "argo":
+                raise ArgoAuthenticationError(
+                    f"ARGO API key is missing from environment variable {self.config.api_key_env}"
+                )
+            raise ArgoAuthenticationError("Custom LLM API key is missing")
+        if self._quota_service is not None:
+            reservation = self._quota_service.reserve(path)
+            if not reservation.allowed:
+                raise ArgoLocalQuotaError(reservation.next_allowed_at)
         if on_reserved is not None:
             on_reserved()
         try:
             response = self._http.request(method, path, json=json_body)
         except httpx.TimeoutException as exc:
-            raise ArgoUnavailableError("ARGO request timed out") from exc
+            raise ArgoUnavailableError(f"{self.provider_label} request timed out") from exc
         except httpx.HTTPError as exc:
-            raise ArgoUnavailableError("ARGO service is unavailable") from exc
+            raise ArgoUnavailableError(f"{self.provider_label} service is unavailable") from exc
         if response.is_redirect:
-            raise ArgoProtocolError("ARGO redirects are forbidden")
+            raise ArgoProtocolError(f"{self.provider_label} redirects are forbidden")
         try:
             payload = response.json()
         except ValueError as exc:
             raise ArgoProtocolError(
-                f"ARGO returned non-JSON data with HTTP {response.status_code}"
+                f"{self.provider_label} returned non-JSON data with HTTP {response.status_code}"
             ) from exc
         if not isinstance(payload, dict):
-            raise ArgoProtocolError("ARGO returned a non-object JSON response")
+            raise ArgoProtocolError(f"{self.provider_label} returned a non-object JSON response")
         if response.status_code == 401:
-            raise ArgoAuthenticationError("ARGO rejected the configured API key")
+            raise ArgoAuthenticationError(f"{self.provider_label} rejected the configured API key")
         if response.status_code == 403:
-            raise ArgoAuthorizationError("ARGO denied access to the requested model or operation")
+            raise ArgoAuthorizationError(
+                f"{self.provider_label} denied access to the requested model or operation"
+            )
         if response.status_code == 429:
-            raise ArgoQuotaError("ARGO request quota has been reached")
+            raise ArgoQuotaError(f"{self.provider_label} request quota has been reached")
         if response.is_error:
             raw_detail = payload.get("detail") or payload.get("error")
             detail = "request rejected" if raw_detail is None else str(raw_detail)[:500]
             raise ArgoGenerationError(
-                f"ARGO request failed with HTTP {response.status_code}: {detail}"
+                f"{self.provider_label} request failed with HTTP {response.status_code}: {detail}"
             )
         return payload
 
@@ -291,17 +349,20 @@ class ArgoClient:
         try:
             result = _ArgoModelList.model_validate(payload)
         except ValidationError as exc:
-            raise ArgoProtocolError("ARGO returned invalid model metadata") from exc
+            raise ArgoProtocolError(
+                f"{self.provider_label} returned invalid model metadata"
+            ) from exc
         return sorted({model.id for model in result.data})
 
     def health(self, *, model: str | None = None) -> ArgoHealth:
-        selected_model = self._selected_model(model or self.config.model)
+        selected_model = self._selected_model(model or self.model)
         try:
             models = self.list_models()
         except ArgoAuthorizationError as exc:
             return ArgoHealth(
                 reachable=True,
-                base_url=self.config.base_url,
+                provider=self.provider,
+                base_url=self.base_url,
                 configured_model=selected_model,
                 model_available=False,
                 available_models=[],
@@ -311,7 +372,8 @@ class ArgoClient:
         except ArgoError as exc:
             return ArgoHealth(
                 reachable=False,
-                base_url=self.config.base_url,
+                provider=self.provider,
+                base_url=self.base_url,
                 configured_model=selected_model,
                 model_available=False,
                 available_models=[],
@@ -320,7 +382,8 @@ class ArgoClient:
             )
         return ArgoHealth(
             reachable=True,
-            base_url=self.config.base_url,
+            provider=self.provider,
+            base_url=self.base_url,
             configured_model=selected_model,
             model_available=selected_model in models,
             available_models=models,
@@ -329,9 +392,9 @@ class ArgoClient:
         )
 
     def ensure_model(self, model: str | None = None) -> str:
-        selected_model = self._selected_model(model or self.config.model)
+        selected_model = self._selected_model(model or self.model)
         cache_key = (
-            self.config.base_url,
+            self.base_url,
             selected_model,
             self._credential_fingerprint,
         )
@@ -343,7 +406,7 @@ class ArgoClient:
                 return selected_model
         if selected_model not in self.list_models():
             raise ArgoGenerationError(
-                f"ARGO model is unavailable for this account: {selected_model}"
+                f"{self.provider_label} model is unavailable for this account: {selected_model}"
             )
         with _MODEL_VALIDATION_CACHE_LOCK:
             expired_keys = [
@@ -361,13 +424,13 @@ class ArgoClient:
         try:
             validated = [GenerationMessage.model_validate(message) for message in messages]
         except ValidationError as exc:
-            raise ValueError("invalid ARGO chat message") from exc
+            raise ValueError("invalid LLM chat message") from exc
         if not validated:
-            raise ValueError("at least one ARGO message is required")
+            raise ValueError("at least one LLM message is required")
         character_count = sum(len(message.content) for message in validated)
         if character_count > self.config.max_input_characters:
             raise ValueError(
-                "ARGO input exceeds the configured character limit "
+                "LLM input exceeds the configured character limit "
                 f"({character_count} > {self.config.max_input_characters})"
             )
         return validated
@@ -384,18 +447,18 @@ class ArgoClient:
         on_request_reserved: Callable[[], None] | None = None,
     ) -> GenerationResponse:
         del num_ctx  # ARGO controls the server-side context window.
-        selected_model = self._selected_model(model or self.config.model)
+        selected_model = self._selected_model(model or self.model)
         validated_messages = self._messages(messages)
         selected_temperature = self.config.temperature if temperature is None else temperature
         selected_output_tokens = (
             self.config.max_output_tokens if max_output_tokens is None else max_output_tokens
         )
         if not 0.0 <= selected_temperature <= 2.0:
-            raise ValueError("ARGO temperature must be between 0 and 2")
+            raise ValueError("LLM temperature must be between 0 and 2")
         if not 1 <= selected_output_tokens <= self.config.max_output_tokens:
-            raise ValueError("ARGO output token limit exceeds configuration")
+            raise ValueError("LLM output token limit exceeds configuration")
         if json_schema is not None and not json_schema:
-            raise ValueError("ARGO JSON schema cannot be empty")
+            raise ValueError("LLM JSON schema cannot be empty")
 
         request_body: dict[str, Any] = {
             "model": selected_model,
@@ -428,15 +491,21 @@ class ArgoClient:
             try:
                 raw = _ArgoChatResponse.model_validate(payload)
             except ValidationError as exc:
-                raise ArgoProtocolError("ARGO returned an invalid chat response") from exc
+                raise ArgoProtocolError(
+                    f"{self.provider_label} returned an invalid chat response"
+                ) from exc
             choice = raw.choices[0]
             content = choice.message.content
             if raw.model != selected_model:
-                raise ArgoProtocolError(f"ARGO answered with unexpected model: {raw.model}")
+                raise ArgoProtocolError(
+                    f"{self.provider_label} answered with unexpected model: {raw.model}"
+                )
             if not isinstance(content, str) or not content.strip():
                 reason = choice.finish_reason or "unknown"
-                raise ArgoProtocolError(f"ARGO returned no answer content (finish_reason={reason})")
-            self.memory.check("INRAE ARGO response")
+                raise ArgoProtocolError(
+                    f"{self.provider_label} returned no answer content (finish_reason={reason})"
+                )
+            self.memory.check(f"{self.provider_label} response")
             return GenerationResponse(
                 model=raw.model,
                 content=content,
@@ -458,8 +527,21 @@ class ArgoClient:
         self._api_key_configured = False
         self._closed = True
 
-    def __enter__(self) -> ArgoClient:
+    def __enter__(self) -> OpenAICompatibleClient:
         return self
 
     def __exit__(self, *_: object) -> None:
         self.close()
+
+
+# Compatibility aliases keep existing integrations and tests stable while all new
+# runtime clients resolve the selected provider.
+ArgoClient = OpenAICompatibleClient
+LlmHealth = ArgoHealth
+LlmError = ArgoError
+LlmUnavailableError = ArgoUnavailableError
+LlmAuthenticationError = ArgoAuthenticationError
+LlmAuthorizationError = ArgoAuthorizationError
+LlmQuotaError = ArgoQuotaError
+LlmProtocolError = ArgoProtocolError
+LlmGenerationError = ArgoGenerationError

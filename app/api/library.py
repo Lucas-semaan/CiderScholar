@@ -31,7 +31,7 @@ def library_records(
     statuses: Annotated[str, Query(max_length=200)] = "",
     theme: Annotated[str | None, Query(max_length=100)] = None,
     source: Annotated[str | None, Query(max_length=200)] = None,
-    availability: Literal["all", "full_text", "abstract_only"] = "all",
+    availability: Literal["all", "full_text", "abstract_only", "metadata_only"] = "all",
     abstract: Literal["all", "with", "without"] = "all",
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
     offset: Annotated[int, Query(ge=0)] = 0,

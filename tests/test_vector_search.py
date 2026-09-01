@@ -74,6 +74,60 @@ def _seed_database(database: Database, count: int = 3) -> list[int]:
     return [int(row["id"]) for row in database.chunks_for_embedding(limit=count)]
 
 
+def test_qdrant_indexes_share_one_lazy_client_owner(settings, monkeypatch) -> None:
+    created_clients = []
+
+    class FakeQdrantClient:
+        def __init__(self, **options) -> None:
+            self.options = options
+            self.close_count = 0
+            created_clients.append(self)
+
+        def close(self) -> None:
+            self.close_count += 1
+
+    monkeypatch.setattr(
+        "app.retrieval.vector_search.QdrantClient",
+        FakeQdrantClient,
+    )
+    owner = QdrantLocalIndex(settings, model_name="fake/multilingual")
+    abstracts = QdrantLocalIndex(
+        settings,
+        model_name="fake/multilingual",
+        collection_name="bibliographic_abstracts",
+        client_owner=owner,
+    )
+    chunks = QdrantLocalIndex(
+        settings,
+        model_name="fake/multilingual",
+        collection_name="science_chunks",
+        client_owner=owner,
+    )
+
+    assert created_clients == []
+    assert abstracts.client is chunks.client is owner.client
+    assert len(created_clients) == 1
+
+    abstracts.close()
+    chunks.close()
+    assert created_clients[0].close_count == 0
+    owner.close()
+    owner.close()
+    assert created_clients[0].close_count == 1
+
+
+def test_qdrant_client_owner_rejects_another_local_path(settings) -> None:
+    owner = QdrantLocalIndex(settings, model_name="fake/multilingual")
+
+    with pytest.raises(ValueError, match="same local path"):
+        QdrantLocalIndex(
+            settings,
+            model_name="fake/multilingual",
+            path=settings.paths.qdrant_dir / "other-corpus",
+            client_owner=owner,
+        )
+
+
 def test_qdrant_local_index_persists_searches_and_filters(settings) -> None:
     index = QdrantLocalIndex(
         settings, model_name="fake/multilingual", collection_name="test_vectors"
@@ -244,3 +298,44 @@ def test_vector_search_reuses_query_vector_and_respects_backend_ownership(settin
 
     service.close()
     assert backend.closed is False
+
+
+def test_vector_search_many_matches_sequential_searches_and_batches_uncached_queries(
+    settings,
+) -> None:
+    clear_query_vector_cache()
+    database = Database(settings.paths.database_path)
+    database.initialize()
+    chunk_ids = _seed_database(database, count=2)
+    backend = FakeBackend()
+    index = QdrantLocalIndex(
+        settings, model_name=backend.model_name, collection_name="batch_search"
+    )
+    index.upsert(
+        EmbeddedChunkBatch(
+            chunk_ids=tuple(chunk_ids),
+            article_ids=("article-a", "article-a"),
+            sections=("Results", "Discussion"),
+            page_starts=(1, 2),
+            page_ends=(1, 2),
+            vectors=((1.0, 0.0), (0.0, 1.0)),
+            model_name=backend.model_name,
+            vector_dimension=2,
+        )
+    )
+    service = VectorSearchService(database, backend, index, close_backend=False)
+    queries = [
+        "first scientific question",
+        "second scientific question",
+        "first scientific question",
+    ]
+    try:
+        batch = service.search_many(queries, limit=2)
+        assert backend.query_calls == 1
+        assert service.query_cache_misses == 2
+        assert service.query_cache_hits == 1
+        assert [[result.model_dump() for result in group] for group in batch] == [
+            [result.model_dump() for result in service.search(query, limit=2)] for query in queries
+        ]
+    finally:
+        service.close()

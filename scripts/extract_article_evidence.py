@@ -19,6 +19,7 @@ from app.llm.article_evidence import (
     ArticleEvidenceExtractor,
     EvidencePassageSelector,
 )
+from app.llm.providers import active_llm_model
 from app.retrieval.article_ranking import ArticleRankingService
 from app.retrieval.hybrid_search import HybridSearchService
 from app.retrieval.lexical_search import LexicalSearchService
@@ -219,7 +220,7 @@ def main(argv: list[str] | None = None) -> int:
             original_query=args.query.strip(),
             expanded_queries=args.variants or [],
             selected_article_ids=selected_ids,
-            model_version=settings.argo.model,
+            model_version=active_llm_model(settings),
             parameters_hash=_parameter_hash(args, settings.model_dump(mode="json")),
         )
     print(f"query_id={query_id}", file=sys.stderr)

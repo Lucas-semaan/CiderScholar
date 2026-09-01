@@ -38,6 +38,9 @@ DEFAULT_CIDER_LEXICON: tuple[BilingualLexiconEntry, ...] = tuple(
     for fr, en in (
         ("cidre", "cider"),
         ("jus de pomme", "apple juice"),
+        ("cuvage", "mash maceration"),
+        ("macération avant pressurage", "pre-press maceration"),
+        ("macération de la pulpe", "apple mash maceration"),
         ("occurrence", "occurrence"),
         ("prévalence", "prevalence"),
         ("pasteurisé", "pasteurized"),
@@ -209,27 +212,22 @@ def build_bilingual_variants(
         )
     ]
 
-    # A barrel-ageing question about Calvados needs evidence along separate
-    # scientific axes, not a single generic "oak + aroma" query.  Keep this
-    # controlled expansion narrow: the general bilingual/occurrence behaviour
-    # below remains unchanged for the established cider QA cases.
+    # Structured expansion also covers a recognized matrix + process with no
+    # explicit outcome facet: broad "impact" questions still need one exact,
+    # controlled scientific query before any progressive widening.
     intent = analyze_scientific_intent(normalized)
-    if (
-        include_structured_expansion
-        and intent.matrix_primary
-        and intent.process_terms
-        and intent.facets
-    ):
+    if include_structured_expansion and intent.matrix_primary and intent.process_terms:
         for facet_key, text, scope_tier in intent_query_variants(intent, max_variants=max_variants):
-            if facet_key == "overall":
+            if facet_key == "overall" and text.casefold() == normalized.casefold():
                 continue
             extra_terms = _FACET_QUERY_SYNONYMS.get(facet_key, ())
+            intent_key = "process" if facet_key == "overall" else facet_key
             variants.append(
                 QueryVariant(
                     text=" ".join(dict.fromkeys([text, *extra_terms])),
                     language="en",
                     derivation="matched_terms",
-                    matched_terms=[f"scientific_intent:{facet_key}"],
+                    matched_terms=[f"scientific_intent:{intent_key}"],
                     # Near-matrix apple/cider brandy papers often do not use
                     # the protected designation "Calvados" in their text.
                     # Matrix/process terms in the variant and the downstream

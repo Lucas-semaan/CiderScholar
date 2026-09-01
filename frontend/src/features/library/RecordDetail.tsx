@@ -10,7 +10,7 @@ import { formatDate } from "@/lib/cn";
 import { statusTone } from "@/lib/status";
 import type { LibraryRecord } from "@/types/api";
 
-import { publicationSource, publicationTypeLabel } from "./libraryPresentation";
+import { documentTypeLabel, publicationSource, publicationTypeLabel } from "./libraryPresentation";
 
 const statusLabels: Record<string, string> = {
   accepted: "Acceptée",
@@ -53,13 +53,17 @@ export function RecordDetail({
 }
 
 export function RecordDetailHeader({ record }: { record: LibraryRecord }) {
+  const documentTone =
+    record.document_type === "full_text"
+      ? "info"
+      : record.document_type === "metadata_only"
+        ? "warning"
+        : "neutral";
   return (
     <>
       <div className="flex items-start justify-between gap-3">
         <div className="flex flex-wrap gap-2">
-          <Badge tone={record.document_type === "full_text" ? "info" : "neutral"}>
-            {record.document_type === "full_text" ? "Full article" : "Abstract only"}
-          </Badge>
+          <Badge tone={documentTone}>{documentTypeLabel(record.document_type)}</Badge>
           {record.relevance_status !== "accepted" && (
             <Badge tone={statusTone(record.relevance_status)}>
               {statusLabels[record.relevance_status]}
@@ -143,12 +147,24 @@ export function RecordDetailBody({
           <p className="mt-1 break-all font-mono text-xs text-forest-800">{record.doi}</p>
         </div>
       )}
-      <div>
-        <h3 className="text-xs font-bold uppercase tracking-wider text-slate-400">Abstract</h3>
-        <p className="mt-2 whitespace-pre-wrap text-sm leading-6 text-slate-600">
-          {record.abstract ?? "Abstract indisponible."}
-        </p>
-      </div>
+      {record.document_type === "metadata_only" ? (
+        <div>
+          <h3 className="text-xs font-bold uppercase tracking-wider text-slate-400">
+            Disponibilité
+          </h3>
+          <p className="mt-2 text-sm leading-6 text-slate-600">
+            Aucun abstract ni texte intégral n’est actuellement associé à cette notice. Elle
+            n’alimente pas le RAG scientifique.
+          </p>
+        </div>
+      ) : (
+        <div>
+          <h3 className="text-xs font-bold uppercase tracking-wider text-slate-400">Abstract</h3>
+          <p className="mt-2 whitespace-pre-wrap text-sm leading-6 text-slate-600">
+            {record.abstract ?? "Abstract indisponible."}
+          </p>
+        </div>
+      )}
       {record.relevance_reason && (
         <div>
           <h3 className="text-xs font-bold uppercase tracking-wider text-slate-400">
@@ -185,8 +201,12 @@ function RecordReviewDecision({
       const result = await api.library.decideReview(record.id, decision);
       onReviewed(
         result.decision === "accepted"
-          ? "Le document a été validé dans la base scientifique et sera indexé."
-          : "L’article a été rejeté et supprimé intégralement de la base.",
+          ? record.document_type === "metadata_only"
+            ? "La notice a été validée et reste dans la file d’acquisition jusqu’à la disponibilité d’un contenu scientifique."
+            : "Le document a été validé dans la base scientifique et sera indexé."
+          : record.document_type === "metadata_only"
+            ? "La notice a été rejetée et supprimée intégralement de la base."
+            : "L’article a été rejeté et supprimé intégralement de la base.",
         record.id,
       );
     } catch (caught) {

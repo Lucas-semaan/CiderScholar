@@ -162,7 +162,10 @@ complets (`Full article`) et les abstracts acceptés sans PDF (`Abstract only`).
 n’apparaît que s’il possède un DOI complet, valide et normalisé. Lorsqu’un PDF porte le même DOI, ses
 métadonnées sont fusionnées et une seule fiche `Full article` subsiste. La recherche par mot-clé
 couvre les métadonnées, les abstracts et le texte extrait des PDF. Seul un article complet propose
-l’ouverture via `GET /api/corpus/{article_id}/pdf`. Les commandes d’exploitation restent disponibles :
+l’ouverture via `GET /api/corpus/{article_id}/pdf`. La vue séparée « Notices à acquérir » expose les
+références `accepted` ou `review` qui ne possèdent encore ni abstract ni texte intégral. Elles sont
+étiquetées `metadata_only` par l’API et restent exclues du RAG. Les commandes d’exploitation restent
+disponibles :
 
 ```powershell
 .\.venv\Scripts\python.exe -m scripts.ingest_folder "C:\chemin\vers\les\PDF" --recursive
@@ -219,8 +222,9 @@ déduplication DOI, le filtre de pertinence ni l’archivage préalable des reje
 
 Une notice classée `rejected` est d’abord copiée dans la table
 `rejected_bibliographic_archive` avec au minimum son DOI et son titre, puis exportée en JSON sous
-`data/exports`. Les références `review` restent dans la file technique de qualification ; elles ne
-sont visibles ni dans la Base documentaire ni dans le RAG.
+`data/exports`. Les références `review` sans contenu restent visibles dans la file « Notices à
+acquérir » pour une décision humaine ; elles ne deviennent jamais des preuves du RAG tant qu’un
+contenu admissible n’a pas été acquis, persisté et indexé.
 
 Après les tentatives d’enrichissement DOI, toute notice encore dépourvue d’abstract est elle aussi
 classée non exploitable, archivée avec son DOI/titre puis retirée de la base active. L’invariant

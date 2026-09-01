@@ -2,13 +2,21 @@ from __future__ import annotations
 
 import pytest
 
-from app.llm.response_style import ResponseStyle, detect_response_style
+from app.llm.response_style import (
+    ResponseStyle,
+    detect_response_style,
+    requested_response_style,
+)
 
 
 def test_response_style_defaults_to_prose_without_format_instruction() -> None:
     assert (
         detect_response_style("Quels facteurs influencent la fermentation ?") is ResponseStyle.PROSE
     )
+
+
+def test_response_style_leaves_unspecified_typology_to_argo() -> None:
+    assert requested_response_style("Quels facteurs influencent la fermentation ?") is None
 
 
 @pytest.mark.parametrize("question", ["", "Présente les résultats.", "Use a table."])
@@ -18,6 +26,7 @@ def test_response_style_falls_back_to_prose_for_unknown_input(question: str) -> 
 
 def test_response_style_detects_explicit_french_list_request() -> None:
     assert detect_response_style("Liste les facteurs importants.") is ResponseStyle.BULLET_LIST
+    assert requested_response_style("Liste les facteurs importants.") is ResponseStyle.BULLET_LIST
 
 
 def test_response_style_detects_explicit_english_list_request() -> None:

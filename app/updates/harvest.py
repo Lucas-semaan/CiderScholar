@@ -29,6 +29,7 @@ MISSING_ABSTRACT_REASON = (
 MISSING_DOI_REASON = (
     "Verified DOI unavailable; retained for review but excluded from the usable corpus."
 )
+SQLITE_PARAMETER_BATCH_SIZE = 900
 
 CIDER_PILOT_THEMES: dict[str, str] = {
     "biochimie": (
@@ -225,6 +226,7 @@ STRONG_TECHNICAL_CONTEXT_PATTERN = re.compile(
     r"clarif[a-z]*|distill[a-z]*|brewing|winemaking|brandy|spirits?|cultivars?|"
     r"orchards?|pectin[a-z]*|pasteur[a-z]*|matur[a-z]*|ageing|aging|quality|"
     r"processing|production|microfiltrat[a-z]*|filtrat[a-z]*|analyt[a-z]*|chimi[a-z]*|"
+    r"making|manufactur[a-z]*|detect[a-z]*|concentrat[a-z]*|preserv[a-z]*|"
     r"acides?|sucres?|"
     r"levures?|bacteries?|aromes?|qualite|vieillissement|transformation|"
     r"determin[a-z]*|quantif[a-z]*|measur[a-z]*|characteri[sz][a-z]*|"
@@ -277,7 +279,8 @@ THEME_PATTERNS: dict[str, re.Pattern[str]] = {
     ),
     "aromes_procede": re.compile(
         r"\b(?:aroma[a-z]*|volatile[a-z]*|sensory|flavou?r[a-z]*|process[a-z]*|"
-        r"production|ferment[a-z]*|quality|proces[a-z]*|elabor[a-z]*|"
+        r"production|making|manufactur[a-z]*|detect[a-z]*|concentrat[a-z]*|"
+        r"preserv[a-z]*|ferment[a-z]*|quality|proces[a-z]*|elabor[a-z]*|"
         r"producci[a-z]*|calidad)\b"
     ),
 }
@@ -371,7 +374,9 @@ def _canonical_key(record: BibliographicRecord) -> str:
     return f"title:{title_key}:{record.publication_year or 'unknown'}"
 
 
-def _content_hash(values: dict[str, Any]) -> str:
+def bibliographic_content_hash(values: dict[str, Any]) -> str:
+    """Hash the persisted bibliographic metadata used for change detection."""
+
     payload = json.dumps(values, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
@@ -389,8 +394,11 @@ def _bibliographic_metadata_query(query: str) -> tuple[str, list[Any]]:
         return "1 = 1", []
     terms = [term.strip(",;:\"'") for term in normalized_query.split()]
     terms = [term for term in terms if term]
-    if len(terms) > 50:
-        raise ValueError("bibliographic query cannot exceed 50 terms")
+    # Query plans may legitimately contain a long natural-language reformulation.
+    # Keep the SQLite predicate bounded without cancelling the whole abstract
+    # branch: the first terms preserve deterministic order and the FTS/vector
+    # branches still contribute independently.
+    terms = terms[:50]
     clauses: list[str] = []
     parameters: list[Any] = []
     for term in terms:
@@ -790,6 +798,7 @@ class BibliographicHarvestStore:
         _connection: Any | None = None,
     ) -> str | None:
         if self.doi_exclusions.is_excluded(record.doi):
+            self._persist_archived_source_observation(record, connection=_connection)
             return None
         canonical_key = _canonical_key(record)
         assessment = assess_cider_relevance(record, theme)
@@ -915,12 +924,16 @@ class BibliographicHarvestStore:
             connection.execute(
                 """
                 INSERT INTO bibliographic_record_sources (
-                    record_id, source, source_id
-                ) VALUES (?, ?, ?)
+                    record_id, source, source_id, source_title
+                ) VALUES (?, ?, ?, ?)
                 ON CONFLICT(record_id, source, source_id) DO UPDATE SET
-                    last_seen_at = CURRENT_TIMESTAMP
+                    last_seen_at = CURRENT_TIMESTAMP,
+                    source_title = COALESCE(
+                        bibliographic_record_sources.source_title,
+                        excluded.source_title
+                    )
                 """,
-                (record_id, record.source, record.source_id),
+                (record_id, record.source, record.source_id, record.journal),
             )
             connection.execute(
                 """
@@ -942,6 +955,52 @@ class BibliographicHarvestStore:
             )
             self._refresh_record_relevance(connection, record_id)
         return record_id
+
+    def _persist_archived_source_observation(
+        self,
+        record: BibliographicRecord,
+        *,
+        connection: Any | None = None,
+    ) -> None:
+        """Keep provider provenance for a DOI already held in the rejection archive."""
+
+        if record.doi is None:
+            return
+        transaction = (
+            nullcontext(connection) if connection is not None else self.database.transaction()
+        )
+        with transaction as active_connection:
+            archived = active_connection.execute(
+                """
+                SELECT original_record_id
+                FROM rejected_bibliographic_archive
+                WHERE doi = ? COLLATE NOCASE
+                ORDER BY last_archived_at DESC
+                LIMIT 1
+                """,
+                (record.doi,),
+            ).fetchone()
+            if archived is None:
+                return
+            active_connection.execute(
+                """
+                INSERT INTO rejected_bibliographic_record_sources (
+                    original_record_id, source, source_id, source_title
+                ) VALUES (?, ?, ?, ?)
+                ON CONFLICT(original_record_id, source, source_id) DO UPDATE SET
+                    last_seen_at = CURRENT_TIMESTAMP,
+                    source_title = COALESCE(
+                        rejected_bibliographic_record_sources.source_title,
+                        excluded.source_title
+                    )
+                """,
+                (
+                    archived["original_record_id"],
+                    record.source,
+                    record.source_id,
+                    record.journal,
+                ),
+            )
 
     def upsert_hits(
         self,
@@ -1069,7 +1128,7 @@ class BibliographicHarvestStore:
             "citation_count": record.citation_count,
             "url": record.url,
         }
-        values["content_hash"] = _content_hash(values)
+        values["content_hash"] = bibliographic_content_hash(values)
         values["embedding_status"] = "pending" if record.abstract else "not_applicable"
         return values
 
@@ -1117,7 +1176,7 @@ class BibliographicHarvestStore:
             "citation_count": max(citation_counts) if citation_counts else None,
             "url": existing.get("url") or record.url,
         }
-        values["content_hash"] = _content_hash(values)
+        values["content_hash"] = bibliographic_content_hash(values)
         return values
 
     def merge_doi_enrichment_duplicates(self) -> list[str]:
@@ -1241,7 +1300,7 @@ class BibliographicHarvestStore:
         sources = list(
             connection.execute(
                 """
-                SELECT source, source_id, first_seen_at, last_seen_at
+                SELECT source, source_id, source_title, first_seen_at, last_seen_at
                 FROM bibliographic_record_sources WHERE record_id = ?
                 """,
                 (duplicate_id,),
@@ -1251,16 +1310,21 @@ class BibliographicHarvestStore:
             connection.execute(
                 """
                 INSERT INTO bibliographic_record_sources (
-                    record_id, source, source_id, first_seen_at, last_seen_at
-                ) VALUES (?, ?, ?, ?, ?)
+                    record_id, source, source_id, source_title, first_seen_at, last_seen_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
                 ON CONFLICT(record_id, source, source_id) DO UPDATE SET
                     first_seen_at = MIN(first_seen_at, excluded.first_seen_at),
-                    last_seen_at = MAX(last_seen_at, excluded.last_seen_at)
+                    last_seen_at = MAX(last_seen_at, excluded.last_seen_at),
+                    source_title = COALESCE(
+                        bibliographic_record_sources.source_title,
+                        excluded.source_title
+                    )
                 """,
                 (
                     survivor_id,
                     source["source"],
                     source["source_id"],
+                    source["source_title"],
                     source["first_seen_at"],
                     source["last_seen_at"],
                 ),
@@ -1603,35 +1667,38 @@ class BibliographicHarvestStore:
         if not unique_ids:
             return 0
         self.exclude_archived_rejected_dois(unique_ids)
-        placeholders = ",".join("?" for _ in unique_ids)
+        deleted = 0
         with self.database.transaction() as connection:
-            cursor = connection.execute(
-                f"""
-                DELETE FROM bibliographic_records
-                WHERE id IN ({placeholders})
-                  AND relevance_status = 'rejected'
-                  AND EXISTS (
-                      SELECT 1 FROM rejected_bibliographic_archive AS a
-                      WHERE a.original_record_id = bibliographic_records.id
-                        AND a.title = bibliographic_records.title
-                        AND (
-                            bibliographic_records.doi IS NULL
-                            OR a.doi = bibliographic_records.doi COLLATE NOCASE
+            for offset in range(0, len(unique_ids), SQLITE_PARAMETER_BATCH_SIZE):
+                record_id_batch = unique_ids[offset : offset + SQLITE_PARAMETER_BATCH_SIZE]
+                placeholders = ",".join("?" for _ in record_id_batch)
+                cursor = connection.execute(
+                    f"""
+                    DELETE FROM bibliographic_records
+                    WHERE id IN ({placeholders})
+                      AND relevance_status = 'rejected'
+                      AND EXISTS (
+                          SELECT 1 FROM rejected_bibliographic_archive AS a
+                          WHERE a.original_record_id = bibliographic_records.id
+                            AND a.title = bibliographic_records.title
+                            AND (
+                                bibliographic_records.doi IS NULL
+                                OR a.doi = bibliographic_records.doi COLLATE NOCASE
+                            )
                         )
-                  )
-                """,
-                unique_ids,
-            )
-            deleted = int(cursor.rowcount)
-            remaining = connection.execute(
-                f"""
-                SELECT COUNT(*) FROM bibliographic_records
-                WHERE id IN ({placeholders}) AND relevance_status = 'rejected'
-                """,
-                unique_ids,
-            ).fetchone()
-            if int(remaining[0] or 0):
-                raise RuntimeError("some archived rejected records could not be deleted")
+                    """,
+                    record_id_batch,
+                )
+                deleted += int(cursor.rowcount)
+                remaining = connection.execute(
+                    f"""
+                    SELECT COUNT(*) FROM bibliographic_records
+                    WHERE id IN ({placeholders}) AND relevance_status = 'rejected'
+                    """,
+                    record_id_batch,
+                ).fetchone()
+                if int(remaining[0] or 0):
+                    raise RuntimeError("some archived rejected records could not be deleted")
         return deleted
 
     def exclude_archived_rejected_dois(self, record_ids: list[str]) -> int:
@@ -1640,24 +1707,28 @@ class BibliographicHarvestStore:
         unique_ids = list(dict.fromkeys(record_ids))
         if not unique_ids:
             return 0
-        placeholders = ",".join("?" for _ in unique_ids)
+        excluded = 0
         with closing(self.database.connect()) as connection:
-            rows = connection.execute(
-                f"""
-                SELECT doi, title, relevance_reason AS reason,
-                    last_archived_at AS excluded_at
-                FROM rejected_bibliographic_archive
-                WHERE original_record_id IN ({placeholders})
-                """,
-                unique_ids,
-            )
-            return self.doi_exclusions.exclude_many(
-                {
-                    **dict(row),
-                    "origin": "automatic_relevance_rejection",
-                }
-                for row in rows
-            )
+            for offset in range(0, len(unique_ids), SQLITE_PARAMETER_BATCH_SIZE):
+                record_id_batch = unique_ids[offset : offset + SQLITE_PARAMETER_BATCH_SIZE]
+                placeholders = ",".join("?" for _ in record_id_batch)
+                rows = connection.execute(
+                    f"""
+                    SELECT doi, title, relevance_reason AS reason,
+                        last_archived_at AS excluded_at
+                    FROM rejected_bibliographic_archive
+                    WHERE original_record_id IN ({placeholders})
+                    """,
+                    record_id_batch,
+                )
+                excluded += self.doi_exclusions.exclude_many(
+                    {
+                        **dict(row),
+                        "origin": "automatic_relevance_rejection",
+                    }
+                    for row in rows
+                )
+        return excluded
 
     def archive_statistics(self) -> dict[str, int]:
         with closing(self.database.connect()) as connection:
@@ -2151,7 +2222,7 @@ class BibliographicHarvestStore:
                     (
                         title,
                         abstract,
-                        _content_hash(hash_values),
+                        bibliographic_content_hash(hash_values),
                         abstract,
                         current["id"],
                     ),

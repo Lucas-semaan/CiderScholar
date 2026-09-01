@@ -17,6 +17,7 @@ htmlcov/
 .vite/
 node_modules/
 artifacts/
+outputs/
 tmp/
 
 # Local scientific data and generated artifacts

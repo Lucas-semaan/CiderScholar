@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Sequence
 from time import perf_counter
 from typing import Any
@@ -15,6 +16,8 @@ from app.ingestion.embeddings import EmbeddingBackend
 from app.retrieval.lexical_search import LexicalQueryBuilder
 from app.retrieval.vector_search import QdrantLocalIndex
 from app.updates.harvest import BibliographicHarvestStore, infer_cider_themes
+
+LOGGER = logging.getLogger(__name__)
 
 CIDER_QUERY_EXPANSIONS: dict[str, str] = {
     "biochimie": "biochemistry metabolism organic acids sugar ethanol glycerol kinetics",
@@ -91,17 +94,25 @@ class BibliographicHybridResponse(BaseModel):
     lexical_candidate_count: int = Field(default=0, ge=0)
     dense_candidate_count: int = Field(default=0, ge=0)
     rrf_unique_candidate_count: int = Field(default=0, ge=0)
+    vector_search_degraded: bool = False
+    degradation_codes: list[str] = Field(default_factory=list, max_length=16)
     duration_seconds: float = Field(ge=0.0)
 
 
 class BibliographicVectorIndex:
     """Separate Qdrant collection so abstract records never impersonate PDF chunks."""
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        *,
+        qdrant_client_owner: QdrantLocalIndex | None = None,
+    ) -> None:
         self.settings = settings
         self.index = QdrantLocalIndex(
             settings,
             collection_name=settings.harvest.vector_collection_name,
+            client_owner=qdrant_client_owner,
         )
 
     @property
@@ -168,6 +179,59 @@ class BibliographicVectorIndex:
                 raise RuntimeError("invalid bibliographic Qdrant payload")
             references.append((record_id, float(point.score)))
         return references
+
+    def search_many(
+        self,
+        query_vectors: Sequence[Any],
+        *,
+        limit: int = 50,
+    ) -> list[list[tuple[str, float]]]:
+        """Search abstract vectors in one Qdrant request, preserving query order."""
+
+        if not 1 <= limit <= 500:
+            raise ValueError("bibliographic vector limit must be between 1 and 500")
+        vectors = [_float_vector(query_vector) for query_vector in query_vectors]
+        if not vectors:
+            return []
+        if not self.index.collection_exists():
+            return [[] for _ in vectors]
+        for vector in vectors:
+            self.index.ensure_collection(len(vector))
+        response = self.index.client.query_batch_points(
+            collection_name=self.collection_name,
+            requests=[
+                models.QueryRequest(
+                    query=vector,
+                    filter=models.Filter(
+                        must=[
+                            models.FieldCondition(
+                                key="kind",
+                                match=models.MatchValue(value="bibliographic_abstract"),
+                            )
+                        ]
+                    ),
+                    limit=limit,
+                    with_payload=True,
+                    with_vector=False,
+                )
+                for vector in vectors
+            ],
+        )
+        if len(response) != len(vectors):
+            raise RuntimeError(
+                "bibliographic Qdrant batch response count differs from request count"
+            )
+        results: list[list[tuple[str, float]]] = []
+        for query_response in response:
+            references: list[tuple[str, float]] = []
+            for point in query_response.points:
+                payload = point.payload or {}
+                record_id = payload.get("record_id")
+                if not isinstance(record_id, str) or str(point.id) != record_id:
+                    raise RuntimeError("invalid bibliographic Qdrant payload")
+                references.append((record_id, float(point.score)))
+            results.append(references)
+        return results
 
     def count(self) -> int:
         if not self.index.collection_exists():
@@ -425,25 +489,140 @@ class BibliographicHybridSearchService:
         self.index = index
         self.query_builder = LexicalQueryBuilder(settings)
 
-    def search(self, query: str, *, limit: int = 20) -> BibliographicHybridResponse:
-        started = perf_counter()
-        if not query.strip():
-            raise ValueError("bibliographic hybrid query cannot be empty")
+    def search(
+        self,
+        query: str,
+        *,
+        limit: int = 20,
+        vector_enabled: bool = True,
+        prefix_matching: bool | None = None,
+        candidate_limit: int | None = None,
+    ) -> BibliographicHybridResponse:
+        return self.search_many(
+            [query],
+            limit=limit,
+            vector_query_limit=1 if vector_enabled else 0,
+            prefix_matching=prefix_matching,
+            candidate_limit=candidate_limit,
+        )[0]
+
+    def search_many(
+        self,
+        queries: Sequence[str],
+        *,
+        limit: int = 20,
+        vector_query_limit: int | None = None,
+        prefix_matching: bool | None = None,
+        candidate_limit: int | None = None,
+    ) -> list[BibliographicHybridResponse]:
+        """Search variants with one embedding and Qdrant batch, preserving per-query RRF."""
+
         if not 1 <= limit <= 100:
             raise ValueError("bibliographic hybrid limit must be between 1 and 100")
+        cleaned_queries = [" ".join(query.split()) for query in queries]
+        if any(not query for query in cleaned_queries):
+            raise ValueError("bibliographic hybrid query cannot be empty")
+        if not cleaned_queries:
+            return []
+        if vector_query_limit is not None and vector_query_limit < 0:
+            raise ValueError("bibliographic vector query limit cannot be negative")
+        active_vector_count = (
+            len(cleaned_queries)
+            if vector_query_limit is None
+            else min(vector_query_limit, len(cleaned_queries))
+        )
         # BibliographicHarvestStore.search is deliberately capped at 200.
         # Keep wider UI result requests valid instead of constructing an
         # internal limit that the authoritative store rejects.
-        candidate_limit = min(max(limit * 5, 50), 200)
-        expanded_query = expand_cider_query(query)
-        prepared = self.query_builder.build(expanded_query)
-        full_text_rows = self.store.search(prepared.fts5_expression, limit=candidate_limit)
-        metadata_rows = self.store.search_metadata(query, limit=candidate_limit)
-        lexical_rows = list(
-            {str(row["id"]): row for row in [*full_text_rows, *metadata_rows]}.values()
+        candidate_limit = (
+            min(max(limit * 5, 50), 200)
+            if candidate_limit is None
+            else min(max(candidate_limit, limit), 200)
         )
-        query_vectors = self.backend.encode_queries([expanded_query])
-        vector_rows = self.index.search(query_vectors[0], limit=candidate_limit)
+        maximum_query_length = self.settings.retrieval.lexical_max_query_characters
+        expanded_queries = [
+            expand_cider_query(query)[:maximum_query_length] for query in cleaned_queries
+        ]
+        lexical_rows_by_query = []
+        degradation_codes_by_query: list[list[str]] = []
+        for query, expanded_query in zip(cleaned_queries, expanded_queries, strict=True):
+            degradation_codes: list[str] = []
+            try:
+                prepared = self.query_builder.build(
+                    expanded_query,
+                    prefix_matching=prefix_matching,
+                )
+                full_text_rows = self.store.search(
+                    prepared.fts5_expression,
+                    limit=candidate_limit,
+                )
+            except Exception as exc:
+                full_text_rows = []
+                degradation_codes.append("abstract_fts_query_degraded")
+                LOGGER.warning(
+                    "Bibliographic abstract FTS query degraded error_type=%s",
+                    type(exc).__name__,
+                )
+            try:
+                metadata_rows = self.store.search_metadata(query, limit=candidate_limit)
+            except Exception as exc:
+                metadata_rows = []
+                degradation_codes.append("abstract_metadata_query_degraded")
+                LOGGER.warning(
+                    "Bibliographic abstract metadata query degraded error_type=%s",
+                    type(exc).__name__,
+                )
+            lexical_rows_by_query.append(
+                list({str(row["id"]): row for row in [*full_text_rows, *metadata_rows]}.values())
+            )
+            degradation_codes_by_query.append(degradation_codes)
+        vector_rows_by_query: list[list[tuple[str, float]]] = [[] for _query in cleaned_queries]
+        vector_search_degraded = False
+        if active_vector_count:
+            try:
+                query_vectors = self.backend.encode_queries(expanded_queries[:active_vector_count])
+                vector_rows_by_query[:active_vector_count] = self.index.search_many(
+                    query_vectors,
+                    limit=candidate_limit,
+                )
+            except Exception as exc:
+                # The FTS5 results are independently authoritative. A stale or
+                # incompatible optional vector index must not cancel the entire
+                # grouped SQLite abstract search.
+                vector_search_degraded = True
+                LOGGER.warning(
+                    "Bibliographic abstract search continuing without vectors error_type=%s",
+                    type(exc).__name__,
+                )
+        return [
+            self._response(
+                query,
+                lexical_rows,
+                vector_rows,
+                limit=limit,
+                vector_search_degraded=vector_search_degraded,
+                degradation_codes=degradation_codes,
+            )
+            for query, lexical_rows, vector_rows, degradation_codes in zip(
+                cleaned_queries,
+                lexical_rows_by_query,
+                vector_rows_by_query,
+                degradation_codes_by_query,
+                strict=True,
+            )
+        ]
+
+    def _response(
+        self,
+        query: str,
+        lexical_rows: Sequence[Any],
+        vector_rows: Sequence[tuple[str, float]],
+        *,
+        limit: int,
+        vector_search_degraded: bool = False,
+        degradation_codes: Sequence[str] = (),
+    ) -> BibliographicHybridResponse:
+        started = perf_counter()
         lexical_ranks = {str(row["id"]): rank for rank, row in enumerate(lexical_rows, start=1)}
         vector_ranks = {
             record_id: rank for rank, (record_id, _score) in enumerate(vector_rows, start=1)
@@ -506,11 +685,13 @@ class BibliographicHybridSearchService:
                 )
             )
         return BibliographicHybridResponse(
-            query=query.strip(),
+            query=query,
             results=results,
             lexical_candidate_count=len(lexical_rows),
             dense_candidate_count=len(vector_rows),
             rrf_unique_candidate_count=len(scores),
+            vector_search_degraded=vector_search_degraded,
+            degradation_codes=list(dict.fromkeys(degradation_codes)),
             duration_seconds=perf_counter() - started,
         )
 
