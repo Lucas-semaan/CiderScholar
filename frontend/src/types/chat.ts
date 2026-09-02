@@ -77,6 +77,7 @@ export interface ChatbotSource {
   publication_year: number | null;
   providers: string[];
   url: string | null;
+  local_pdf_url: string | null;
   snippet: string;
 }
 

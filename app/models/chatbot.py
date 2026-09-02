@@ -114,6 +114,9 @@ class ChatbotSource(BaseModel):
     publication_year: int | None = None
     providers: list[str]
     url: str | None = None
+    # Persisted responses keep this nullable URL for backward compatibility.
+    # It is emitted only after the authoritative local file check succeeds.
+    local_pdf_url: str | None = None
     snippet: str = Field(max_length=800)
 
 

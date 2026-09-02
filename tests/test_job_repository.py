@@ -808,6 +808,40 @@ def test_expired_lease_recovery_is_deterministic(tmp_path) -> None:
     assert failed is not None and failed.state is JobState.FAILED
 
 
+def test_confirmed_interrupted_worker_lease_is_recovered_before_expiry(tmp_path) -> None:
+    repository = JobRepository(tmp_path / "queue.sqlite3")
+    repository.initialize()
+    conversation_id, message_id = _seed_user_message(repository)
+    now = datetime(2026, 7, 22, 12, tzinfo=UTC)
+    queued = repository.enqueue(
+        ChatAnswerPayload(
+            message="Question interrompue",
+            conversation_id=conversation_id,
+            client_request_id=uuid4(),
+        ),
+        user_message_id=message_id,
+        now=now,
+    )
+    claimed = repository.claim_next(
+        worker_id="dead-worker",
+        lease_duration=timedelta(minutes=30),
+        now=now,
+    )
+    assert claimed is not None and claimed.id == queued.id
+
+    summary = repository.recover_expired_leases(
+        now=now + timedelta(seconds=5),
+        interrupted_worker_ids=("dead-worker",),
+    )
+
+    assert summary.requeued == (queued.id,)
+    recovered = repository.get(queued.id)
+    assert recovered is not None
+    assert recovered.state is JobState.QUEUED
+    assert recovered.worker_id is None
+    assert recovered.available_at == now + timedelta(seconds=35)
+
+
 def test_claim_order_respects_priority_fifo_and_future_availability(tmp_path) -> None:
     repository = JobRepository(tmp_path / "queue.sqlite3")
     repository.initialize()

@@ -6,6 +6,54 @@ import type { ChatMessage as ChatMessageValue } from "./chatSession";
 import { ChatMessage } from "./ChatMessage";
 
 describe("ChatMessage", () => {
+  it("keeps local PDFs and DOI destinations distinct in cited sources", () => {
+    const message: ChatMessageValue = {
+      id: "assistant-local-pdf",
+      role: "assistant",
+      content: "Réponse sourcée",
+      response: {
+        message: "Réponse sourcée",
+        retrieval_query: "fermentation",
+        answer_markdown: "Réponse sourcée",
+        sources: [
+          {
+            record_id: "common:article-1",
+            origin: "local_rag",
+            evidence_level: "full_text",
+            article_id: "article-1",
+            chunk_ids: [1],
+            page_ranges: ["2"],
+            title: "Article local",
+            authors: [],
+            doi: "10.1000/article-1",
+            journal: null,
+            publication_year: 2026,
+            providers: ["corpus"],
+            url: "https://doi.org/10.1000/article-1",
+            local_pdf_url: "/api/corpus/article-1/pdf",
+            snippet: "Preuve",
+          },
+        ],
+        warnings: [],
+        model: "argo",
+        local_result_count: 1,
+        external_result_count: 0,
+        external_enrichment_used: false,
+        prompt_tokens: 0,
+        completion_tokens: 0,
+        duration_seconds: 1,
+        interaction_mode: "research",
+        reused_previous_sources: false,
+      },
+    };
+
+    const markup = renderToStaticMarkup(createElement(ChatMessage, { message }));
+
+    expect(markup).toContain('href="/api/corpus/article-1/pdf"');
+    expect(markup).toContain('href="https://doi.org/10.1000/article-1"');
+    expect(markup).toContain("Ouvrir le PDF local de Article local");
+  });
+
   it("keeps facet drafts out of the user-facing response badges", () => {
     const message: ChatMessageValue = {
       id: "assistant-facets",

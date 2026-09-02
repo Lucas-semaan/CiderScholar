@@ -14,6 +14,7 @@ from app.diagnostics import (
     _worker_rss_bytes,
     build_readiness_report,
     build_runtime_diagnostics,
+    interrupted_worker_ids,
     worker_heartbeat_path,
 )
 from app.jobs.contracts import ChatAnswerPayload
@@ -178,6 +179,48 @@ def test_worker_rss_lookup_is_best_effort_for_missing_or_inaccessible_process(mo
 
     assert _worker_rss_bytes(None) is None
     assert _worker_rss_bytes(123) is None
+
+
+def test_interrupted_worker_ids_returns_only_exact_owners_from_a_dead_process(
+    settings,
+    monkeypatch,
+) -> None:
+    heartbeat = worker_heartbeat_path(settings)
+    heartbeat.parent.mkdir(parents=True, exist_ok=True)
+    heartbeat.write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "pid": 123,
+                "worker_ids": ["worker-a", "worker-b", "worker-a"],
+                "updated_at": datetime.now(UTC).isoformat(),
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("app.diagnostics._worker_process_is_running", lambda _pid: False)
+
+    assert interrupted_worker_ids(settings) == ("worker-a", "worker-b")
+
+    monkeypatch.setattr("app.diagnostics._worker_process_is_running", lambda _pid: True)
+    assert interrupted_worker_ids(settings) == ()
+
+
+def test_interrupted_worker_ids_does_not_guess_legacy_lease_owners(settings) -> None:
+    heartbeat = worker_heartbeat_path(settings)
+    heartbeat.parent.mkdir(parents=True, exist_ok=True)
+    heartbeat.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "pid": 123,
+                "updated_at": datetime.now(UTC).isoformat(),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert interrupted_worker_ids(settings) == ()
 
 
 def test_runtime_diagnostic_api_reports_stale_worker_for_active_work(settings) -> None:

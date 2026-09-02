@@ -69,7 +69,7 @@ class SQLiteFragmentTextLoader:
             scoped_hits = [hit for hit in hits if hit.scope is scope]
             if not scoped_hits:
                 continue
-            rows = Database(corpus_paths(self.settings, scope).database_path).chunks_by_ids(
+            rows = Database(corpus_paths(self.settings, scope).database_path).chunk_details_by_ids(
                 [hit.chunk_id for hit in scoped_hits]
             )
             for hit in scoped_hits:

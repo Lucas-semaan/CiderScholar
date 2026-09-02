@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 
-CURRENT_SCHEMA_VERSION = 33
+CURRENT_SCHEMA_VERSION = 34
 
 MIGRATIONS: dict[int, str] = {
     2: """
@@ -930,6 +930,13 @@ MIGRATIONS: dict[int, str] = {
 
         CREATE INDEX IF NOT EXISTS idx_rejected_bibliographic_sources_provider
             ON rejected_bibliographic_record_sources(source, source_id);
+    """,
+    34: """
+        CREATE TABLE IF NOT EXISTS article_retrieval_exclusions (
+            article_id TEXT PRIMARY KEY REFERENCES articles(id) ON DELETE CASCADE,
+            reason TEXT NOT NULL CHECK(length(trim(reason)) > 0),
+            excluded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
     """,
 }
 

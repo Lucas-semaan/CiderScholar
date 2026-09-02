@@ -151,6 +151,44 @@ Une année future repérée automatiquement dans un fichier local n’est jamais
 publication sans métadonnée bibliographique validée. Elle est laissée vide ou envoyée en revue afin
 d’éviter de confondre un objectif, un numéro de page, un ISSN ou un autre identifiant avec une année.
 
+Instruction utilisateur explicite et durable du 1er septembre 2026 : le titre visible d'un PDF local
+est accepté seulement lorsqu'il est identifiable dans les métadonnées natives, le texte extrait ou un
+nom de fichier descriptif. Une étiquette générique, un numéro, un DOI tronqué, une diapositive ou un
+hash de stockage ne constitue jamais un titre. L'extraction native précède toujours l'OCR, et le texte
+OCR n'est utilisé que s'il a été admis par son contrôle de qualité. Si aucune source ne permet
+d'identifier le document, utiliser exactement `fichier local`. Les corrections du corpus existant
+commencent par un audit de prévisualisation en lecture seule ; elles ne sont appliquées qu'après revue
+et sauvegarde SQLite vérifiée.
+
+Cette revue porte sur toute manifestation documentaire, pas seulement sur les articles scientifiques :
+livre, chapitre, thèse, rapport, présentation, texte réglementaire, fiche technique, bulletin, brevet ou
+autre document. Pour chaque PDF, conserver une décision structurée contenant le titre, les personnes ou
+organismes responsables, l'année, le type, la confiance et la preuve exacte (métadonnée ou page). Une
+décision automatique n'est applicable qu'avec une preuve explicite et une confiance suffisante ; un
+paragraphe d'introduction, un nom de logiciel producteur ou une liste d'auteurs agrégée avec ses variantes
+ne remplace jamais une métadonnée existante.
+
+Instruction utilisateur explicite et durable du 2 septembre 2026 : ne jamais créer, résumer ni
+reformuler le titre d'un fichier local. Transcrire le titre principal réellement imprimé sur la première
+page ou, si elle est distincte, sur la page de titre immédiatement suivante ; réunir uniquement les
+lignes qui composent visuellement ce même titre. La grande majorité des documents possèdent ce titre
+principal. Le repli exact `fichier local` est réservé au cas où aucun titre n'est réellement lisible après
+extraction native puis OCR contrôlé.
+
+Instruction utilisateur explicite et durable du 2 septembre 2026 : un PDF local dont le titre reste
+exactement `fichier local` après cette revue est conservé avec son fichier, ses fragments et la raison
+d'exclusion, mais sort de l'index lexical et vectoriel ainsi que des nouvelles références et citations.
+Une reconstruction ou une réconciliation d'index ne doit pas le réintroduire. Cette règle ne s'applique
+pas aux titres seulement ambigus ou encore à auditer : ceux-ci restent dans le corpus tant qu'aucune
+décision définitive ne les classe comme non identifiables. Une correction explicite des métadonnées est
+requise avant toute réactivation.
+
+Instruction utilisateur explicite et durable du 1er septembre 2026 : lorsqu'une source du corpus local
+est citée et que son PDF persisté existe encore, la citation et la carte de source permettent de l'ouvrir
+à la demande. Le client ne transmet qu'un identifiant d'article ; l'API résout le chemin dans SQLite,
+sert uniquement un PDF existant et ne révèle jamais le chemin local. Une source sans fichier disponible
+reste citée sans produire de lien cassé.
+
 ### 3.1 Mener les campagnes Aureli authentifiées
 
 Instruction utilisateur explicite et durable du 12 août 2026 : pour les futures campagnes Aureli,

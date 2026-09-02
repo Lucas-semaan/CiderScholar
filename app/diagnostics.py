@@ -30,18 +30,30 @@ def worker_heartbeat_path(settings: Settings) -> Path:
     return settings.paths.data_dir / "runtime" / "worker-heartbeat.json"
 
 
-def _write_worker_heartbeat(path: Path, pid: int) -> None:
+def _write_worker_heartbeat(path: Path, pid: int, worker_ids: tuple[str, ...]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(".tmp")
     temporary.write_text(
-        json.dumps({"schema_version": 1, "pid": pid, "updated_at": _timestamp(datetime.now(UTC))}),
+        json.dumps(
+            {
+                "schema_version": 2,
+                "pid": pid,
+                "worker_ids": list(worker_ids),
+                "updated_at": _timestamp(datetime.now(UTC)),
+            }
+        ),
         encoding="utf-8",
     )
     temporary.replace(path)
 
 
 @contextmanager
-def worker_heartbeat(settings: Settings, *, interval_seconds: float = 1.0) -> Iterator[None]:
+def worker_heartbeat(
+    settings: Settings,
+    *,
+    worker_ids: tuple[str, ...] = (),
+    interval_seconds: float = 1.0,
+) -> Iterator[None]:
     """Publish liveness while the continuous durable worker owns its loop."""
 
     path = worker_heartbeat_path(settings)
@@ -50,7 +62,7 @@ def worker_heartbeat(settings: Settings, *, interval_seconds: float = 1.0) -> It
 
     def publish() -> None:
         while not stopped.is_set():
-            _write_worker_heartbeat(path, pid)
+            _write_worker_heartbeat(path, pid, worker_ids)
             stopped.wait(interval_seconds)
 
     thread = Thread(target=publish, name="worker-heartbeat", daemon=True)
@@ -66,6 +78,56 @@ def worker_heartbeat(settings: Settings, *, interval_seconds: float = 1.0) -> It
                 path.unlink(missing_ok=True)
         except (OSError, json.JSONDecodeError, AttributeError):
             pass
+
+
+def interrupted_worker_ids(settings: Settings) -> tuple[str, ...]:
+    """Return leases owned by a previous heartbeat process that has exited.
+
+    Legacy heartbeats deliberately return no identifiers.  Without an exact owner list,
+    early recovery could duplicate work still running in another local process.
+    """
+
+    try:
+        payload = json.loads(worker_heartbeat_path(settings).read_text(encoding="utf-8"))
+        if payload.get("schema_version") != 2:
+            return ()
+        pid = payload.get("pid")
+        raw_worker_ids = payload.get("worker_ids")
+        if (
+            not isinstance(pid, int)
+            or isinstance(pid, bool)
+            or pid <= 0
+            or not isinstance(raw_worker_ids, list)
+        ):
+            return ()
+        worker_ids = tuple(
+            dict.fromkeys(
+                value
+                for value in raw_worker_ids
+                if isinstance(value, str) and 1 <= len(value) <= 200
+            )
+        )
+        if not worker_ids or _worker_process_is_running(pid):
+            return ()
+        return worker_ids
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        return ()
+
+
+def _worker_process_is_running(pid: int) -> bool:
+    """Fail closed when process liveness cannot be determined reliably."""
+
+    try:
+        import psutil
+    except ImportError:
+        return True
+    try:
+        process = psutil.Process(pid)
+        return bool(process.is_running() and process.status() != psutil.STATUS_ZOMBIE)
+    except psutil.NoSuchProcess:
+        return False
+    except (psutil.Error, OSError, ValueError):
+        return True
 
 
 def build_readiness_report(

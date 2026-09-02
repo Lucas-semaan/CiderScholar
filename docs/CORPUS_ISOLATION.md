@@ -14,7 +14,11 @@ La recherche ne filtre plus de portée et la liste des articles n’est pas
 tronquée à 5 000 éléments.
 
 `GET /api/corpus/{article_id}/pdf` ouvre le fichier source correspondant à un
-identifiant d’article explicitement sélectionné dans cette base.
+identifiant d’article explicitement sélectionné dans cette base. La route ne
+reçoit jamais de chemin : elle résout l’identifiant dans SQLite et ne sert qu’un
+fichier PDF existant. Les chemins historiques explicitement persistés restent
+lisibles pendant une migration additive ; tout autre cas retourne une erreur
+404 sans révéler le chemin local.
 
 ## Migration des installations existantes
 

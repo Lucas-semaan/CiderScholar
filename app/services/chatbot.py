@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import re
+import sqlite3
 import unicodedata
 from collections.abc import Mapping, Sequence
+from pathlib import Path
 from typing import Any, Literal
+from urllib.parse import quote
 
 from app.corpora import CorpusScope
+from app.database.sqlite import Database
 from app.models.chatbot import ChatbotSource, ChatEvidenceRecord
 from app.updates.harvest import CIDER_PILOT_THEMES, assess_cider_relevance
 from app.updates.models import BibliographicRecord
@@ -242,10 +246,27 @@ def chatbot_sources(
 def chatbot_sources_from_evidence(
     records: Sequence[ChatEvidenceRecord],
     cited_evidence_ids: Sequence[str],
+    database: Database,
 ) -> list[ChatbotSource]:
     """Render only cited records while preserving passage ids for future turns."""
 
     cited = set(cited_evidence_ids)
+    article_ids = list(
+        dict.fromkeys(
+            record.article_id
+            for record in records
+            if record.origin == "local_rag" and record.article_id is not None
+        )
+    )
+    try:
+        article_details = database.article_details_by_ids(article_ids)
+    except sqlite3.Error:
+        article_details = {}
+    local_pdf_available = {
+        article_id
+        for article_id, article in article_details.items()
+        if _local_pdf_exists(str(article["pdf_path"]))
+    }
     sources: list[ChatbotSource] = []
     for record in records:
         passages = [passage for passage in record.passages if passage.evidence_id in cited]
@@ -285,10 +306,22 @@ def chatbot_sources_from_evidence(
                 publication_year=record.publication_year,
                 providers=record.providers,
                 url=record.url,
+                local_pdf_url=(
+                    f"/api/corpus/{quote(record.article_id, safe='')}/pdf"
+                    if record.article_id in local_pdf_available
+                    else None
+                ),
                 snippet=" ".join(passage.text for passage in passages)[:800],
             )
         )
     return sources
+
+
+def _local_pdf_exists(value: str) -> bool:
+    """Check a persisted PDF target without exposing its path beyond this service."""
+
+    path = Path(value).resolve()
+    return path.suffix.casefold() == ".pdf" and path.is_file()
 
 
 def _record_scope(record_id: str) -> CorpusScope | None:

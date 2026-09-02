@@ -4,6 +4,8 @@ import sqlite3
 from contextlib import closing
 from datetime import UTC, datetime, timedelta
 
+import pytest
+
 from app.database.migrations import CURRENT_SCHEMA_VERSION, ensure_current
 from app.database.sqlite import Database
 
@@ -52,6 +54,7 @@ def test_schema_creates_required_tables_and_fts(settings) -> None:
         "bibliographic_harvest_hits",
         "rejected_bibliographic_archive",
         "rejected_bibliographic_record_sources",
+        "article_retrieval_exclusions",
         "chat_conversations",
         "chat_messages",
         "argo_request_events",
@@ -129,7 +132,7 @@ def test_schema_repairs_partial_version_30_type_columns() -> None:
 
     assert {"work_type", "publisher"} <= article_columns
     assert {"work_type", "publisher"} <= bibliographic_columns
-    assert version == 33
+    assert version == CURRENT_SCHEMA_VERSION
 
 
 def test_argo_request_events_store_only_quota_metadata(settings) -> None:
@@ -334,3 +337,71 @@ def test_corpus_administration_lists_reindexes_and_deletes_history(settings) -> 
     assert database.delete_article("article-1") == 1
     assert database.list_articles() == []
     assert database.query_by_id("query-admin") is None
+
+
+def test_unidentifiable_local_exclusion_retains_audit_data_but_blocks_retrieval(settings) -> None:
+    database = Database(settings.paths.database_path)
+    database.initialize()
+    article = _article()
+    article.update({"title": "fichier local", "validation_status": "indexed"})
+    database.save_article_and_chunks(
+        article,
+        [
+            {
+                "section": "Unknown",
+                "page_start": 1,
+                "page_end": 1,
+                "chunk_index": 0,
+                "text": "Retained local text for a document without an identifiable title.",
+                "token_count": 10,
+                "embedding_status": "indexed",
+            }
+        ],
+    )
+    chunk_id = database.article_chunk_ids("article-1")[0]
+
+    assert (
+        database.exclude_unidentifiable_local_articles(
+            ["article-1"], reason="OCR audit could not identify the main title"
+        )
+        == 1
+    )
+    assert database.lexical_search("Retained") == []
+    assert database.chunk_details_by_ids([chunk_id]) == {}
+    assert chunk_id in database.chunks_by_ids([chunk_id])
+    assert database.deep_research_citation_source(article_id="article-1", chunk_id=chunk_id) is None
+    assert database.article_with_first_chunk_by_doi("10.1234/example") is None
+    assert database.chunks_for_embedding(limit=10, retry_failed=True) == []
+    assert database.reset_all_embedding_statuses() == 0
+    with pytest.raises(ValueError, match="excluded from retrieval"):
+        database.reset_article_for_reindex("article-1")
+    with closing(database.connect()) as connection:
+        exclusion = connection.execute(
+            "SELECT reason FROM article_retrieval_exclusions WHERE article_id = 'article-1'"
+        ).fetchone()
+        status = connection.execute(
+            "SELECT validation_status FROM articles WHERE id = 'article-1'"
+        ).fetchone()[0]
+    assert exclusion["reason"] == "OCR audit could not identify the main title"
+    assert status == "rejected"
+
+
+def test_unidentifiable_exclusion_rejects_definitive_titles(settings) -> None:
+    database = Database(settings.paths.database_path)
+    database.initialize()
+    database.save_article_and_chunks(
+        _article(),
+        [
+            {
+                "section": "Results",
+                "page_start": 1,
+                "page_end": 1,
+                "chunk_index": 0,
+                "text": "A definitive title must remain retrievable.",
+                "token_count": 7,
+            }
+        ],
+    )
+
+    with pytest.raises(ValueError, match="only unidentifiable local articles"):
+        database.exclude_unidentifiable_local_articles(["article-1"], reason="invalid request")

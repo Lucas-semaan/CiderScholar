@@ -449,7 +449,32 @@ def test_chatbot_returns_only_cited_source_cards() -> None:
     assert sources[0].doi == "10.1000/external"
 
 
-def test_chatbot_full_text_source_persists_chunks_and_pages_for_follow_up() -> None:
+def test_chatbot_full_text_source_persists_chunks_and_pages_for_follow_up(
+    settings,
+) -> None:
+    database = Database(settings.paths.common_database_path)
+    database.initialize()
+    settings.paths.common_pdf_dir.mkdir(parents=True, exist_ok=True)
+    pdf_path = settings.paths.common_pdf_dir / "article-1.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\nsource\n")
+    database.save_article_and_chunks(
+        {
+            "id": "article-1",
+            "sha256": "9" * 64,
+            "title": "Cider fermentation temperature",
+            "authors": ["Ada Test"],
+            "pdf_path": str(pdf_path),
+        },
+        [
+            {
+                "page_start": 7,
+                "page_end": 8,
+                "chunk_index": 0,
+                "text": "The full article reports the temperature-dependent kinetics.",
+                "token_count": 7,
+            }
+        ],
+    )
     evidence = ChatEvidenceRecord(
         record_id="common:article-1",
         origin="local_rag",
@@ -482,11 +507,13 @@ def test_chatbot_full_text_source_persists_chunks_and_pages_for_follow_up() -> N
     sources = chatbot_sources_from_evidence(
         [evidence],
         ["common:article-1:chunk:12"],
+        database,
     )
 
     assert len(sources) == 1
     assert sources[0].evidence_level == "full_text"
     assert sources[0].article_id == "article-1"
+    assert sources[0].local_pdf_url == "/api/corpus/article-1/pdf"
     assert sources[0].chunk_ids == [12]
     assert sources[0].page_ranges == ["7-8"]
     assert sources[0].snippet.startswith("The full article")

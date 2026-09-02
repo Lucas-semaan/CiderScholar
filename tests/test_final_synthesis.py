@@ -11,7 +11,7 @@ from pydantic import ValidationError
 from app.corpora import CorpusScope
 from app.database.sqlite import Database
 from app.llm.contracts import GenerationMetrics, GenerationResponse
-from app.llm.final_synthesis import HierarchicalSynthesisService
+from app.llm.final_synthesis import EvidenceSource, HierarchicalSynthesisService
 from app.models.evidence import ArticleEvidence
 from app.models.synthesis import CitedStatement
 
@@ -55,11 +55,15 @@ class SequenceChatClient:
 
 def _seed_query(database: Database, article_count: int = 2) -> dict[str, str]:
     article_ids = [f"article-{index}" for index in range(1, article_count + 1)]
+    pdf_dir = database.path.parent / "pdf"
+    pdf_dir.mkdir(parents=True, exist_ok=True)
     chunks: dict[str, tuple[int, str, int]] = {}
     for index, article_id in enumerate(article_ids, start=1):
         page = 2 if index == 1 else 5
         direction = "increased by 25%" if index == 1 else "decreased by 10%"
         text = f"At 20 °C, ester concentration {direction} compared with 12 °C."
+        pdf_path = pdf_dir / f"{article_id}.pdf"
+        pdf_path.write_bytes(b"%PDF-1.4\nsource\n")
         database.save_article_and_chunks(
             {
                 "id": article_id,
@@ -71,7 +75,7 @@ def _seed_query(database: Database, article_count: int = 2) -> dict[str, str]:
                 "journal": "SQLite Journal",
                 "publication_year": 2024 + index,
                 "language": "en",
-                "pdf_path": f"data/pdf/{article_id}.pdf",
+                "pdf_path": str(pdf_path),
                 "validation_status": "indexed",
                 "source": "local",
             },
@@ -262,8 +266,14 @@ def test_hierarchical_synthesis_renders_only_sqlite_citations(settings) -> None:
 
     assert execution.llm_calls == 3
     assert execution.result.cited_evidence_ids == evidence_ids
-    assert "[Common corpus · article-1, p. 2]" in execution.result.answer_markdown
-    assert "[Common corpus · article-2, p. 5]" in execution.result.answer_markdown
+    assert (
+        "[Common corpus · article-1, p. 2](/api/corpus/article-1/pdf#page=2)"
+        in execution.result.answer_markdown
+    )
+    assert (
+        "[Common corpus · article-2, p. 5](/api/corpus/article-2/pdf#page=5)"
+        in execution.result.answer_markdown
+    )
     assert "One study reported a 25% change." in execution.result.answer_markdown
     assert "10.1000/sqlite-1" in execution.result.answer_markdown
     assert len(execution.result.bibliography) == 2
@@ -305,7 +315,10 @@ def test_synthesis_preserves_common_origin_in_citations_and_bibliography(setting
         .result
     )
 
-    assert "[Common corpus · article-1, p. 2]" in result.answer_markdown
+    assert (
+        "[Common corpus · article-1, p. 2](/api/corpus/article-1/pdf#page=2)"
+        in result.answer_markdown
+    )
     assert result.bibliography[0].scope is CorpusScope.COMMON
 
 
@@ -406,6 +419,35 @@ def test_single_article_cannot_claim_cross_article_consensus(settings) -> None:
     assert execution.result.final.consensus == []
     assert "Cross-article consensus cannot be assessed." in (
         execution.result.final.missing_information
+    )
+
+
+def test_citation_links_encode_article_ids_and_open_the_cited_page(settings) -> None:
+    service = HierarchicalSynthesisService(
+        settings,
+        Database(settings.paths.common_database_path),
+        SequenceChatClient([]),
+    )
+    citation = service._citation(
+        CitedStatement(statement="Constat local.", evidence_ids=["evidence-local"]),
+        {
+            "evidence-local": EvidenceSource(
+                evidence_id="evidence-local",
+                article_id="article/local source",
+                chunk_id=1,
+                claim="Constat local.",
+                source_excerpt="Constat local.",
+                page_start=4,
+                page_end=4,
+                relevance_score=0.9,
+                local_pdf_available=True,
+            )
+        },
+    )
+
+    assert citation == (
+        "[Corpus commun · article/local source, p. 4]"
+        "(/api/corpus/article%2Flocal%20source/pdf#page=4)"
     )
 
 

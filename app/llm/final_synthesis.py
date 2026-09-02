@@ -6,8 +6,10 @@ import json
 import logging
 from collections import defaultdict
 from collections.abc import Callable, Mapping, Sequence
+from pathlib import Path
 from time import perf_counter
 from typing import Any, Protocol, TypeVar
+from urllib.parse import quote
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -76,6 +78,7 @@ class EvidenceSource(BaseModel):
     page_start: int = Field(ge=1)
     page_end: int = Field(ge=1)
     relevance_score: float = Field(ge=0.0, le=1.0)
+    local_pdf_available: bool = False
 
 
 class ArticleSynthesisCard(BaseModel):
@@ -205,6 +208,11 @@ def _one_line(value: str) -> str:
     return " ".join(value.split())
 
 
+def _local_pdf_exists(value: str) -> bool:
+    path = Path(value).resolve()
+    return path.suffix.casefold() == ".pdf" and path.is_file()
+
+
 class HierarchicalSynthesisService:
     """Build theme cards and a final answer without model-generated references."""
 
@@ -262,6 +270,9 @@ class HierarchicalSynthesisService:
                 break
             round_index += 1
 
+        articles = self.database.article_details_by_ids(
+            list(dict.fromkeys(str(row["article_id"]) for row in chosen_rows))
+        )
         sources = [
             EvidenceSource(
                 evidence_id=str(row["evidence_id"]),
@@ -272,6 +283,11 @@ class HierarchicalSynthesisService:
                 page_start=int(row["page_start"]),
                 page_end=int(row["page_end"]),
                 relevance_score=float(row["relevance_score"]),
+                local_pdf_available=_local_pdf_exists(
+                    str(articles[str(row["article_id"])]["pdf_path"])
+                )
+                if str(row["article_id"]) in articles
+                else False,
             )
             for row in chosen_rows
         ]
@@ -735,7 +751,14 @@ class HierarchicalSynthesisService:
                 else f"pp. {source.page_start}–{source.page_end}"
             )
             scope = "Corpus commun" if language == "fr" else "Common corpus"
-            citations.append(f"[{scope} · {source.article_id}, {pages}]")
+            label = f"{scope} · {source.article_id}, {pages}"
+            if source.local_pdf_available:
+                article_path = quote(source.article_id, safe="")
+                citations.append(
+                    f"[{label}](/api/corpus/{article_path}/pdf#page={source.page_start})"
+                )
+            else:
+                citations.append(f"[{label}]")
         return " ".join(citations)
 
     def _bibliography(

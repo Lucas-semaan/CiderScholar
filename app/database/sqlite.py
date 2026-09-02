@@ -560,6 +560,7 @@ class Database:
                       LIMIT 1
                   )
                 WHERE a.doi = ? COLLATE NOCASE
+                  AND a.validation_status IN ('validated', 'indexed')
                 """,
                 (normalized,),
             ).fetchone()
@@ -581,6 +582,7 @@ class Database:
                 FROM chunks AS c
                 JOIN articles AS a ON a.id = c.article_id
                 WHERE a.id = ? AND c.id = ?
+                  AND a.validation_status IN ('validated', 'indexed')
                 """,
                 (article_id, chunk_id),
             ).fetchone()
@@ -1173,14 +1175,16 @@ class Database:
             if not unique_articles:
                 return []
             article_placeholders = ",".join("?" for _ in unique_articles)
-            article_predicate = f" AND article_id IN ({article_placeholders})"
+            article_predicate = f" AND c.article_id IN ({article_placeholders})"
             article_parameters = unique_articles
         sql = f"""
-            SELECT id, article_id, section, page_start, page_end, text
-            FROM chunks
-            WHERE id > ? AND embedding_status IN ({placeholders})
+            SELECT c.id, c.article_id, c.section, c.page_start, c.page_end, c.text
+            FROM chunks AS c
+            JOIN articles AS a ON a.id = c.article_id
+            WHERE c.id > ? AND c.embedding_status IN ({placeholders})
+              AND a.validation_status IN ('validated', 'indexed')
               {article_predicate}
-            ORDER BY id
+            ORDER BY c.id
             LIMIT ?
         """
         with closing(self.connect()) as connection:
@@ -1295,11 +1299,13 @@ class Database:
 
     def reset_article_for_reindex(self, article_id: str) -> int:
         with self.transaction() as connection:
-            if (
-                connection.execute("SELECT 1 FROM articles WHERE id = ?", (article_id,)).fetchone()
-                is None
-            ):
+            article = connection.execute(
+                "SELECT validation_status FROM articles WHERE id = ?", (article_id,)
+            ).fetchone()
+            if article is None:
                 raise ValueError("article is unavailable")
+            if str(article["validation_status"]) not in {"validated", "indexed"}:
+                raise ValueError("article is excluded from retrieval")
             cursor = connection.execute(
                 "UPDATE chunks SET embedding_status = 'pending' WHERE article_id = ?",
                 (article_id,),
@@ -1311,6 +1317,80 @@ class Database:
                 WHERE id = ?
                 """,
                 (article_id,),
+            )
+            return int(cursor.rowcount)
+
+    def unidentifiable_local_articles(self) -> list[sqlite3.Row]:
+        """Return only local sources carrying the explicit no-title fallback."""
+
+        with closing(self.connect()) as connection:
+            return list(
+                connection.execute(
+                    """
+                    SELECT a.id, a.sha256, a.title, a.pdf_path, a.validation_status,
+                           COUNT(c.id) AS chunk_count
+                    FROM articles AS a
+                    LEFT JOIN chunks AS c ON c.article_id = a.id
+                    WHERE lower(trim(a.source)) = 'local'
+                      AND lower(trim(a.title)) = 'fichier local'
+                    GROUP BY a.id
+                    ORDER BY a.id
+                    """
+                )
+            )
+
+    def exclude_unidentifiable_local_articles(
+        self,
+        article_ids: Sequence[str],
+        *,
+        reason: str,
+    ) -> int:
+        """Exclude explicit local-title fallbacks while retaining files and provenance."""
+
+        unique_ids = tuple(dict.fromkeys(article_ids))
+        cleaned_reason = " ".join(reason.split())
+        if not unique_ids:
+            return 0
+        if not cleaned_reason:
+            raise ValueError("retrieval exclusion reason is required")
+        placeholders = ",".join("?" for _ in unique_ids)
+        with self.transaction() as connection:
+            rows = list(
+                connection.execute(
+                    f"""
+                    SELECT id, source, title
+                    FROM articles
+                    WHERE id IN ({placeholders})
+                    """,
+                    unique_ids,
+                )
+            )
+            if len(rows) != len(unique_ids):
+                raise ValueError("one or more articles are unavailable")
+            if any(
+                str(row["source"]).strip().lower() != "local"
+                or str(row["title"]).strip().lower() != "fichier local"
+                for row in rows
+            ):
+                raise ValueError("only unidentifiable local articles can be excluded")
+            connection.executemany(
+                """
+                INSERT INTO article_retrieval_exclusions(article_id, reason)
+                VALUES (?, ?)
+                ON CONFLICT(article_id) DO UPDATE SET
+                    reason = excluded.reason,
+                    excluded_at = CURRENT_TIMESTAMP
+                """,
+                [(article_id, cleaned_reason) for article_id in unique_ids],
+            )
+            cursor = connection.execute(
+                f"""
+                UPDATE articles
+                SET validation_status = 'rejected', indexed_at = NULL
+                WHERE id IN ({placeholders})
+                  AND validation_status != 'rejected'
+                """,
+                unique_ids,
             )
             return int(cursor.rowcount)
 
@@ -2219,7 +2299,17 @@ class Database:
         """Prepare a reproducible vector rebuild while preserving article/chunk text."""
 
         with closing(self.connect()) as connection, connection:
-            cursor = connection.execute("UPDATE chunks SET embedding_status = 'pending'")
+            cursor = connection.execute(
+                """
+                UPDATE chunks
+                SET embedding_status = 'pending'
+                WHERE EXISTS (
+                    SELECT 1 FROM articles
+                    WHERE articles.id = chunks.article_id
+                      AND articles.validation_status IN ('validated', 'indexed')
+                )
+                """
+            )
             connection.execute(
                 """
                 UPDATE articles

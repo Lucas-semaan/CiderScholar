@@ -7,6 +7,10 @@ afterEach(() => {
 });
 
 describe("API client", () => {
+  it("builds an encoded local PDF URL from an article id", () => {
+    expect(api.corpus.pdfUrl("article/id")).toBe("/api/corpus/article%2Fid/pdf");
+  });
+
   it("encodes library filters without losing repeated statuses", async () => {
     const fetchMock = vi.fn().mockResolvedValue(
       new Response(JSON.stringify({ records: [], total: 0 }), {

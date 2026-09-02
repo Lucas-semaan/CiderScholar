@@ -119,6 +119,43 @@ def test_overview_reports_the_single_corpus_statistics(settings) -> None:
     assert corpus["chunks"] == 2
 
 
+def test_article_pdf_opens_only_the_pdf_linked_to_its_article_id(settings, tmp_path) -> None:
+    database = Database(settings.paths.common_database_path)
+    database.initialize()
+    legacy_pdf = tmp_path / "legacy-source.pdf"
+    legacy_pdf.write_bytes(b"%PDF-1.4\nlegacy source\n")
+    database.save_article_and_chunks(
+        {
+            "id": "legacy/article",
+            "sha256": "f" * 64,
+            "title": "Source locale historique",
+            "authors": [],
+            "pdf_path": str(legacy_pdf),
+        },
+        [
+            {
+                "page_start": 1,
+                "page_end": 1,
+                "chunk_index": 0,
+                "text": "Preuve historique.",
+                "token_count": 2,
+            }
+        ],
+    )
+
+    with TestClient(create_app(settings)) as client:
+        opened = client.get("/api/corpus/legacy%2Farticle/pdf")
+        missing = client.get("/api/corpus/not-in-the-database/pdf")
+
+    assert opened.status_code == 200
+    assert opened.headers["content-type"].startswith("application/pdf")
+    assert "inline" in opened.headers["content-disposition"]
+    assert str(legacy_pdf) not in opened.headers["content-disposition"]
+    assert str(legacy_pdf) not in opened.text
+    assert missing.status_code == 404
+    assert str(legacy_pdf) not in missing.text
+
+
 def test_review_notice_can_be_admitted_and_manual_decision_is_preserved(settings) -> None:
     database = _insert_review_record(settings, REVIEW_ACCEPTED_ID)
     registry = DoiExclusionRegistry.for_database(database.path)

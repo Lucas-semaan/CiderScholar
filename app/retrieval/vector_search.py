@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import warnings
 from collections import OrderedDict
 from collections.abc import Sequence
 from hashlib import sha256
@@ -153,14 +154,28 @@ class QdrantLocalIndex:
             lock = ResourceFileLock(corpus_resource_lock_path(self.path))
             lock.acquire()
             try:
-                self._client = QdrantClient(
-                    path=str(self.path),
-                    # Access is serialized by the application. This also avoids qdrant-client's
-                    # temporary `:memory:` SQLite thread probe, whose context manager does not close
-                    # the connection under Python 3.14.
-                    force_disable_check_same_thread=True,
-                    cloud_inference=False,
-                )
+                # CiderScholar deliberately uses the embedded, disk-backed Qdrant index for its
+                # private local corpus.  qdrant-client emits a generic size recommendation every
+                # time it opens a collection above its small-demo threshold.  That recommendation
+                # is not actionable for this supported deployment mode, so suppress only that
+                # warning while keeping every other Qdrant warning visible.
+                with warnings.catch_warnings():
+                    warnings.filterwarnings(
+                        "ignore",
+                        message=(
+                            r"^Local mode is not recommended for collections with more than "
+                            r"[\d,]+ points\."
+                        ),
+                        category=UserWarning,
+                    )
+                    self._client = QdrantClient(
+                        path=str(self.path),
+                        # Access is serialized by the application. This also avoids qdrant-client's
+                        # temporary `:memory:` SQLite thread probe, whose context manager does not
+                        # close the connection under Python 3.14.
+                        force_disable_check_same_thread=True,
+                        cloud_inference=False,
+                    )
             except Exception:
                 lock.release()
                 raise
@@ -555,7 +570,9 @@ class VectorSearchService:
             sections=sections,
             _manifest_validated=True,
         )
-        chunks = self.database.chunks_by_ids([reference.chunk_id for reference in references])
+        chunks = self.database.chunk_details_by_ids(
+            [reference.chunk_id for reference in references]
+        )
         results: list[VectorSearchResult] = []
         for reference in references:
             chunk = chunks.get(reference.chunk_id)
@@ -653,7 +670,9 @@ class VectorSearchService:
     def _hydrate(self, references: Sequence[ScoredChunkReference]) -> list[VectorSearchResult]:
         """Hydrate Qdrant identifiers from the authoritative SQLite corpus."""
 
-        chunks = self.database.chunks_by_ids([reference.chunk_id for reference in references])
+        chunks = self.database.chunk_details_by_ids(
+            [reference.chunk_id for reference in references]
+        )
         results: list[VectorSearchResult] = []
         for reference in references:
             chunk = chunks.get(reference.chunk_id)

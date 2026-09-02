@@ -3,6 +3,7 @@ import {
   ChartNoAxesCombined,
   Cloud,
   ExternalLink,
+  FileText,
   LibraryBig,
   MessageCircleMore,
   ThumbsDown,
@@ -242,17 +243,30 @@ export function ChatMessage({
                             {source.publication_year ? ` · ${source.publication_year}` : ""}
                           </p>
                         </div>
-                        {source.url && (
-                          <a
-                            aria-label={`Ouvrir la source ${source.title}`}
-                            className="grid size-8 shrink-0 place-items-center rounded-lg text-slate-400 hover:bg-white hover:text-forest-700"
-                            href={source.url}
-                            rel="noreferrer"
-                            target="_blank"
-                          >
-                            <ExternalLink aria-hidden="true" className="size-3.5" />
-                          </a>
-                        )}
+                        <div className="flex shrink-0 gap-1">
+                          {source.local_pdf_url && (
+                            <a
+                              aria-label={`Ouvrir le PDF local de ${source.title}`}
+                              className="grid size-8 place-items-center rounded-lg text-slate-400 hover:bg-white hover:text-forest-700"
+                              href={source.local_pdf_url}
+                              rel="noreferrer"
+                              target="_blank"
+                            >
+                              <FileText aria-hidden="true" className="size-3.5" />
+                            </a>
+                          )}
+                          {source.url && (
+                            <a
+                              aria-label={`Ouvrir la source ${source.title}`}
+                              className="grid size-8 shrink-0 place-items-center rounded-lg text-slate-400 hover:bg-white hover:text-forest-700"
+                              href={source.url}
+                              rel="noreferrer"
+                              target="_blank"
+                            >
+                              <ExternalLink aria-hidden="true" className="size-3.5" />
+                            </a>
+                          )}
+                        </div>
                       </div>
                       <div className="mt-2 flex flex-wrap gap-1.5">
                         <Badge tone={source.origin === "local_rag" ? "success" : "accent"}>

@@ -91,7 +91,12 @@ def _sqlite_chunk_payloads(database: Database) -> dict[int, tuple[str, str | Non
         return {
             int(row[0]): (str(row[1]), row[2], int(row[3]), int(row[4]))
             for row in connection.execute(
-                "SELECT id, article_id, section, page_start, page_end FROM chunks"
+                """
+                SELECT c.id, c.article_id, c.section, c.page_start, c.page_end
+                FROM chunks AS c
+                JOIN articles AS a ON a.id = c.article_id
+                WHERE a.validation_status IN ('validated', 'indexed')
+                """
             )
         }
 

@@ -2836,7 +2836,8 @@ def _answer_chatbot(
 ) -> ChatbotResult:
     """Run the hypothesis-guided, single-wave, SQLite-authoritative chat pipeline."""
 
-    del database  # Corpus helpers resolve the configured common SQLite authority.
+    del database  # The chat database is distinct from the common corpus authority.
+    source_database = Database(corpus_paths(settings, CorpusScope.COMMON).database_path)
     started = perf_counter()
     effort_budget = answer_effort_budget(answer_effort)
     active_experimental_profile = experimental_profile or settings.app.experimental_chat_profile
@@ -2972,7 +2973,9 @@ def _answer_chatbot(
             prompt_tokens=answer.prompt_tokens,
             completion_tokens=answer.completion_tokens,
         )
-        sources = chatbot_sources_from_evidence(evidence, answer.cited_evidence_ids)
+        sources = chatbot_sources_from_evidence(
+            evidence, answer.cited_evidence_ids, source_database
+        )
         return ChatbotResult(
             message=" ".join(message.split()),
             retrieval_query=retrieval_query,
@@ -3483,6 +3486,8 @@ def _answer_chatbot_axis_legacy(
 ) -> ChatbotResult:
     """Answer with local full-text passages, abstract fallback and bounded enrichment."""
 
+    del database  # The chat database is distinct from the common corpus authority.
+    source_database = Database(corpus_paths(settings, CorpusScope.COMMON).database_path)
     started = perf_counter()
     effort_budget = answer_effort_budget(answer_effort)
 
@@ -3612,6 +3617,7 @@ def _answer_chatbot_axis_legacy(
         sources = chatbot_sources_from_evidence(
             reused_evidence,
             answer.cited_evidence_ids,
+            source_database,
         )
         return ChatbotResult(
             message=" ".join(message.split()),
@@ -4357,7 +4363,7 @@ def _answer_chatbot_axis_legacy(
         prompt_tokens=answer.prompt_tokens,
         completion_tokens=answer.completion_tokens,
     )
-    sources = chatbot_sources_from_evidence(evidence, answer.cited_evidence_ids)
+    sources = chatbot_sources_from_evidence(evidence, answer.cited_evidence_ids, source_database)
     return ChatbotResult(
         message=" ".join(message.split()),
         retrieval_query=retrieval_query,
@@ -4517,6 +4523,48 @@ def delete_article(settings: Settings, database: Database, *, article_id: str) -
         "deleted_chunks": len(chunk_ids),
         "deleted_vector_points": deleted_points,
         "deleted_queries": deleted_queries,
+    }
+
+
+def exclude_unidentifiable_local_sources(
+    settings: Settings,
+    database: Database,
+    *,
+    article_ids: Sequence[str],
+) -> dict[str, int]:
+    """Remove no-title local sources from retrieval without deleting their audit record."""
+
+    unique_ids = tuple(dict.fromkeys(article_ids))
+    chunk_ids = [
+        chunk_id for article_id in unique_ids for chunk_id in database.article_chunk_ids(article_id)
+    ]
+    if not unique_ids:
+        return {
+            "excluded_articles": 0,
+            "retained_chunks": 0,
+            "deleted_vector_points": 0,
+        }
+    index = QdrantLocalIndex(settings)
+    try:
+        index_manifest = prepare_index_generation_mutation(index)
+        excluded_articles = database.exclude_unidentifiable_local_articles(
+            unique_ids,
+            reason="Titre principal non identifiable après audit OCR: fichier local",
+        )
+        deleted_points = index.delete_points(chunk_ids)
+        if index_manifest is not None:
+            write_ready_index_generation_manifest(
+                database,
+                index,
+                generation_id=index_manifest.generation_id,
+                created_at=index_manifest.created_at,
+            )
+    finally:
+        index.close()
+    return {
+        "excluded_articles": excluded_articles,
+        "retained_chunks": len(chunk_ids),
+        "deleted_vector_points": deleted_points,
     }
 
 

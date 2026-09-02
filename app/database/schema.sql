@@ -35,6 +35,12 @@ CREATE INDEX IF NOT EXISTS idx_articles_doi ON articles(doi);
 CREATE INDEX IF NOT EXISTS idx_articles_year ON articles(publication_year);
 CREATE INDEX IF NOT EXISTS idx_articles_validation ON articles(validation_status);
 
+CREATE TABLE IF NOT EXISTS article_retrieval_exclusions (
+    article_id TEXT PRIMARY KEY REFERENCES articles(id) ON DELETE CASCADE,
+    reason TEXT NOT NULL CHECK(length(trim(reason)) > 0),
+    excluded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE TABLE IF NOT EXISTS chunks (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     article_id TEXT NOT NULL REFERENCES articles(id) ON DELETE CASCADE,

@@ -19,6 +19,7 @@ function source(origin: ChatbotSource["origin"]): ChatbotSource {
     publication_year: null,
     providers: [],
     url: null,
+    local_pdf_url: null,
     snippet: "Preuve",
   };
 }

@@ -1563,26 +1563,36 @@ class JobRepository:
         self,
         *,
         now: datetime | None = None,
+        interrupted_worker_ids: tuple[str, ...] = (),
     ) -> LeaseRecoverySummary:
-        """Requeue, fail, or cancel every expired lease in one transaction."""
+        """Recover expired leases and exact owners from a confirmed dead worker process."""
 
         recovered_at = now or datetime.now(UTC)
         recovered_timestamp = _timestamp(recovered_at)
+        interrupted_workers = tuple(dict.fromkeys(interrupted_worker_ids))
+        owner_placeholders = ", ".join("?" for _ in interrupted_workers)
+        recoverable_condition = "lease_expires_at < ?"
+        recoverable_parameters: tuple[str, ...] = (recovered_timestamp,)
+        if interrupted_workers:
+            recoverable_condition = (
+                f"({recoverable_condition} OR worker_id IN ({owner_placeholders}))"
+            )
+            recoverable_parameters += interrupted_workers
         requeued: list[UUID] = []
         failed: list[UUID] = []
         cancelled: list[UUID] = []
         with self.database.transaction() as connection:
             expired = connection.execute(
-                """
+                f"""
                 SELECT id, state, step, attempt, type, conversation_id
                 FROM jobs
-                WHERE state IN (?, ?) AND lease_expires_at < ?
+                WHERE state IN (?, ?) AND {recoverable_condition}
                 ORDER BY created_at, id
-                """,
+                """,  # noqa: S608 - placeholders bind every dynamic owner value
                 (
                     JobState.RUNNING.value,
                     JobState.CANCEL_REQUESTED.value,
-                    recovered_timestamp,
+                    *recoverable_parameters,
                 ),
             ).fetchall()
             for row in expired:

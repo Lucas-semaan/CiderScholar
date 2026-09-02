@@ -29,6 +29,7 @@ function normalizeStoredSource(source: ChatbotSource): ChatbotSource {
     page_ranges: source.page_ranges ?? [],
     authors: source.authors ?? [],
     providers: source.providers ?? [],
+    local_pdf_url: source.local_pdf_url ?? null,
   };
 }
 

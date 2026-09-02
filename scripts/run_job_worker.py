@@ -18,7 +18,7 @@ from app.corpora import CorpusScope, LocalProfile, load_local_profile, settings_
 from app.database.sqlite import Database
 from app.deep_research.pipeline import build_deep_research_operations
 from app.desktop.notifications import WindowsJobNotifier
-from app.diagnostics import worker_heartbeat
+from app.diagnostics import interrupted_worker_ids, worker_heartbeat
 from app.jobs.background_handlers import CorpusIngestionHandler, LongSynthesisHandler
 from app.jobs.chat_handler import ChatAnswerHandler
 from app.jobs.contracts import JobType
@@ -179,23 +179,35 @@ def main(argv: list[str] | None = None) -> int:
     )
     if not 1 <= chat_concurrency <= 20:
         raise ValueError("chat concurrency must be between 1 and 20")
+    previous_worker_ids = interrupted_worker_ids(settings)
+    worker_ids = tuple(f"worker-{uuid4().hex}" for _ in range(chat_concurrency))
     workers = [
         build_worker(
             settings,
-            worker_id=f"worker-{uuid4().hex}",
+            worker_id=worker_ids[0],
             lease_recovery_enabled=True,
         ),
         *(
             build_worker(
                 settings,
                 job_types=frozenset({JobType.CHAT_ANSWER}),
-                worker_id=f"worker-{uuid4().hex}",
+                worker_id=worker_ids[index],
                 lease_recovery_enabled=False,
             )
-            for _ in range(chat_concurrency - 1)
+            for index in range(1, chat_concurrency)
         ),
     ]
-    with worker_heartbeat(settings):
+    if previous_worker_ids:
+        summary = workers[0].repository.recover_expired_leases(
+            interrupted_worker_ids=previous_worker_ids
+        )
+        logging.getLogger(__name__).info(
+            "interrupted_worker_leases_recovered requeued=%s failed=%s cancelled=%s",
+            len(summary.requeued),
+            len(summary.failed),
+            len(summary.cancelled),
+        )
+    with worker_heartbeat(settings, worker_ids=worker_ids):
         processed_count = _run_worker_pool(
             workers,
             stop_event,

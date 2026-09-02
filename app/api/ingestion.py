@@ -5,7 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, File, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
+from fastapi import Path as ApiPath
 from fastapi.responses import FileResponse
 
 from app.api.dependencies import get_common_corpus_database, get_common_corpus_settings
@@ -41,23 +42,32 @@ def article_chunks(
     return {"article_id": article_id, "chunks": chunks}
 
 
-@router.get("/{article_id}/pdf", response_class=FileResponse)
+@router.get("/{article_id:path}/pdf", response_class=FileResponse)
 def article_pdf(
-    article_id: str,
+    article_id: Annotated[str, ApiPath(min_length=1, max_length=100)],
+    settings: Annotated[Settings, Depends(get_common_corpus_settings)],
     database: Annotated[Database, Depends(get_common_corpus_database)],
 ) -> FileResponse:
     """Open the persisted source PDF selected by an explicit corpus article id."""
 
     article = database.article_details_by_ids([article_id]).get(article_id)
     if article is None:
-        raise FileNotFoundError("Document PDF introuvable dans la base documentaire.")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Document PDF introuvable dans la base documentaire.",
+        )
+    # The client selects only an article id.  The persisted path can belong to a
+    # legacy corpus until its explicit, additive migration is completed.
     path = Path(str(article["pdf_path"])).resolve()
     if path.suffix.casefold() != ".pdf" or not path.is_file():
-        raise FileNotFoundError("Le fichier PDF de ce document n’est plus disponible.")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Le fichier PDF de ce document n’est plus disponible.",
+        )
     return FileResponse(
         path,
         media_type="application/pdf",
-        filename=path.name,
+        filename="article.pdf",
         content_disposition_type="inline",
     )
 

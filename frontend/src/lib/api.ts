@@ -91,6 +91,7 @@ type CorpusFolderResponse = {
 function createCorpusApi(rootPath: string) {
   return {
     list: () => request<CorpusResponse>(rootPath),
+    pdfUrl: (articleId: string) => `${rootPath}/${encodeURIComponent(articleId)}/pdf`,
     upload: async (files: File[]) => {
       const body = new FormData();
       files.forEach((file) => body.append("files", file));

@@ -263,6 +263,7 @@ def _indexed_snapshots(database: Database) -> tuple[int, str, str, int, int, dic
                 FROM articles
                 INNER JOIN chunks ON chunks.article_id = articles.id
                 WHERE chunks.embedding_status = 'indexed'
+                  AND articles.validation_status IN ('validated', 'indexed')
                 ORDER BY articles.id
                 """
             ):
@@ -277,11 +278,13 @@ def _indexed_snapshots(database: Database) -> tuple[int, str, str, int, int, dic
             indexed_chunk_count = 0
             for row in connection.execute(
                 """
-                SELECT id, article_id, chunk_index, section, subsection, page_start, page_end,
-                       token_count, text
-                FROM chunks
-                WHERE embedding_status = 'indexed'
-                ORDER BY id
+                SELECT c.id, c.article_id, c.chunk_index, c.section, c.subsection,
+                       c.page_start, c.page_end, c.token_count, c.text
+                FROM chunks AS c
+                JOIN articles AS a ON a.id = c.article_id
+                WHERE c.embedding_status = 'indexed'
+                  AND a.validation_status IN ('validated', 'indexed')
+                ORDER BY c.id
                 """
             ):
                 values = tuple(row)
@@ -296,7 +299,13 @@ def _indexed_snapshots(database: Database) -> tuple[int, str, str, int, int, dic
             status_counts = {
                 str(row[0]): int(row[1])
                 for row in connection.execute(
-                    "SELECT embedding_status, COUNT(*) FROM chunks GROUP BY embedding_status"
+                    """
+                    SELECT c.embedding_status, COUNT(*)
+                    FROM chunks AS c
+                    JOIN articles AS a ON a.id = c.article_id
+                    WHERE a.validation_status IN ('validated', 'indexed')
+                    GROUP BY c.embedding_status
+                    """
                 )
             }
         finally:
@@ -801,9 +810,11 @@ def _indexed_chunk_payloads_from_connection(
         int(row[0]): (str(row[1]), row[2], int(row[3]), int(row[4]))
         for row in connection.execute(
             """
-            SELECT id, article_id, section, page_start, page_end
-            FROM chunks
-            WHERE embedding_status = 'indexed'
+            SELECT c.id, c.article_id, c.section, c.page_start, c.page_end
+            FROM chunks AS c
+            JOIN articles AS a ON a.id = c.article_id
+            WHERE c.embedding_status = 'indexed'
+              AND a.validation_status IN ('validated', 'indexed')
             """
         )
     }

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import warnings
 from collections.abc import Sequence
 
 import pytest
@@ -114,6 +115,41 @@ def test_qdrant_indexes_share_one_lazy_client_owner(settings, monkeypatch) -> No
     owner.close()
     owner.close()
     assert created_clients[0].close_count == 1
+
+
+def test_qdrant_local_large_collection_recommendation_is_suppressed(
+    settings,
+    monkeypatch,
+) -> None:
+    class WarningQdrantClient:
+        def __init__(self, **_options) -> None:
+            warnings.warn(
+                "Local mode is not recommended for collections with more than 20,000 points. "
+                "Collection <science_chunks> contains 321,127 points.",
+                UserWarning,
+                stacklevel=2,
+            )
+            warnings.warn(
+                "Another Qdrant warning that remains actionable.", UserWarning, stacklevel=2
+            )
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(
+        "app.retrieval.vector_search.QdrantClient",
+        WarningQdrantClient,
+    )
+    index = QdrantLocalIndex(settings, model_name="fake/multilingual")
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        _ = index.client
+
+    assert [str(item.message) for item in caught] == [
+        "Another Qdrant warning that remains actionable."
+    ]
+    index.close()
 
 
 def test_qdrant_client_owner_rejects_another_local_path(settings) -> None:
