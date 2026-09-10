@@ -6,6 +6,7 @@ import hashlib
 import html
 import json
 import re
+import sqlite3
 import unicodedata
 import uuid
 from collections.abc import Callable, Iterable
@@ -801,7 +802,11 @@ class BibliographicHarvestStore:
             self._persist_archived_source_observation(record, connection=_connection)
             return None
         canonical_key = _canonical_key(record)
-        assessment = assess_cider_relevance(record, theme)
+        assessment = (
+            assess_cider_relevance(record, theme)
+            if theme in CIDER_PILOT_THEMES
+            else assess_cider_relevance_across_themes(record)[1]
+        )
         transaction = (
             nullcontext(_connection) if _connection is not None else self.database.transaction()
         )
@@ -2230,12 +2235,16 @@ class BibliographicHarvestStore:
                 changed += 1
         return changed
 
-    def search(self, fts5_expression: str, *, limit: int = 20) -> list[Any]:
+    def search(
+        self, fts5_expression: str, *, limit: int = 20, connection: sqlite3.Connection | None = None
+    ) -> list[Any]:
         if not fts5_expression.strip():
             return []
         if not 1 <= limit <= 200:
             raise ValueError("bibliographic search limit must be between 1 and 200")
-        with closing(self.database.connect()) as connection:
+        with (
+            closing(self.database.connect()) if connection is None else nullcontext(connection)
+        ) as connection:
             return list(
                 connection.execute(
                     """
@@ -2264,7 +2273,9 @@ class BibliographicHarvestStore:
                 )
             )
 
-    def search_metadata(self, query: str, *, limit: int = 20) -> list[Any]:
+    def search_metadata(
+        self, query: str, *, limit: int = 20, connection: sqlite3.Connection | None = None
+    ) -> list[Any]:
         """Find accepted abstracts through DOI, author, year, theme or provider metadata."""
 
         if not query.strip():
@@ -2272,7 +2283,9 @@ class BibliographicHarvestStore:
         if not 1 <= limit <= 200:
             raise ValueError("bibliographic metadata search limit must be between 1 and 200")
         predicate, parameters = _bibliographic_metadata_query(query)
-        with closing(self.database.connect()) as connection:
+        with (
+            closing(self.database.connect()) if connection is None else nullcontext(connection)
+        ) as connection:
             return list(
                 connection.execute(
                     f"""
@@ -2294,6 +2307,7 @@ class BibliographicHarvestStore:
         *,
         limit: int = 1000,
         retry_failed: bool = True,
+        record_ids: set[str] | None = None,
     ) -> list[Any]:
         """Return only scientifically eligible abstracts awaiting vectorization."""
 
@@ -2301,7 +2315,12 @@ class BibliographicHarvestStore:
         if retry_failed:
             statuses.add("failed")
         rows = self._eligible_abstract_rows()
-        return [row for row in rows if str(row["embedding_status"]) in statuses][:limit]
+        return [
+            row
+            for row in rows
+            if str(row["embedding_status"]) in statuses
+            and (record_ids is None or str(row["id"]) in record_ids)
+        ][:limit]
 
     def reset_abstract_embedding_statuses(self) -> int:
         """Requeue only eligible abstract-only records for an explicit rebuild."""
@@ -2316,12 +2335,16 @@ class BibliographicHarvestStore:
             raise ValueError("unsupported bibliographic embedding status")
         self._set_embedding_status(record_ids, status)
 
-    def records_by_ids(self, record_ids: list[str]) -> dict[str, Any]:
+    def records_by_ids(
+        self, record_ids: list[str], *, connection: sqlite3.Connection | None = None
+    ) -> dict[str, Any]:
         unique_ids = list(dict.fromkeys(record_ids))
         if not unique_ids:
             return {}
         placeholders = ",".join("?" for _ in unique_ids)
-        with closing(self.database.connect()) as connection:
+        with (
+            closing(self.database.connect()) if connection is None else nullcontext(connection)
+        ) as connection:
             rows = connection.execute(
                 f"""
                 SELECT r.*, GROUP_CONCAT(DISTINCT s.source) AS sources

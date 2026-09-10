@@ -6,6 +6,17 @@ import re
 import unicodedata
 from enum import StrEnum
 
+SCIENTIFIC_PROSE_INSTRUCTION = (
+    "Commence par les résultats scientifiques, sans reformuler la question ni annoncer le plan. "
+    "Une introduction n'est utile que pour lever une ambiguïté réelle. N'emploie pas les "
+    "libellés preuve directe ou preuve indirecte. Intègre naturellement la matrice de chaque "
+    "étude au résultat cité, uniquement lorsqu'elle est identifiable dans les passages fournis. "
+    "Distingue les matrices multiples ; ne devine jamais une matrice inconnue. Précise les "
+    "limites de transposition utiles sans avertissement répétitif. Consacre le texte aux "
+    "résultats, mécanismes, conditions, contradictions et limites étayés. Évite les conclusions "
+    "qui répètent la réponse. "
+)
+
 
 class ResponseStyle(StrEnum):
     """Closed set of layouts ARGO may select for a scientific synthesis."""

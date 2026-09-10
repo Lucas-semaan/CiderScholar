@@ -16,9 +16,9 @@ from app.corpora import CorpusScope, corpus_paths
 from app.deep_research.claims import _SYSTEM_PROMPT as CLAIM_PROMPT
 from app.deep_research.contextual_summary import _SYSTEM_PROMPT as CONTEXTUAL_PROMPT
 from app.deep_research.iteration import _ASSESSMENT_SYSTEM_PROMPT as GAP_PROMPT
-from app.deep_research.verification import _SYSTEM_PROMPT as VERIFICATION_PROMPT
 from app.desktop.model_integrity import MODEL_MANIFEST
 from app.ingestion.embeddings import local_model_path
+from app.llm.claim_verification import _SYSTEM_PROMPT as VERIFICATION_PROMPT
 from app.llm.providers import LlmProviderStore
 
 _CACHE_SCHEMA_VERSION = 4

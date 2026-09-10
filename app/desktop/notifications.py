@@ -20,7 +20,8 @@ class WindowsJobNotifier:
 
     def notify(self, job: JobRecord) -> bool:
         if (
-            not self.enabled
+            job.type is JobType.BIBLIOGRAPHIC_WATCH
+            or not self.enabled
             or sys.platform != "win32"
             or job.state not in TERMINAL_STATES
             or not self.script.is_file()

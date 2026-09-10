@@ -105,7 +105,7 @@ def latest_chatbot_sources(messages: Sequence[Mapping[str, Any]]) -> list[Chatbo
         if not isinstance(raw_sources, list) or not raw_sources:
             continue
         sources: list[ChatbotSource] = []
-        for raw_source in raw_sources[:10]:
+        for raw_source in raw_sources[:48]:
             try:
                 sources.append(ChatbotSource.model_validate(raw_source))
             except (TypeError, ValueError):

@@ -12,6 +12,8 @@ from pydantic import BaseModel, ConfigDict, Field
 from app.jobs.contracts import JOB_STEP_ORDER, DeepResearchPayload, JobStep, JobType
 from app.jobs.repository import JobRecord
 from app.jobs.worker import JobHandlerResult, JobProgressContext
+from app.llm.response_language import question_language
+from app.retrieval.query_scope import classify_query_scope
 
 
 class DeepResearchOperations(Protocol):
@@ -85,6 +87,27 @@ class DeepResearchHandler:
             job.payload, DeepResearchPayload
         ):
             raise ValueError("deep-research handler received another job type")
+        # Keep this before the first durable retrieval step. A deep-research
+        # request must not use the local corpus to decide it is out of scope.
+        if not classify_query_scope(job.payload.message).accepted:
+            is_french = question_language(job.payload.message) == "fr"
+            answer = (
+                "Cette question est hors du périmètre de CiderScholar. L'analyse approfondie "
+                "est réservée aux questions scientifiques et techniques liées au cidre et à sa "
+                "filière."
+                if is_french
+                else "This question is outside CiderScholar's scope. Deep research is reserved "
+                "for scientific and technical questions about cider and its related field."
+            )
+            return JobHandlerResult(
+                assistant_content=answer,
+                assistant_response={
+                    "mode": "deep_research",
+                    "answer_markdown": answer,
+                    "details": {"diagnostic_code": "out_of_scope"},
+                },
+                response_time_milliseconds=0,
+            )
         checkpoint = self._load(job)
         if checkpoint.verification_contract_version < 2:
             checkpoint.completed_steps = [

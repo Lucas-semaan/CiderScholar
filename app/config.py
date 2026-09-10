@@ -227,12 +227,17 @@ class RetrievalConfig(BaseModel):
     hybrid_candidate_limit: int = Field(default=200, ge=10, le=1000)
     hybrid_default_limit: int = Field(default=100, ge=1, le=1000)
     hybrid_max_query_variants: int = Field(default=10, ge=1, le=20)
+    dense_article_prefilter_enabled: bool = True
+    dense_article_prefilter_max_articles: int = Field(default=60, ge=1, le=250)
+    dense_article_prefilter_min_articles: int = Field(default=4, ge=1, le=250)
 
     @model_validator(mode="after")
     def validate_weights(self) -> RetrievalConfig:
         total = self.lexical_weight + self.vector_weight + self.reranker_weight
         if abs(total - 1.0) > 1e-6:
             raise ValueError("retrieval weights must add up to 1.0")
+        if self.dense_article_prefilter_min_articles > self.dense_article_prefilter_max_articles:
+            raise ValueError("dense article prefilter minimum cannot exceed its maximum")
         return self
 
 
@@ -806,6 +811,20 @@ class NotificationConfig(BaseModel):
     enabled: bool = False
 
 
+class ExpertMemoryConfig(BaseModel):
+    """Optional instructions, disabled until a reviewed release is explicitly selected."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    mode: Literal["off", "shadow", "active"] = "off"
+    max_selected_items: int = Field(default=12, strict=True, ge=1, le=100)
+    planning_max_characters: int = Field(default=2000, strict=True, ge=0, le=2000)
+    semantic_max_characters: int = Field(default=1600, strict=True, ge=0, le=1600)
+    generation_max_characters: int = Field(default=1600, strict=True, ge=0, le=1600)
+    max_candidate_items_changed: int = Field(default=3, strict=True, ge=1, le=3)
+    max_compile_attempts: int = Field(default=2, strict=True, ge=1, le=2)
+
+
 class Settings(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -829,6 +848,7 @@ class Settings(BaseModel):
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
     distribution: CorpusDistributionConfig = Field(default_factory=CorpusDistributionConfig)
     notifications: NotificationConfig = Field(default_factory=NotificationConfig)
+    expert_memory: ExpertMemoryConfig = Field(default_factory=ExpertMemoryConfig)
 
     @model_validator(mode="after")
     def enforce_local_models(self) -> Settings:

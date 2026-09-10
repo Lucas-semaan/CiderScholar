@@ -19,6 +19,7 @@ class JobType(StrEnum):
 
     CHAT_ANSWER = "chat_answer"
     WEEKLY_MAINTENANCE = "weekly_maintenance"
+    BIBLIOGRAPHIC_WATCH = "bibliographic_watch"
     DEEP_RESEARCH = "deep_research"
     LONG_SYNTHESIS = "long_synthesis"
     CORPUS_INGESTION = "corpus_ingestion"
@@ -252,6 +253,10 @@ class WeeklyMaintenancePayload(BaseModel):
         return value
 
 
+class BibliographicWatchPayload(WeeklyMaintenancePayload):
+    """References for an additive administrator watch run; no secrets or query text."""
+
+
 class DeepResearchPayload(BaseModel):
     """Versioned input for one resumable full-text analysis."""
 
@@ -327,6 +332,7 @@ class CorpusIngestionPayload(BaseModel):
 JobPayload = (
     ChatAnswerPayload
     | WeeklyMaintenancePayload
+    | BibliographicWatchPayload
     | DeepResearchPayload
     | LongSynthesisPayload
     | CorpusIngestionPayload

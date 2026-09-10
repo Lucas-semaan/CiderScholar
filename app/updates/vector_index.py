@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import sqlite3
 from collections.abc import Sequence
 from time import perf_counter
 from typing import Any
@@ -352,9 +353,11 @@ def index_bibliographic_abstracts(
     retry_failed: bool = True,
     raise_on_error: bool = True,
     max_batches: int | None = None,
+    record_ids: Sequence[str] | None = None,
 ) -> BibliographicIndexReport:
     if max_batches is not None and max_batches <= 0:
         raise ValueError("max_batches must be positive when provided")
+    selected_ids = set(record_ids) if record_ids is not None else None
     started = perf_counter()
     indexed = 0
     failed = 0
@@ -375,10 +378,12 @@ def index_bibliographic_abstracts(
             index.delete_collection()
             store.reset_abstract_embedding_statuses()
         eligible_ids = set(store.eligible_record_ids())
-        prunable_ids = set(index.record_ids()) - eligible_ids
+        prunable_ids = (set(index.record_ids()) - eligible_ids) if selected_ids is None else set()
         pruned = index.delete(sorted(prunable_ids))
         batch_size = settings.embeddings.batch_size
-        while rows := store.pending_abstracts(limit=5000, retry_failed=retry_failed):
+        while rows := store.pending_abstracts(
+            limit=5000, retry_failed=retry_failed, record_ids=selected_ids
+        ):
             if max_batches is not None and batches >= max_batches:
                 break
             batch = rows[:batch_size]
@@ -511,6 +516,29 @@ class BibliographicHybridSearchService:
         queries: Sequence[str],
         *,
         limit: int = 20,
+        dense_queries: Sequence[str] | None = None,
+        vector_query_limit: int | None = None,
+        prefix_matching: bool | None = None,
+        candidate_limit: int | None = None,
+    ) -> list[BibliographicHybridResponse]:
+        with self.store.database.read_session() as session:
+            return self._search_many(
+                queries,
+                limit=limit,
+                dense_queries=dense_queries,
+                vector_query_limit=vector_query_limit,
+                prefix_matching=prefix_matching,
+                candidate_limit=candidate_limit,
+                connection=session.connection,
+            )
+
+    def _search_many(
+        self,
+        queries: Sequence[str],
+        *,
+        limit: int = 20,
+        connection: sqlite3.Connection | None = None,
+        dense_queries: Sequence[str] | None = None,
         vector_query_limit: int | None = None,
         prefix_matching: bool | None = None,
         candidate_limit: int | None = None,
@@ -543,9 +571,25 @@ class BibliographicHybridSearchService:
         expanded_queries = [
             expand_cider_query(query)[:maximum_query_length] for query in cleaned_queries
         ]
+        lexical_query_set = set(cleaned_queries)
+        vector_queries = (
+            expanded_queries[:active_vector_count]
+            if dense_queries is None
+            else list(dict.fromkeys(dense_queries))[:2]
+        )
+        if dense_queries is not None:
+            for dense_query in vector_queries:
+                if dense_query not in cleaned_queries:
+                    cleaned_queries.append(dense_query)
+                    expanded_queries.append(dense_query)
+        active_vector_count = len(vector_queries)
         lexical_rows_by_query = []
         degradation_codes_by_query: list[list[str]] = []
         for query, expanded_query in zip(cleaned_queries, expanded_queries, strict=True):
+            if query not in lexical_query_set:
+                lexical_rows_by_query.append([])
+                degradation_codes_by_query.append([])
+                continue
             degradation_codes: list[str] = []
             try:
                 prepared = self.query_builder.build(
@@ -555,6 +599,7 @@ class BibliographicHybridSearchService:
                 full_text_rows = self.store.search(
                     prepared.fts5_expression,
                     limit=candidate_limit,
+                    connection=connection,
                 )
             except Exception as exc:
                 full_text_rows = []
@@ -564,7 +609,9 @@ class BibliographicHybridSearchService:
                     type(exc).__name__,
                 )
             try:
-                metadata_rows = self.store.search_metadata(query, limit=candidate_limit)
+                metadata_rows = self.store.search_metadata(
+                    query, limit=candidate_limit, connection=connection
+                )
             except Exception as exc:
                 metadata_rows = []
                 degradation_codes.append("abstract_metadata_query_degraded")
@@ -580,11 +627,18 @@ class BibliographicHybridSearchService:
         vector_search_degraded = False
         if active_vector_count:
             try:
-                query_vectors = self.backend.encode_queries(expanded_queries[:active_vector_count])
-                vector_rows_by_query[:active_vector_count] = self.index.search_many(
+                query_vectors = self.backend.encode_queries(vector_queries)
+                dense_rows = self.index.search_many(
                     query_vectors,
                     limit=candidate_limit,
                 )
+                for index, rows in enumerate(dense_rows):
+                    target = (
+                        index
+                        if dense_queries is None
+                        else cleaned_queries.index(vector_queries[index])
+                    )
+                    vector_rows_by_query[target] = rows
             except Exception as exc:
                 # The FTS5 results are independently authoritative. A stale or
                 # incompatible optional vector index must not cancel the entire
@@ -600,6 +654,7 @@ class BibliographicHybridSearchService:
                 lexical_rows,
                 vector_rows,
                 limit=limit,
+                connection=connection,
                 vector_search_degraded=vector_search_degraded,
                 degradation_codes=degradation_codes,
             )
@@ -619,6 +674,7 @@ class BibliographicHybridSearchService:
         vector_rows: Sequence[tuple[str, float]],
         *,
         limit: int,
+        connection: sqlite3.Connection | None = None,
         vector_search_degraded: bool = False,
         degradation_codes: Sequence[str] = (),
     ) -> BibliographicHybridResponse:
@@ -633,7 +689,7 @@ class BibliographicHybridSearchService:
             scores[record_id] = scores.get(record_id, 0.0) + 0.4 / (rrf_k + rank)
         for record_id, rank in vector_ranks.items():
             scores[record_id] = scores.get(record_id, 0.0) + 0.6 / (rrf_k + rank)
-        candidate_records = self.store.records_by_ids(list(scores))
+        candidate_records = self.store.records_by_ids(list(scores), connection=connection)
         query_themes = infer_cider_themes(query)
         if query_themes:
             for record_id, row in candidate_records.items():

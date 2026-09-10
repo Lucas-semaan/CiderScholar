@@ -1,5 +1,10 @@
 export type JobType =
-  "chat_answer" | "weekly_maintenance" | "deep_research" | "long_synthesis" | "corpus_ingestion";
+  | "chat_answer"
+  | "bibliographic_watch"
+  | "weekly_maintenance"
+  | "deep_research"
+  | "long_synthesis"
+  | "corpus_ingestion";
 
 export type JobState =
   "queued" | "running" | "succeeded" | "failed" | "cancel_requested" | "cancelled";

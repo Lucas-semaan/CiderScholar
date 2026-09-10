@@ -146,7 +146,7 @@ def test_global_semantic_filter_corrects_one_incomplete_json_response() -> None:
     assert result.completion_tokens == 12
 
 
-def test_global_semantic_filter_rechecks_all_rejected_wave_then_retains_local_candidates() -> None:
+def test_global_semantic_filter_keeps_all_cd_verdicts_without_retry() -> None:
     records = [
         _record("common:1", "Yeast expressed stress genes under changing wine conditions."),
         _record("common:2", "Temperature affected yeast viability during fermentation."),
@@ -194,12 +194,12 @@ def test_global_semantic_filter_rechecks_all_rejected_wave_then_retains_local_ca
         records,
     )
 
-    assert client.calls == 3
-    assert result.used_fallback is True
-    assert result.selected_candidate_ids == [record.record_id for record in records]
-    assert {decision.relevance for decision in result.decisions} == {"unassessed"}
-    assert result.prompt_tokens == 36
-    assert "rejeté tous les candidats" in result.warnings[0]
+    assert client.calls == 1
+    assert result.used_fallback is False
+    assert result.selected_candidate_ids == []
+    assert {decision.relevance for decision in result.decisions} == {"peripheral"}
+    assert result.prompt_tokens == 12
+    assert result.warnings == []
 
 
 def test_global_semantic_filter_rejects_unpersisted_external_evidence() -> None:
@@ -266,7 +266,7 @@ def test_global_semantic_filter_assesses_a_deep_candidate_set_atomically() -> No
         records,
     )
 
-    assert client.calls == 1
-    assert client.maximum_output_tokens == 6_000
+    assert client.calls == 4
+    assert client.maximum_output_tokens == 1_880
     assert result.used_fallback is False
     assert result.selected_candidate_ids == [record.record_id for record in records]

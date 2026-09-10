@@ -87,6 +87,9 @@ class ArticleRankingResponse(BaseModel):
     lexical_candidate_count: int = Field(default=0, ge=0)
     dense_candidate_count: int = Field(default=0, ge=0)
     vector_query_count: int = Field(default=0, ge=0)
+    dense_article_prefilter_used: bool = False
+    dense_article_prefilter_article_count: int = Field(default=0, ge=0)
+    dense_global_query_count: int = Field(default=0, ge=0)
     rrf_unique_candidate_count: int = Field(default=0, ge=0)
     vector_search_degraded: bool = False
     articles: list[RankedArticle]
@@ -424,6 +427,7 @@ class ArticleRankingService:
         query: str,
         *,
         query_variants: Sequence[str] | None = None,
+        dense_queries: Sequence[str] | None = None,
         article_count: int | None = None,
         diversity_mode: DiversityMode | None = None,
         central_concepts: Sequence[str] | None = None,
@@ -453,6 +457,7 @@ class ArticleRankingService:
         hybrid_response = self.hybrid.search(
             query,
             query_variants=query_variants,
+            **({"dense_queries": dense_queries} if dense_queries is not None else {}),
             limit=hybrid_limit,
             candidate_limit=max(
                 hybrid_limit,
@@ -483,6 +488,11 @@ class ArticleRankingService:
                 "lexical_candidate_count": hybrid_response.lexical_candidates,
                 "dense_candidate_count": hybrid_response.vector_candidates,
                 "vector_query_count": hybrid_response.vector_query_count,
+                "dense_article_prefilter_used": hybrid_response.dense_article_prefilter_used,
+                "dense_article_prefilter_article_count": (
+                    hybrid_response.dense_article_prefilter_article_count
+                ),
+                "dense_global_query_count": hybrid_response.dense_global_query_count,
                 "rrf_unique_candidate_count": hybrid_response.unique_candidates,
                 "vector_search_degraded": hybrid_response.vector_search_degraded,
             }

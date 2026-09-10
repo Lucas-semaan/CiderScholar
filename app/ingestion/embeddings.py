@@ -30,6 +30,7 @@ from app.ingestion.token_budget import (
     model_storage_name as model_storage_name,
 )
 from app.memory import MemoryGuard, MemoryLimitError
+from app.telemetry import measured
 
 LOGGER = logging.getLogger(__name__)
 
@@ -100,6 +101,7 @@ class EmbeddingBackend(Protocol):
 
     def encode_documents(self, texts: Sequence[str]) -> Any: ...
 
+    @measured("query_encoding")
     def encode_queries(self, texts: Sequence[str]) -> Any: ...
 
     def close(self) -> None: ...
@@ -216,6 +218,7 @@ class SentenceTransformerBackend:
                     f"maximum is {self.settings.embeddings.max_sequence_length}"
                 )
 
+    @measured("query_encoding")
     def encode_queries(self, texts: Sequence[str]) -> Any:
         return self._encode(texts, self.settings.embeddings.query_prefix)
 

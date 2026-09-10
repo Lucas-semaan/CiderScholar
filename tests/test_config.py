@@ -8,6 +8,41 @@ from pydantic import ValidationError
 from app.config import AppConfig, PathConfig, Settings, load_settings
 
 
+def test_expert_memory_defaults_preserve_existing_configs(tmp_path: Path) -> None:
+    config = tmp_path / "config.yaml"
+    config.write_text("app:\n  log_level: INFO\n", encoding="utf-8")
+    memory = load_settings(config).expert_memory
+    assert memory.mode == "off"
+    assert memory.max_selected_items == 12
+    assert memory.max_compile_attempts == 2
+    assert memory.max_candidate_items_changed == 3
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("mode", "learn"),
+        ("max_compile_attempts", 3),
+        ("max_compile_attempts", True),
+        ("max_selected_items", 0),
+        ("planning_max_characters", 2001),
+        ("secret", "unexpected"),
+    ],
+)
+def test_expert_memory_rejects_unknown_or_unbounded_settings(field, value) -> None:
+    with pytest.raises(ValidationError):
+        Settings.model_validate({"expert_memory": {field: value}})
+
+
+def test_distributed_expert_memory_is_explicitly_disabled() -> None:
+    import yaml
+
+    root = Path(__file__).resolve().parents[1]
+    for relative in ("config.example.yaml", "installer/config.runtime.yaml"):
+        payload = yaml.safe_load((root / relative).read_text(encoding="utf-8"))
+        assert payload["expert_memory"]["mode"] == "off"
+
+
 def test_offline_mode_forbids_bibliographic_network() -> None:
     with pytest.raises(ValidationError):
         AppConfig(offline_mode=True, allow_bibliographic_apis=True)
@@ -42,6 +77,28 @@ def test_retrieval_weights_are_validated() -> None:
                     "lexical_weight": 0.5,
                     "vector_weight": 0.5,
                     "reranker_weight": 0.5,
+                }
+            }
+        )
+
+
+def test_dense_article_prefilter_requires_a_coherent_bounded_pool() -> None:
+    settings = Settings.model_validate(
+        {
+            "retrieval": {
+                "dense_article_prefilter_enabled": True,
+                "dense_article_prefilter_min_articles": 4,
+                "dense_article_prefilter_max_articles": 12,
+            }
+        }
+    )
+    assert settings.retrieval.dense_article_prefilter_max_articles == 12
+    with pytest.raises(ValidationError, match="prefilter minimum"):
+        Settings.model_validate(
+            {
+                "retrieval": {
+                    "dense_article_prefilter_min_articles": 13,
+                    "dense_article_prefilter_max_articles": 12,
                 }
             }
         )

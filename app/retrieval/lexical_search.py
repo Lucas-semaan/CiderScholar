@@ -13,6 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from app.config import Settings
 from app.corpora import CorpusScope
 from app.database.sqlite import Database, DatabaseReadSession
+from app.telemetry import measured
 
 QueryMode = Literal["any", "all", "phrase"]
 TOKEN_PATTERN = re.compile(r"[^\W_]+", re.UNICODE)
@@ -167,6 +168,7 @@ class LexicalReadSession:
             self._session.__exit__(*args)
             self._session = None
 
+    @measured("fts_session_query")
     def search(
         self,
         query: str,
@@ -275,6 +277,7 @@ class LexicalSearchService:
 
         return LexicalReadSession(self)
 
+    @measured("fts_search")
     def search(
         self,
         query: str,

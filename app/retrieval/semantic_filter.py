@@ -12,6 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 from app.llm.argo_client import ArgoQuotaError
 from app.llm.contracts import GenerationMessage, GenerationResponse
 from app.models.chatbot import ChatEvidenceRecord
+from app.retrieval.evidence_selection import focused_excerpt
 from app.retrieval.query_planning import ResearchAxis
 
 CandidateId = Annotated[str, Field(min_length=1, max_length=300)]
@@ -58,7 +59,9 @@ class SemanticCandidate(BaseModel):
     text: str = Field(min_length=1, max_length=MAX_CANDIDATE_TEXT_CHARACTERS)
 
     @classmethod
-    def from_evidence_record(cls, record: ChatEvidenceRecord) -> SemanticCandidate:
+    def from_evidence_record(
+        cls, record: ChatEvidenceRecord, question: str = ""
+    ) -> SemanticCandidate:
         passages: list[str] = []
         remaining = MAX_CANDIDATE_TEXT_CHARACTERS
         for passage in record.passages:
@@ -71,7 +74,13 @@ class SemanticCandidate(BaseModel):
             available = remaining - separator_length
             if available <= 0:
                 break
-            excerpt = cleaned[:available]
+            if question:
+                available = min(
+                    available, max(1, MAX_CANDIDATE_TEXT_CHARACTERS // len(record.passages) - 1)
+                )
+                excerpt = focused_excerpt(cleaned, question, available)
+            else:
+                excerpt = cleaned[:available]
             passages.append(excerpt)
             remaining -= separator_length + len(excerpt)
         text = "\n".join(passages).strip()

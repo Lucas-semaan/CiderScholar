@@ -13,6 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from app.config import Settings
 from app.desktop.model_integrity import verify_model_manifest
 from app.ingestion.embeddings import model_storage_name
+from app.telemetry import measured
 
 logger = logging.getLogger(__name__)
 
@@ -81,6 +82,7 @@ class MultilingualReranker:
             trust_remote_code=settings.reranker.trust_remote_code,
         )
 
+    @measured("reranker_model_load")
     def _load_model(self) -> Any:
         if self._model is None:
             if self.model_path is None or not self.model_path.is_dir():
@@ -100,6 +102,7 @@ class MultilingualReranker:
             )
         return self._model
 
+    @measured("cross_encoder_rerank")
     def rerank(
         self,
         query: str,

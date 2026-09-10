@@ -2,6 +2,13 @@
 
 Statut : accepté.
 
+Décision utilisateur du 10 septembre 2026 : `definition` est facultatif (valeur `null` admise),
+aucune longueur minimale d'introduction n'est exigée. Le contrôle lexical imposant le préfixe
+« preuve indirecte » est retiré. Les matrices et les limites de transposition pertinentes restent
+explicites et fondées sur les passages cités. Cette décision concerne aussi les suivis conversationnels,
+réponses partielles, abstentions et exports. Les budgets de génération et les validations scientifiques
+restent applicables ; un texte plus court n'est pas un objectif en soi.
+
 ## Continuité entre recherche et conversation
 
 Le champ `interaction_mode` d’une demande accepte trois valeurs :
@@ -62,8 +69,10 @@ Il doit signaler, lorsque les sources le permettent :
   recopier leur formulation ; les extraits verbatim, titres et métadonnées bibliographiques restent
   inchangés et ne comptent pas comme un mélange de langues dans la prose ;
 - utiliser des phrases simples et un vocabulaire scientifique précis ;
-- commencer par une mini-introduction utile qui situe le sujet, la matrice, le procédé et les
-  distinctions nécessaires avant d'exposer les résultats ;
+- commencer par les résultats scientifiques ; réserver un cadrage bref aux ambiguïtés réelles ;
+- intégrer la matrice étudiée au résultat cité, sans les libellés « preuve directe/indirecte »,
+  et ne jamais inventer une matrice absente des sources ;
+- supprimer reformulations de la question, annonces de plan et conclusions répétitives ;
 - en l'absence de contrainte explicite, laisser Argo choisir la typologie adaptée parmi la prose
   continue, les sections thématiques, la comparaison, le déroulé de processus et la liste ;
 - respecter en priorité une forme explicitement demandée par l'utilisateur ;
@@ -84,7 +93,8 @@ Il doit signaler, lorsque les sources le permettent :
 
 ## Structure d’une réponse
 
-1. Situer brièvement le sujet et les distinctions nécessaires.
+1. Clarifier brièvement une ambiguïté seulement si elle change l’interprétation ; sinon commencer
+   directement par les résultats.
 2. Répondre directement à la question en synthétisant les fragments pertinents.
 3. Exposer les résultats soutenus par les sources, en croisant les preuves complémentaires.
 4. Présenter les contradictions, limites, biais ou erreurs potentielles pertinents.
@@ -187,7 +197,7 @@ diagnostic structuré et ne remonte jamais comme erreur interne du worker.
 À l'épuisement de cette enveloppe, les atteintes à la fidélité scientifique restent bloquantes : référence
 inexistante, niveau C/D, chiffre, causalité, norme, évaluation ou sécurité non étayés, fuite d'identifiant ou
 du processus interne, schéma inutilisable ou altération de la question. Les défauts de couverture et de
-rédaction, y compris un libellé indirect B manquant, peuvent être rendus comme avertissements lorsque la
+rédaction peuvent être rendus comme avertissements lorsque la
 version conservée ne contient plus aucun blocage scientifique. Une sortie `insufficient` qui omet des
 preuves déjà classées A/B déclenche les mêmes corrections au lieu de valider immédiatement une abstention.
 Si toutes les repasses restent des abstentions, la plus précise demeure un repli sûr ; sinon la sélection

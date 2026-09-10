@@ -15,6 +15,7 @@ from app.retrieval.hybrid_search import (
 from app.retrieval.lexical_search import LexicalSearchService
 from app.retrieval.vector_search import (
     QdrantLocalIndex,
+    VectorSearchResult,
     VectorSearchService,
     clear_query_vector_cache,
 )
@@ -42,6 +43,18 @@ class FixedQueryBackend:
 class LowMemoryGuard:
     def check(self, operation: str) -> None:
         raise MemoryLimitError(f"synthetic low-memory condition during {operation}")
+
+
+class RecordingVectorService:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    def search_many(self, queries, **kwargs) -> list[list[VectorSearchResult]]:
+        self.calls.append({"queries": list(queries), **kwargs})
+        return [[] for _query in queries]
+
+    def close(self) -> None:
+        return None
 
 
 def _seed_hybrid_database(database: Database) -> list[int]:
@@ -198,8 +211,63 @@ def test_hybrid_filters_are_applied_to_both_channels(settings) -> None:
         assert {result.article_id for result in by_article.results} == {"article-a"}
         by_section = hybrid.search("temperature", sections=["Results"], limit=10)
         assert all(result.section == "Results" for result in by_section.results)
+        per_query = index.search_many(
+            [[1.0, 0.0], [1.0, 0.0]],
+            article_ids_by_query=[None, ["article-a"]],
+        )
+        assert {result.article_id for result in per_query[0]} == {"article-a", "article-b"}
+        assert {result.article_id for result in per_query[1]} == {"article-a"}
     finally:
         hybrid.close()
+
+
+def test_hybrid_scopes_only_later_dense_variants_to_lexical_articles(settings) -> None:
+    database = Database(settings.paths.database_path)
+    database.initialize()
+    for number in range(4):
+        database.save_article_and_chunks(
+            {
+                "id": f"article-{number}",
+                "sha256": f"{number:064x}",
+                "title": f"Temperature study {number}",
+                "authors": [],
+                "publication_year": 2024,
+                "pdf_path": f"data/pdf/{number}.pdf",
+                "validation_status": "indexed",
+                "source": "local",
+            },
+            [
+                {
+                    "section": "Results",
+                    "page_start": 1,
+                    "page_end": 1,
+                    "chunk_index": 0,
+                    "text": f"Temperature fermentation result {number}.",
+                    "token_count": 4,
+                }
+            ],
+        )
+    settings.retrieval.dense_article_prefilter_min_articles = 4
+    settings.retrieval.dense_article_prefilter_max_articles = 4
+    vector = RecordingVectorService()
+    hybrid = HybridSearchService(
+        settings, database, LexicalSearchService(settings, database), vector
+    )
+
+    response = hybrid.search(
+        "temperature fermentation",
+        query_variants=["fermentation result"],
+        limit=10,
+    )
+
+    assert response.dense_article_prefilter_used is True
+    assert response.dense_article_prefilter_article_count == 4
+    assert response.dense_global_query_count == 1
+    assert len(vector.calls) == 1
+    assert vector.calls[0]["article_ids_by_query"] == [
+        None,
+        ("article-0", "article-1", "article-2", "article-3"),
+    ]
 
 
 def test_hybrid_query_variants_are_deduplicated_and_bounded(settings) -> None:

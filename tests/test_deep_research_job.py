@@ -75,7 +75,7 @@ def test_deep_research_resumes_checkpoint_without_resubmitting_question(tmp_path
     conversation = repository.database.create_chat_conversation("Analyse")
     conversation_id = UUID(conversation["id"])
     payload = DeepResearchPayload(
-        message="Comparer les preuves en texte intégral.",
+        message="Comparer les preuves cidricoles en texte intégral.",
         conversation_id=conversation_id,
         client_request_id=uuid4(),
     )
@@ -152,7 +152,7 @@ def test_deep_research_cancellation_stops_at_the_next_checkpoint(tmp_path) -> No
     repository.initialize()
     conversation = repository.database.create_chat_conversation("Annulation")
     payload = DeepResearchPayload(
-        message="Arrêter après la recherche.",
+        message="Arrêter après la recherche de preuves sur le cidre.",
         conversation_id=UUID(conversation["id"]),
         client_request_id=uuid4(),
     )
@@ -197,6 +197,41 @@ def test_deep_research_cancellation_stops_at_the_next_checkpoint(tmp_path) -> No
         "error_code": None,
         "diagnostic_code": None,
     }
+
+
+def test_deep_research_rejects_out_of_scope_before_retrieval(tmp_path) -> None:
+    repository = JobRepository(tmp_path / "queue.sqlite3")
+    repository.initialize()
+    conversation = repository.database.create_chat_conversation("Hors périmètre")
+    payload = DeepResearchPayload(
+        message="Explique la mécanique quantique.",
+        conversation_id=UUID(conversation["id"]),
+        client_request_id=uuid4(),
+    )
+    repository.enqueue_deep_research(payload)
+    operations = RestartableOperations()
+    worker = DurableJobWorker(
+        repository=repository,
+        registry=JobHandlerRegistry(
+            {JobType.DEEP_RESEARCH: DeepResearchHandler(tmp_path / "checkpoints", operations)}
+        ),
+        worker_id="deep-worker-out-of-scope",
+    )
+
+    completed = worker.run_once()
+
+    assert completed is not None
+    assert completed.state.value == "succeeded"
+    assert operations.calls == {
+        "search": 0,
+        "reranking": 0,
+        "evidence": 0,
+        "verification": 0,
+        "synthesis": 0,
+    }
+    persisted = repository.database.chat_conversation(str(payload.conversation_id))
+    assert persisted is not None
+    assert persisted["messages"][-1]["response"]["details"] == {"diagnostic_code": "out_of_scope"}
 
 
 class ScopedLexicalBackend:
@@ -260,7 +295,7 @@ def test_production_worker_runs_scoped_search_through_durable_stages(settings) -
     repository.initialize()
     conversation = repository.database.create_chat_conversation("Analyse interne")
     payload = DeepResearchPayload(
-        message="Comparer les fragments disponibles.",
+        message="Comparer les fragments cidricoles disponibles.",
         conversation_id=UUID(conversation["id"]),
         client_request_id=uuid4(),
     )

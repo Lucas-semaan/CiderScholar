@@ -54,6 +54,7 @@ export const workerStatePresentation: Record<
 
 export const diagnosticJobTypeLabels: Record<JobType, string> = {
   chat_answer: "Réponse scientifique",
+  bibliographic_watch: "Veille bibliographique",
   weekly_maintenance: "Maintenance hebdomadaire",
   deep_research: "Recherche approfondie",
   long_synthesis: "Synthèse longue",

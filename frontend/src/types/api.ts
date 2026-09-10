@@ -1,4 +1,4 @@
-import type { JobState, JobStep, JobType } from "./chat";
+import type { DurableJob, JobState, JobStep, JobType } from "./chat";
 
 export type * from "./chat";
 
@@ -388,4 +388,34 @@ export interface SynthesisDetail {
     bibliography: Array<Record<string, unknown>>;
     [key: string]: unknown;
   } | null;
+}
+
+export interface WatchConfiguration {
+  enabled: boolean;
+  themes: { key: string; query: string }[];
+}
+export interface WatchReport {
+  job_id: string;
+  state: "running" | "completed" | "partial" | "failed" | "cancelled";
+  started_at: string;
+  completed_at: string | null;
+  examined: number;
+  duplicates: number;
+  accepted: number;
+  review: number;
+  rejected: number;
+  acquisitions_attempted: number;
+  added_to_rag: number;
+  full_articles: number;
+  abstracts_only: number;
+  deferred: number;
+  errors: string[];
+  limitations: string[];
+}
+export interface WatchStatus {
+  configuration: WatchConfiguration;
+  next_due_at: string | null;
+  active_job: DurableJob | null;
+  history: WatchReport[];
+  suspended_reason: string | null;
 }

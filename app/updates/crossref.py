@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import date
 from typing import Any
 from urllib.parse import quote
 
@@ -28,6 +29,8 @@ class CrossrefClient(OfficialBibliographicClient):
         limit: int,
         *,
         offset: int = 0,
+        since: date | None = None,
+        until: date | None = None,
     ) -> list[BibliographicRecord]:
         params: dict[str, str | int] = {
             "query.bibliographic": query,
@@ -36,6 +39,12 @@ class CrossrefClient(OfficialBibliographicClient):
             "sort": "score",
             "order": "desc",
         }
+        if since is not None:
+            params["filter"] = f"from-index-date:{since.isoformat()}"
+            if until is not None:
+                params["filter"] += f",until-index-date:{until.isoformat()}"
+            params["sort"] = "indexed"
+            params["order"] = "asc"
         if self.config.crossref_email:
             params["mailto"] = self.config.crossref_email
         payload = self._get_json(

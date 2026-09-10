@@ -18,6 +18,7 @@ from app.jobs.contracts import (
     JOB_ERROR_DISPOSITIONS,
     JOB_STEP_ORDER,
     MAX_JOB_ATTEMPTS,
+    BibliographicWatchPayload,
     ChatAnswerPayload,
     CorpusIngestionPayload,
     DeepResearchPayload,
@@ -45,6 +46,8 @@ def _parse_timestamp(value: str | None) -> datetime | None:
     return datetime.fromisoformat(value) if value is not None else None
 
 
+WATCH_CONVERSATION_ID = UUID("00000000-0000-4000-8000-000000000005")
+WATCH_MESSAGE_ID = UUID("00000000-0000-4000-8000-000000000006")
 MAX_ACTIVE_JOBS_PER_CONVERSATION = 3
 MAINTENANCE_CONVERSATION_ID = UUID("00000000-0000-4000-8000-000000000001")
 MAINTENANCE_MESSAGE_ID = UUID("00000000-0000-4000-8000-000000000002")
@@ -693,6 +696,62 @@ class JobRepository:
             )
         return self._row_to_record(row)
 
+    def enqueue_bibliographic_watch(
+        self,
+        *,
+        now: datetime | None = None,
+    ) -> JobRecord:
+        """Enqueue at most one persistent maintenance job across all processes."""
+
+        queued_at = now or datetime.now(UTC)
+        timestamp = _timestamp(queued_at)
+        with self.database.transaction() as connection:
+            existing = connection.execute(
+                """
+                SELECT * FROM jobs
+                WHERE type = ? AND state IN ('queued', 'running', 'cancel_requested')
+                ORDER BY created_at LIMIT 1
+                """,
+                (JobType.BIBLIOGRAPHIC_WATCH.value,),
+            ).fetchone()
+            if existing is not None:
+                return self._row_to_record(existing)
+            connection.execute(
+                """
+                INSERT INTO chat_conversations(id, title, created_at, updated_at)
+                VALUES (?, 'Veille bibliographique', ?, ?)
+                ON CONFLICT(id) DO NOTHING
+                """,
+                (str(WATCH_CONVERSATION_ID), timestamp, timestamp),
+            )
+            connection.execute(
+                """
+                INSERT INTO chat_messages(
+                    id, conversation_id, position, role, content, created_at
+                ) VALUES (?, ?, 0, 'user', 'Veille bibliographique', ?)
+                ON CONFLICT(id) DO NOTHING
+                """,
+                (str(WATCH_MESSAGE_ID), str(WATCH_CONVERSATION_ID), timestamp),
+            )
+            maintenance_id = uuid4()
+            payload = BibliographicWatchPayload(
+                maintenance_id=maintenance_id,
+                conversation_id=WATCH_CONVERSATION_ID,
+                client_request_id=maintenance_id,
+                requested_at=queued_at,
+            )
+            row = self._insert_queued_job(
+                connection,
+                job_id=uuid4(),
+                job_type=JobType.BIBLIOGRAPHIC_WATCH,
+                payload=payload,
+                user_message_id=WATCH_MESSAGE_ID,
+                priority=200,
+                available_at=timestamp,
+                created_at=timestamp,
+            )
+        return self._row_to_record(row)
+
     def enqueue_long_synthesis(
         self,
         payload: LongSynthesisPayload,
@@ -904,6 +963,11 @@ class JobRepository:
                 SELECT id FROM jobs
                 WHERE state = ? AND available_at <= ? AND attempt < ?
                   {type_filter}
+                  AND NOT EXISTS (
+                    SELECT 1 FROM jobs AS busy
+                    WHERE busy.state IN ('running', 'cancel_requested')
+                    AND (jobs.type = 'bibliographic_watch' OR busy.type = 'bibliographic_watch')
+                  )
                 ORDER BY priority, available_at, created_at, id
                 LIMIT 1
                 """,
@@ -1776,6 +1840,8 @@ class JobRepository:
             return JobType.CHAT_ANSWER
         if isinstance(payload, DeepResearchPayload):
             return JobType.DEEP_RESEARCH
+        if isinstance(payload, BibliographicWatchPayload):
+            return JobType.BIBLIOGRAPHIC_WATCH
         if isinstance(payload, WeeklyMaintenancePayload):
             return JobType.WEEKLY_MAINTENANCE
         if isinstance(payload, LongSynthesisPayload):
@@ -1815,6 +1881,8 @@ class JobRepository:
             payload = ChatAnswerPayload.model_validate_json(row["payload_json"])
         elif job_type is JobType.DEEP_RESEARCH:
             payload = DeepResearchPayload.model_validate_json(row["payload_json"])
+        elif job_type is JobType.BIBLIOGRAPHIC_WATCH:
+            payload = BibliographicWatchPayload.model_validate_json(row["payload_json"])
         elif job_type is JobType.WEEKLY_MAINTENANCE:
             payload = WeeklyMaintenancePayload.model_validate_json(row["payload_json"])
         elif job_type is JobType.LONG_SYNTHESIS:

@@ -1,0 +1,774 @@
+{
+  "schema_version": 1,
+  "version": "1.0.0",
+  "updated": "2026-09-10",
+  "core": "coeur",
+  "pages": [
+    {
+      "id": "coeur",
+      "file": "coeur.md",
+      "title": "Le cœur de raisonnement AsCoCid",
+      "revision": 1,
+      "sha256": "619056886ce3ac189e15706bf19a3cd00e6ea83aadbb01e29dd8034a10248909",
+      "terms": [],
+      "source_refs": [
+        {
+          "source_id": "src-df9a48443146",
+          "locator": "p0003"
+        },
+        {
+          "source_id": "src-97e16b3a488e",
+          "locator": "p0003"
+        },
+        {
+          "source_id": "src-3c57ec8e3472",
+          "locator": "p0002"
+        },
+        {
+          "source_id": "src-8893f0920786",
+          "locator": "p0002"
+        },
+        {
+          "source_id": "src-5bfe86beccf8",
+          "locator": "p0002"
+        },
+        {
+          "source_id": "src-d869da582122",
+          "locator": "p0002"
+        },
+        {
+          "source_id": "src-5631d0272762",
+          "locator": "p0002"
+        },
+        {
+          "source_id": "src-f549b73e8400",
+          "locator": "p0002"
+        },
+        {
+          "source_id": "src-24e16d08b9a0",
+          "locator": "p0002"
+        },
+        {
+          "source_id": "src-56073c19dc31",
+          "locator": "p0002"
+        },
+        {
+          "source_id": "src-d4e0a3900d67",
+          "locator": "p0002"
+        },
+        {
+          "source_id": "src-0a76ea63b57a",
+          "locator": "p0002"
+        },
+        {
+          "source_id": "src-9ef4b439dc6f",
+          "locator": "p0002"
+        },
+        {
+          "source_id": "src-56073c19dc31",
+          "locator": "p0007"
+        },
+        {
+          "source_id": "src-93039ac062cf",
+          "locator": "p0013"
+        },
+        {
+          "source_id": "src-02a96bd8c7af",
+          "locator": "p0002"
+        },
+        {
+          "source_id": "src-0adf2d0f1aae",
+          "locator": "p0002"
+        },
+        {
+          "source_id": "src-41edecde46a0",
+          "locator": "p0003"
+        },
+        {
+          "source_id": "src-1bd2902cb8d4",
+          "locator": "p0002"
+        },
+        {
+          "source_id": "src-992247cdf598",
+          "locator": "p0003"
+        }
+      ]
+    },
+    {
+      "id": "matiere-extraction",
+      "file": "matiere-extraction.md",
+      "title": "Raisonner de la matière première au moût",
+      "revision": 1,
+      "sha256": "6a5fae166989ba8e684ecf4eedb0215ec91b0832565e54e86c72d3ca65e76e32",
+      "terms": [
+        "pomme",
+        "pommes",
+        "maturité",
+        "texture",
+        "récolte",
+        "stockage des pommes",
+        "râpage",
+        "pressage",
+        "pressurage",
+        "cuvage",
+        "marc",
+        "extraction",
+        "apple",
+        "milling",
+        "pressing",
+        "pomace"
+      ],
+      "source_refs": [
+        {
+          "source_id": "src-d9717cd6aebe",
+          "locator": "p0002"
+        },
+        {
+          "source_id": "src-3c57ec8e3472",
+          "locator": "p0002"
+        },
+        {
+          "source_id": "src-467c4a8cf6b1",
+          "locator": "p0002"
+        },
+        {
+          "source_id": "src-0cb68b9b7381",
+          "locator": "p0003"
+        },
+        {
+          "source_id": "src-701e7e819b34",
+          "locator": "p0006"
+        },
+        {
+          "source_id": "src-5631d0272762",
+          "locator": "p0002"
+        },
+        {
+          "source_id": "src-0a76ea63b57a",
+          "locator": "p0002"
+        },
+        {
+          "source_id": "src-86fd7065781a",
+          "locator": "p0002"
+        },
+        {
+          "source_id": "src-4b170ecc893b",
+          "locator": "p0002"
+        },
+        {
+          "source_id": "src-e334c311873b",
+          "locator": "p0002"
+        },
+        {
+          "source_id": "src-4a2095d8b6d1",
+          "locator": "p0013"
+        },
+        {
+          "source_id": "src-1efa15d2c872",
+          "locator": "p0002"
+        }
+      ]
+    },
+    {
+      "id": "clarification",
+      "file": "clarification.md",
+      "title": "Choisir et diagnostiquer la clarification",
+      "revision": 1,
+      "sha256": "8fdaab7423e58d850ef855ac681925a4436970412ecbd39bca413acd89a4ade8",
+      "terms": [
+        "clarification",
+        "pectine",
+        "pectinase",
+        "pectinestérase",
+        "chapeau brun",
+        "défécation",
+        "dépectinisation",
+        "flottation",
+        "calcium",
+        "pectin",
+        "keeving",
+        "clarification haute",
+        "clarification basse"
+      ],
+      "source_refs": [
+        {
+          "source_id": "src-8893f0920786",
+          "locator": "p0006"
+        },
+        {
+          "source_id": "src-8893f0920786",
+          "locator": "p0008"
+        },
+        {
+          "source_id": "src-8893f0920786",
+          "locator": "p0011"
+        },
+        {
+          "source_id": "src-8893f0920786",
+          "locator": "p0014"
+        },
+        {
+          "source_id": "src-c9efbb3e6fc4",
+          "locator": "p0002"
+        },
+        {
+          "source_id": "src-e7343380338a",
+          "locator": "p0002"
+        },
+        {
+          "source_id": "src-9ef4b439dc6f",
+          "locator": "p0002"
+        },
+        {
+          "source_id": "src-ffb33942d527",
+          "locator": "p0002"
+        },
+        {
+          "source_id": "src-8893f0920786",
+          "locator": "p0007"
+        },
+        {
+          "source_id": "src-9ad6ff4e913d",
+          "locator": "p0002"
+        },
+        {
+          "source_id": "src-5bfe86beccf8",
+          "locator": "p0002"
+        },
+        {
+          "source_id": "src-ff418667272e",
+          "locator": "p0002"
+        },
+        {
+          "source_id": "src-363fc2a37162",
+          "locator": "p0015"
+        }
+      ]
+    },
+    {
+      "id": "fermentation",
+      "file": "fermentation.md",
+      "title": "Piloter la fermentation et la cuverie",
+      "revision": 1,
+      "sha256": "f7f63602548f1b81e2030f2e3e2cd33d295d038da8b9a9337afa019e78684c80",
+      "terms": [
+        "fermentation",
+        "fermentaire",
+        "levure",
+        "levures",
+        "saccharomyces",
+        "hanseniaspora",
+        "biomasse",
+        "azote",
+        "FR",
+        "FI",
+        "FMR",
+        "fermentation ralentie",
+        "fermentation interrompue",
+        "yeast",
+        "nitrogen"
+      ],
+      "source_refs": [
+        {
+          "source_id": "src-c457f019220d",
+          "locator": "p0002"
+        },
+        {
+          "source_id": "src-d869da582122",
+          "locator": "p0002"
+        },
+        {
+          "source_id": "src-24e16d08b9a0",
+          "locator": "p0008"
+        },
+        {
+          "source_id": "src-24e16d08b9a0",
+          "locator": "p0002"
+        },
+        {
+          "source_id": "src-24e16d08b9a0",
+          "locator": "p0012"
+        },
+        {
+          "source_id": "src-56073c19dc31",
+          "locator": "p0006"
+        },
+        {
+          "source_id": "src-56073c19dc31",
+          "locator": "p0007"
+        },
+        {
+          "source_id": "src-56073c19dc31",
+          "locator": "p0014"
+        },
+        {
+          "source_id": "src-24e16d08b9a0",
+          "locator": "p0014"
+        },
+        {
+          "source_id": "src-56073c19dc31",
+          "locator": "p0015"
+        },
+        {
+          "source_id": "src-24e16d08b9a0",
+          "locator": "p0010"
+        },
+        {
+          "source_id": "src-f23dc70a4f94",
+          "locator": "p0002"
+        },
+        {
+          "source_id": "src-abba0fca7638",
+          "locator": "p0002"
+        },
+        {
+          "source_id": "src-df106be0e223",
+          "locator": "p0002"
+        }
+      ]
+    },
+    {
+      "id": "microbiologie",
+      "file": "microbiologie.md",
+      "title": "Distinguer transformations utiles et altérations",
+      "revision": 1,
+      "sha256": "357c9c3ac79a1e97f11f90da5eb0ffaf9f24ae0b4e6a35c303f2d0c81050ad5c",
+      "terms": [
+        "FML",
+        "TML",
+        "MLF",
+        "malolactique",
+        "malolactic",
+        "oenococcus",
+        "brettanomyces",
+        "zymomonas",
+        "framboisé",
+        "piqûre",
+        "acétique",
+        "lactique",
+        "altération",
+        "microbiologie",
+        "sulfite",
+        "sulfitage",
+        "SO2"
+      ],
+      "source_refs": [
+        {
+          "source_id": "src-c1c0bcf7fdf9",
+          "locator": "p0002"
+        },
+        {
+          "source_id": "src-70ca656c4d43",
+          "locator": "p0004"
+        },
+        {
+          "source_id": "src-31d067297e6e",
+          "locator": "p0002"
+        },
+        {
+          "source_id": "src-70ca656c4d43",
+          "locator": "p0012"
+        },
+        {
+          "source_id": "src-8a6ba606b918",
+          "locator": "p0002"
+        },
+        {
+          "source_id": "src-8abc579da06e",
+          "locator": "p0003"
+        },
+        {
+          "source_id": "src-a312bd820453",
+          "locator": "p0003"
+        },
+        {
+          "source_id": "src-9e576471f208",
+          "locator": "p0003"
+        },
+        {
+          "source_id": "src-c0f59c3c01c1",
+          "locator": "p0002"
+        }
+      ]
+    },
+    {
+      "id": "assemblage",
+      "file": "assemblage.md",
+      "title": "Formuler un assemblage sous contraintes",
+      "revision": 1,
+      "sha256": "3caa285bda2d024fb526828580c8427a784b225d3e17efbdd0c02c7a708b5f9b",
+      "terms": [
+        "assemblage",
+        "formulation",
+        "cuvée",
+        "cuvées",
+        "cahier des charges",
+        "AOP",
+        "AOC",
+        "IGP",
+        "label",
+        "réglementation",
+        "additif",
+        "étiquetage",
+        "blending",
+        "regulation"
+      ],
+      "source_refs": [
+        {
+          "source_id": "src-e8cba7e10855",
+          "locator": "p0003"
+        },
+        {
+          "source_id": "src-97e16b3a488e",
+          "locator": "p0003"
+        },
+        {
+          "source_id": "src-df9a48443146",
+          "locator": "p0003"
+        },
+        {
+          "source_id": "src-93039ac062cf",
+          "locator": "p0014"
+        },
+        {
+          "source_id": "src-56073c19dc31",
+          "locator": "p0012"
+        },
+        {
+          "source_id": "src-56073c19dc31",
+          "locator": "p0014"
+        },
+        {
+          "source_id": "src-8088a5b15559",
+          "locator": "p0002"
+        }
+      ]
+    },
+    {
+      "id": "finition-sensoriel",
+      "file": "finition-sensoriel.md",
+      "title": "Relier clarification de finition et perception",
+      "revision": 1,
+      "sha256": "6950e83d30b873a1d2b352ff7dd7ec852d3f0ed6b1efc8860553f16975935d14",
+      "terms": [
+        "collage",
+        "colle",
+        "gélatine",
+        "bentonite",
+        "tanin",
+        "tanins",
+        "astringence",
+        "amertume",
+        "couleur",
+        "trouble",
+        "turbidité",
+        "dépôt",
+        "arôme",
+        "sensoriel",
+        "polyphénol",
+        "fining",
+        "astringency",
+        "haze"
+      ],
+      "source_refs": [
+        {
+          "source_id": "src-9ac7815c91ad",
+          "locator": "p0003"
+        },
+        {
+          "source_id": "src-0adf2d0f1aae",
+          "locator": "p0002"
+        },
+        {
+          "source_id": "src-f549b73e8400",
+          "locator": "p0002"
+        },
+        {
+          "source_id": "src-2c90e60a5017",
+          "locator": "p0002"
+        },
+        {
+          "source_id": "src-2a55018d1226",
+          "locator": "p0002"
+        },
+        {
+          "source_id": "src-02a96bd8c7af",
+          "locator": "p0002"
+        },
+        {
+          "source_id": "src-dd10cc8bf199",
+          "locator": "p0002"
+        },
+        {
+          "source_id": "src-3732bcb84d6c",
+          "locator": "p0002"
+        },
+        {
+          "source_id": "src-90ced8ea55d8",
+          "locator": "p0002"
+        },
+        {
+          "source_id": "src-613990e10ed4",
+          "locator": "p0003"
+        }
+      ]
+    },
+    {
+      "id": "conditionnement",
+      "file": "conditionnement.md",
+      "title": "Penser ensemble effervescence et conservation",
+      "revision": 1,
+      "sha256": "9530a220bc408d02b213573ad6d1606897cb5615f0f26c17dbf807d6e715d1ce",
+      "terms": [
+        "effervescence",
+        "conditionnement",
+        "bouteille",
+        "bouteilles",
+        "prise de mousse",
+        "cuve close",
+        "gazéification",
+        "carbonatation",
+        "pression",
+        "pasteurisation",
+        "oxygénation",
+        "embouteillage",
+        "carbonation",
+        "bottling",
+        "pasteurization"
+      ],
+      "source_refs": [
+        {
+          "source_id": "src-6cae9e113c08",
+          "locator": "p0003"
+        },
+        {
+          "source_id": "src-969a3df2f6ad",
+          "locator": "p0003"
+        },
+        {
+          "source_id": "src-08d252efb50a",
+          "locator": "p0003"
+        },
+        {
+          "source_id": "src-d4e0a3900d67",
+          "locator": "p0002"
+        },
+        {
+          "source_id": "src-9e576471f208",
+          "locator": "p0003"
+        },
+        {
+          "source_id": "src-6b926621dc42",
+          "locator": "p0003"
+        },
+        {
+          "source_id": "src-ca18a4702e4f",
+          "locator": "p0002"
+        },
+        {
+          "source_id": "src-513199cdaf5a",
+          "locator": "p0002"
+        },
+        {
+          "source_id": "src-faab0a1041c4",
+          "locator": "p0003"
+        },
+        {
+          "source_id": "src-e6f85c7577ea",
+          "locator": "p0002"
+        },
+        {
+          "source_id": "src-7303f4d57d0d",
+          "locator": "p0003"
+        }
+      ]
+    },
+    {
+      "id": "concentration",
+      "file": "concentration.md",
+      "title": "Séparer concentration stockage et reconstitution",
+      "revision": 1,
+      "sha256": "70ab105a432f5a79c3c989d068ab8c51fc27f2dbe63f4cb2e48d9215d3404fa7",
+      "terms": [
+        "concentré",
+        "concentrés",
+        "concentration",
+        "reconstitution",
+        "osmose inverse",
+        "activité de l eau",
+        "aw",
+        "concentrate",
+        "reverse osmosis"
+      ],
+      "source_refs": [
+        {
+          "source_id": "src-3d98f9a4d79a",
+          "locator": "p0002"
+        },
+        {
+          "source_id": "src-9b72faf61af1",
+          "locator": "p0002"
+        },
+        {
+          "source_id": "src-abba0fca7638",
+          "locator": "p0002"
+        },
+        {
+          "source_id": "src-18f790b6b17c",
+          "locator": "p0002"
+        },
+        {
+          "source_id": "src-df106be0e223",
+          "locator": "p0002"
+        }
+      ]
+    },
+    {
+      "id": "mesures",
+      "file": "mesures.md",
+      "title": "Choisir la mesure qui répond à la décision",
+      "revision": 1,
+      "sha256": "437038d8a0e6fbb61d125a7f2b30269c76c2355a0efedb792e9cd1da6f9c7e2d",
+      "terms": [
+        "mesure",
+        "mesures",
+        "dosage",
+        "analyse",
+        "test",
+        "pH",
+        "acidité",
+        "masse volumique",
+        "densité",
+        "sucres",
+        "lugol",
+        "pectine",
+        "measurement",
+        "density",
+        "acidity"
+      ],
+      "source_refs": [
+        {
+          "source_id": "src-41edecde46a0",
+          "locator": "p0003"
+        },
+        {
+          "source_id": "src-363fc2a37162",
+          "locator": "p0004"
+        },
+        {
+          "source_id": "src-d1dc76301b71",
+          "locator": "p0003"
+        },
+        {
+          "source_id": "src-d1f1e63b6615",
+          "locator": "p0002"
+        },
+        {
+          "source_id": "src-d58671e55b9e",
+          "locator": "p0002"
+        },
+        {
+          "source_id": "src-6c7eb9817d4a",
+          "locator": "p0003"
+        },
+        {
+          "source_id": "src-b1bd0df6dbe8",
+          "locator": "p0003"
+        },
+        {
+          "source_id": "src-93039ac062cf",
+          "locator": "p0013"
+        },
+        {
+          "source_id": "src-93039ac062cf",
+          "locator": "p0014"
+        },
+        {
+          "source_id": "src-363fc2a37162",
+          "locator": "p0015"
+        },
+        {
+          "source_id": "src-6d95e86f1b10",
+          "locator": "p0002"
+        },
+        {
+          "source_id": "src-1f49c31c1de8",
+          "locator": "p0002"
+        },
+        {
+          "source_id": "src-4c01723243dc",
+          "locator": "p0002"
+        }
+      ]
+    },
+    {
+      "id": "hygiene",
+      "file": "hygiene.md",
+      "title": "Raisonner les contaminations et la nettoyabilité",
+      "revision": 1,
+      "sha256": "a6231a0d3cbde967743baec6bc37e0109702ebaf71abf7bcdf6e6e7e621113e1",
+      "terms": [
+        "hygiène",
+        "nettoyage",
+        "désinfection",
+        "contamination",
+        "cuverie",
+        "transfert",
+        "soutireuse",
+        "membrane",
+        "centrifugeuse",
+        "NEP",
+        "biofilm",
+        "cleaning",
+        "sanitation",
+        "hygiene"
+      ],
+      "source_refs": [
+        {
+          "source_id": "src-a54e3513954f",
+          "locator": "p0003"
+        },
+        {
+          "source_id": "src-0576969682c8",
+          "locator": "p0003"
+        },
+        {
+          "source_id": "src-cc12b11a9e14",
+          "locator": "p0003"
+        },
+        {
+          "source_id": "src-e4495191b892",
+          "locator": "p0014"
+        },
+        {
+          "source_id": "src-e4495191b892",
+          "locator": "p0018"
+        },
+        {
+          "source_id": "src-e4495191b892",
+          "locator": "p0019"
+        },
+        {
+          "source_id": "src-e4495191b892",
+          "locator": "p0020"
+        },
+        {
+          "source_id": "src-e4495191b892",
+          "locator": "p0021"
+        },
+        {
+          "source_id": "src-faab0a1041c4",
+          "locator": "p0003"
+        },
+        {
+          "source_id": "src-6008da54acb6",
+          "locator": "p0003"
+        },
+        {
+          "source_id": "src-992247cdf598",
+          "locator": "p0003"
+        }
+      ]
+    }
+  ]
+}

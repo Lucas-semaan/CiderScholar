@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import date
 from typing import Any
 
 from app.updates.base import OfficialBibliographicClient
@@ -34,18 +35,23 @@ class OpenAlexClient(OfficialBibliographicClient):
         limit: int,
         *,
         offset: int = 0,
+        since: date | None = None,
+        until: date | None = None,
     ) -> list[BibliographicRecord]:
         page_size = min(max(limit, 1), 100)
-        payload = self._get_json(
-            f"{self.config.openalex_base_url}/works",
-            params={
-                "search": query,
-                "per_page": page_size,
-                "page": max(offset, 0) // page_size + 1,
-                "sort": "relevance_score:desc",
-                "api_key": self.api_key(),
-            },
-        )
+        params: dict[str, str | int] = {
+            "search": query,
+            "per_page": page_size,
+            "page": max(offset, 0) // page_size + 1,
+            "sort": "relevance_score:desc",
+            "api_key": self.api_key(),
+        }
+        if since is not None:
+            params["filter"] = f"from_publication_date:{since.isoformat()}"
+            if until is not None:
+                params["filter"] += f",to_publication_date:{until.isoformat()}"
+            params["sort"] = "publication_date:asc"
+        payload = self._get_json(f"{self.config.openalex_base_url}/works", params=params)
         raw_results = payload.get("results")
         if not isinstance(raw_results, list):
             return []

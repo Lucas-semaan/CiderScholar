@@ -8,6 +8,16 @@ app:
   # La file reste illimitée; jusqu'à 20 réponses complètes peuvent être actives.
   chat_worker_concurrency: 20
 
+expert_memory:
+  # Instructions expertes optionnelles. Aucun apprentissage ni activation implicite.
+  mode: "off"
+  max_selected_items: 12
+  planning_max_characters: 2000
+  semantic_max_characters: 1600
+  generation_max_characters: 1600
+  max_candidate_items_changed: 3
+  max_compile_attempts: 2
+
 paths:
   data_dir: data
   pdf_dir: data/common/pdf
@@ -239,6 +249,11 @@ retrieval:
   hybrid_candidate_limit: 200
   hybrid_default_limit: 100
   hybrid_max_query_variants: 6
+  # La première requête dense reste globale ; les variantes suivantes se limitent
+  # aux articles FTS les plus pertinents. Repli global si ce pool est trop pauvre.
+  dense_article_prefilter_enabled: true
+  dense_article_prefilter_max_articles: 60
+  dense_article_prefilter_min_articles: 4
 
 article_ranking:
   best_fragment_weight: 0.40

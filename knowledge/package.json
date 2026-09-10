@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "package_id": "ciderscholar.method_seed",
+  "version": "0.1.0",
+  "minimum_app_version": "0.2.11",
+  "minimum_schema_version": 35,
+  "files": [
+    "gateway/cider_domain.md",
+    "method_policy/claim_types.md",
+    "method_policy/hypothesis_scope.md",
+    "method_policy/matrix_transfer.md",
+    "method_policy/relevance_grades.md",
+    "method_policy/sqlite_evidence.md",
+    "recipe/chat_conversation.md",
+    "recipe/chat_research.md",
+    "route/cuvage.md",
+    "route/malolactic.md",
+    "route/matrix_transfer.md",
+    "taxonomy/cuvage.md",
+    "taxonomy/malolactic_fermentation.md"
+  ]
+}
+

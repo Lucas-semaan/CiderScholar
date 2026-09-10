@@ -25,6 +25,7 @@ from app.jobs.contracts import JobType
 from app.jobs.deep_research_handler import DeepResearchHandler, DeepResearchOperations
 from app.jobs.repository import JobRepository
 from app.jobs.worker import DurableJobWorker, JobHandler, JobHandlerRegistry
+from app.updates.watch_handler import BibliographicWatchHandler
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -91,6 +92,13 @@ def build_worker(
         )
     if JobType.WEEKLY_MAINTENANCE in requested_types and load_local_profile() is LocalProfile.ADMIN:
         handlers[JobType.WEEKLY_MAINTENANCE] = WeeklyMaintenanceHandler(settings)
+    if (
+        JobType.BIBLIOGRAPHIC_WATCH in requested_types
+        and load_local_profile() is LocalProfile.ADMIN
+    ):
+        common = Database(settings.paths.common_database_path)
+        common.initialize()
+        handlers[JobType.BIBLIOGRAPHIC_WATCH] = BibliographicWatchHandler(settings)
     return DurableJobWorker(
         repository=repository,
         registry=JobHandlerRegistry(handlers),

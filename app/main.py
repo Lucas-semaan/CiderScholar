@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from contextlib import asynccontextmanager
+import asyncio
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
@@ -14,6 +15,7 @@ from app import __version__
 from app.admin.secrets import AdminBibliographicKeyVault
 from app.api.admin_maintenance import router as admin_maintenance_router
 from app.api.argo_key import router as argo_key_router
+from app.api.bibliographic_watch import router as bibliographic_watch_router
 from app.api.chatbot import router as chatbot_router
 from app.api.corpus_updates import router as corpus_updates_router
 from app.api.diagnostics import router as diagnostics_router
@@ -38,6 +40,7 @@ from app.database.sqlite import Database
 from app.desktop.app_updates import check_application_update
 from app.jobs.repository import JobRepository
 from app.secrets import hydrate_user_environment
+from app.updates.scheduler import run_watch_scheduler
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -64,7 +67,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         JobRepository(database.path).recover_expired_leases()
         application.state.application_update = check_application_update(resolved_settings)
         refresh_corpus_update_if_due(resolved_settings)
-        yield
+        scheduler = asyncio.create_task(run_watch_scheduler(resolved_settings))
+        try:
+            yield
+        finally:
+            scheduler.cancel()
+            with suppress(asyncio.CancelledError):
+                await scheduler
 
     application = FastAPI(
         title="Local Science RAG",
@@ -85,6 +94,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     install_error_handlers(application)
     application.include_router(health_router)
     application.include_router(admin_maintenance_router)
+    application.include_router(bibliographic_watch_router)
     application.include_router(argo_key_router)
     application.include_router(chatbot_router)
     application.include_router(corpus_updates_router)

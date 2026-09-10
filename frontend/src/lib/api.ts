@@ -15,6 +15,8 @@ import type {
   LlmProviderProfile,
   LlmProvidersResponse,
   MaintenanceSchedule,
+  WatchConfiguration,
+  WatchStatus,
   OnboardingStatus,
   Overview,
   PublisherAccessRun,
@@ -258,6 +260,15 @@ export const api = {
         "/api/corpus-updates/rollback-on-restart",
         { confirmed: true },
       ),
+  },
+  bibliographicWatch: {
+    status: () => request<WatchStatus>("/api/admin/bibliographic-watch"),
+    configure: (configuration: WatchConfiguration) =>
+      request<WatchStatus>("/api/admin/bibliographic-watch/configuration", {
+        method: "PUT",
+        body: JSON.stringify(configuration),
+      }),
+    launch: () => post<DurableJob>("/api/admin/bibliographic-watch/launch", {}),
   },
   adminMaintenance: {
     status: () => request<MaintenanceSchedule>("/api/admin/maintenance"),

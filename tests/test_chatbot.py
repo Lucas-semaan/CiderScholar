@@ -181,6 +181,40 @@ def test_validation_fallback_distinguishes_retrieved_documents_from_citations() 
     )
 
 
+def test_answer_chatbot_rejects_out_of_scope_before_any_rag_request(settings, monkeypatch) -> None:
+    def fail_if_called(*_args, **_kwargs):
+        pytest.fail("an out-of-scope question must not reach the RAG")
+
+    # Construct the chat database before replacing the workflow dependency: the
+    # guard itself must not construct the common-corpus SQLite reader.
+    chat_database = Database(settings.paths.database_path)
+    monkeypatch.setattr("app.services.workflows.Database", fail_if_called)
+    monkeypatch.setattr("app.services.workflows.ArgoClient", fail_if_called)
+    monkeypatch.setattr("app.services.workflows.search_common_corpus_abstracts", fail_if_called)
+    monkeypatch.setattr(
+        "app.services.workflows.search_common_corpus_full_text_evidence", fail_if_called
+    )
+    monkeypatch.setattr("app.services.workflows.discover_bibliographic_records", fail_if_called)
+
+    result = answer_chatbot(
+        settings,
+        chat_database,
+        message="Quelle est la capitale de la France ?",
+        history=[],
+        use_external_sources=True,
+    )
+
+    assert result.generation_status == "abstained"
+    assert result.diagnostic_code == "out_of_scope"
+    assert result.model == "deterministic-scope-guard"
+    assert result.sources == []
+    assert result.local_result_count == 0
+    assert result.external_result_count == 0
+    assert result.prompt_tokens == 0
+    assert result.completion_tokens == 0
+    assert result.retrieval_traces == []
+
+
 def test_covered_axis_without_semantic_ab_evidence_still_requires_follow_up() -> None:
     axis = deterministic_query_plan("Stabilité protéique du jus de pomme").plan.axes[0]
     candidate_id = "common:test-candidate"
@@ -257,7 +291,7 @@ def test_deep_initial_wave_is_exact_bounded_and_keeps_more_than_twenty_candidate
             return None
 
     class FakePlanningService:
-        def __init__(self, _client):
+        def __init__(self, _client, **_options):
             pass
 
         def plan(self, question, **_options):
@@ -560,7 +594,7 @@ def test_answer_chatbot_prefers_full_text_over_the_matching_abstract(
             return None
 
     class FakeEvidenceService:
-        def __init__(self, _client):
+        def __init__(self, _client, **_options):
             pass
 
         def answer(self, _question, records, **_kwargs):
@@ -643,7 +677,7 @@ def test_answer_chatbot_applies_the_multilingual_semantic_selection_before_synth
             return None
 
     class FakeGlobalSemanticFilter:
-        def __init__(self, _client):
+        def __init__(self, _client, **_options):
             pass
 
         def filter_records(self, question, _needs, evidence, **_options):
@@ -832,7 +866,7 @@ def test_answer_chatbot_runs_one_grouped_wave_without_axis_follow_up(
             return None
 
     class FakePlanningService:
-        def __init__(self, _client):
+        def __init__(self, _client, **_options):
             pass
 
         def plan(self, _question, **_options):
@@ -922,7 +956,7 @@ def test_answer_chatbot_runs_one_grouped_wave_without_axis_follow_up(
         return semantic, coverage
 
     class FakeEvidenceService:
-        def __init__(self, _client):
+        def __init__(self, _client, **_options):
             pass
 
         @staticmethod
@@ -998,7 +1032,7 @@ def test_answer_chatbot_never_downgrades_planning_when_argo_quota_is_reached(
             return None
 
     class QuotaPlanningService:
-        def __init__(self, _client):
+        def __init__(self, _client, **_options):
             pass
 
         def plan(self, *_args, **_kwargs):
@@ -1042,7 +1076,7 @@ def test_answer_chatbot_does_not_restart_retrieval_after_late_quota(
             return None
 
     class QuotaEvidenceService:
-        def __init__(self, _client):
+        def __init__(self, _client, **_options):
             pass
 
         def answer(self, *_args, **_kwargs):
@@ -1103,7 +1137,7 @@ def test_answer_chatbot_returns_structured_diagnostic_when_argo_synthesis_is_inv
             return None
 
     class InvalidEvidenceService:
-        def __init__(self, _client):
+        def __init__(self, _client, **_options):
             pass
 
         def answer(self, *_args, **_kwargs):
@@ -1215,7 +1249,7 @@ def test_answer_chatbot_returns_a_diagnostic_when_retrieval_is_empty(
     result = answer_chatbot(
         settings,
         Database(settings.paths.database_path),
-        message="Question dont le retrieval est simulé vide",
+        message="Question cidricole dont le retrieval est simulé vide",
         history=[],
         use_external_sources=False,
     )
@@ -1261,7 +1295,7 @@ def test_answer_chatbot_returns_a_diagnostic_when_local_retrieval_crashes(
     result = answer_chatbot(
         settings,
         Database(settings.paths.database_path),
-        message="Question avec panne de retrieval simulée",
+        message="Question cidricole avec panne de retrieval simulée",
         history=[],
         use_external_sources=False,
     )
@@ -1307,7 +1341,7 @@ def test_answer_chatbot_abstains_without_exposing_candidates_when_semantic_filte
             return None
 
     class RejectAllGlobalSemanticFilter:
-        def __init__(self, _client):
+        def __init__(self, _client, **_options):
             pass
 
         def filter_records(self, question, _needs, _evidence, **_options):
@@ -1347,7 +1381,7 @@ def test_answer_chatbot_abstains_without_exposing_candidates_when_semantic_filte
     result = answer_chatbot(
         settings,
         Database(settings.paths.database_path),
-        message="Question technique avec rejet sémantique simulé",
+        message="Question cidricole avec rejet sémantique simulé",
         history=[],
         use_external_sources=False,
     )
@@ -1387,7 +1421,7 @@ def test_answer_chatbot_uses_one_validated_synthesis_for_multidimensional_resear
             return None
 
     class FakeEvidenceService:
-        def __init__(self, _client):
+        def __init__(self, _client, **_options):
             pass
 
         def answer(self, _question, records, **kwargs):
@@ -1789,3 +1823,31 @@ def test_full_text_retrieval_cache_reuses_only_a_fully_validated_result(settings
     assert second_search.cache_hit_count == 1
     assert second_search.cache_miss_count == 0
     assert second_search.selected_article_count == len(second)
+
+
+@pytest.fixture(autouse=True)
+def explicit_semantic_gate_for_orchestration_tests(monkeypatch):
+    """These tests isolate orchestration; filter behavior has its own failure tests."""
+
+    class Gate:
+        def __init__(self, _client, **_options):
+            pass
+
+        def filter_records(self, question, needs, records, **_options):
+            return GlobalSemanticFilterResult(
+                question=question,
+                decisions=[
+                    GlobalSemanticDecision(
+                        candidate_id=record.record_id,
+                        relevance="direct",
+                        rationale="Fixture evidence for the orchestration test.",
+                    )
+                    for record in records
+                ],
+                selected_candidate_ids=[record.record_id for record in records],
+                model="semantic-test",
+                prompt_tokens=0,
+                completion_tokens=0,
+            )
+
+    monkeypatch.setattr("app.services.workflows.ArgoGlobalSemanticEvidenceFilter", Gate)

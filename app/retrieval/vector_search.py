@@ -22,12 +22,15 @@ from app.ingestion.embeddings import (
     EmbeddedChunkBatch,
     EmbeddingBackend,
     SentenceTransformerBackend,
+    local_model_path,
 )
+from app.llm.validation_cache import content_key
 from app.resource_lock import ResourceFileLock, corpus_resource_lock_path
 from app.retrieval.index_manifest import (
     assert_index_generation_mutable,
     assert_index_generation_ready,
 )
+from app.telemetry import measured
 
 LOGGER = logging.getLogger(__name__)
 _QUERY_VECTOR_CACHE_LIMIT = 128
@@ -61,6 +64,20 @@ def _remember_query_vector(model_name: str, query: str, vector: Any) -> None:
         _QUERY_VECTOR_CACHE.move_to_end(cache_key)
         while len(_QUERY_VECTOR_CACHE) > _QUERY_VECTOR_CACHE_LIMIT:
             _QUERY_VECTOR_CACHE.popitem(last=False)
+
+
+def _query_model_identity(backend: object, index: QdrantLocalIndex) -> str:
+    settings = getattr(index, "settings", None)
+    if settings is None:
+        return content_key([index.model_name, id(backend)])
+    path = local_model_path(settings)
+    manifest_path = path / "ciderscholar-model-manifest.json"
+    try:
+        manifest_hash = sha256(manifest_path.read_bytes()).hexdigest()
+    except OSError:
+        # Missing manifests must never share cached vectors across backend instances.
+        manifest_hash = str(id(backend))
+    return content_key([str(path), index.model_name, manifest_hash, "query-encoding-v2"])
 
 
 def _warn_legacy_index_once(index: QdrantLocalIndex) -> None:
@@ -146,6 +163,7 @@ class QdrantLocalIndex:
         self._resource_lock: ResourceFileLock | None = None
 
     @property
+    @measured("qdrant_client_acquire")
     def client(self) -> QdrantClient:
         if self._client_owner is not None:
             return self._client_owner.client
@@ -359,12 +377,14 @@ class QdrantLocalIndex:
             )
         return results
 
+    @measured("dense_search_batch")
     def search_many(
         self,
         query_vectors: Sequence[Sequence[float] | Any],
         *,
         limit: int | None = None,
         article_ids: Sequence[str] | None = None,
+        article_ids_by_query: Sequence[Sequence[str] | None] | None = None,
         sections: Sequence[str] | None = None,
         score_threshold: float | None = None,
         _manifest_validated: bool = False,
@@ -388,26 +408,36 @@ class QdrantLocalIndex:
             return [[] for _ in vectors]
         for vector in vectors:
             self.ensure_collection(len(vector))
-        conditions: list[models.FieldCondition] = [
-            models.FieldCondition(key="kind", match=models.MatchValue(value="chunk"))
-        ]
-        if article_ids is not None:
-            unique_ids = list(dict.fromkeys(article_ids))
-            if not unique_ids:
-                return [[] for _ in vectors]
-            conditions.append(
-                models.FieldCondition(key="article_id", match=models.MatchAny(any=unique_ids))
-            )
-        if sections is not None:
-            unique_sections = list(dict.fromkeys(sections))
-            if not unique_sections:
-                return [[] for _ in vectors]
-            conditions.append(
-                models.FieldCondition(key="section", match=models.MatchAny(any=unique_sections))
-            )
-        response = self.client.query_batch_points(
-            collection_name=self.collection_name,
-            requests=[
+        if article_ids_by_query is not None and len(article_ids_by_query) != len(vectors):
+            raise ValueError("per-query article filters must match vector count")
+        article_filters = (
+            list(article_ids_by_query)
+            if article_ids_by_query is not None
+            else [article_ids] * len(vectors)
+        )
+        unique_sections = list(dict.fromkeys(sections or ()))
+        if sections is not None and not unique_sections:
+            return [[] for _ in vectors]
+        requests: list[models.QueryRequest] = []
+        positions: list[int] = []
+        for position, (vector, requested_article_ids) in enumerate(
+            zip(vectors, article_filters, strict=True)
+        ):
+            conditions: list[models.FieldCondition] = [
+                models.FieldCondition(key="kind", match=models.MatchValue(value="chunk"))
+            ]
+            if requested_article_ids is not None:
+                unique_ids = list(dict.fromkeys(requested_article_ids))
+                if not unique_ids:
+                    continue
+                conditions.append(
+                    models.FieldCondition(key="article_id", match=models.MatchAny(any=unique_ids))
+                )
+            if sections is not None:
+                conditions.append(
+                    models.FieldCondition(key="section", match=models.MatchAny(any=unique_sections))
+                )
+            requests.append(
                 models.QueryRequest(
                     query=vector,
                     filter=models.Filter(must=conditions),
@@ -420,14 +450,22 @@ class QdrantLocalIndex:
                         else self.settings.qdrant.score_threshold
                     ),
                 )
-                for vector in vectors
-            ],
+            )
+            positions.append(position)
+        if not requests:
+            return [[] for _ in vectors]
+        response = self.client.query_batch_points(
+            collection_name=self.collection_name,
+            requests=requests,
         )
-        if len(response) != len(vectors):
+        if len(response) != len(requests):
             raise VectorIndexCorruptionError(
                 "Qdrant batch response count differs from request count"
             )
-        return [self._references_from_points(item.points) for item in response]
+        results = [[] for _ in vectors]
+        for position, item in zip(positions, response, strict=True):
+            results[position] = self._references_from_points(item.points)
+        return results
 
     @staticmethod
     def _references_from_points(points: Sequence[Any]) -> list[ScoredChunkReference]:
@@ -555,11 +593,13 @@ class VectorSearchService:
                 raise VectorIndexConfigurationError(
                     "managed index local embedding model failed integrity verification"
                 ) from exc
-        query_vector = _cached_query_vector(model_name, query)
+        query_vector = _cached_query_vector(_query_model_identity(self.backend, self.index), query)
         if query_vector is None:
             vectors = self.backend.encode_queries([query])
             query_vector = vectors[0]
-            _remember_query_vector(model_name, query, query_vector)
+            _remember_query_vector(
+                _query_model_identity(self.backend, self.index), query, query_vector
+            )
             self.query_cache_misses += 1
         else:
             self.query_cache_hits += 1
@@ -597,12 +637,14 @@ class VectorSearchService:
             )
         return results
 
+    @measured("dense_retrieval_batch")
     def search_many(
         self,
         queries: Sequence[str],
         *,
         limit: int | None = None,
         article_ids: Sequence[str] | None = None,
+        article_ids_by_query: Sequence[Sequence[str] | None] | None = None,
         sections: Sequence[str] | None = None,
     ) -> list[list[VectorSearchResult]]:
         """Encode uncached queries together and return one result list per query."""
@@ -632,7 +674,7 @@ class VectorSearchService:
         vectors: list[Any | None] = [None] * len(queries)
         missing_by_key: dict[str, tuple[str, list[int]]] = {}
         for position, query in enumerate(queries):
-            cached = _cached_query_vector(model_name, query)
+            cached = _cached_query_vector(_query_model_identity(self.backend, self.index), query)
             if cached is not None:
                 vectors[position] = cached
                 self.query_cache_hits += 1
@@ -652,7 +694,9 @@ class VectorSearchService:
                     "embedding backend returned an invalid query batch"
                 )
             for (query, positions), vector in zip(missing_entries, encoded, strict=True):
-                _remember_query_vector(model_name, query, vector)
+                _remember_query_vector(
+                    _query_model_identity(self.backend, self.index), query, vector
+                )
                 for position in positions:
                     vectors[position] = vector
                 self.query_cache_misses += 1
@@ -662,6 +706,7 @@ class VectorSearchService:
             [vector for vector in vectors if vector is not None],
             limit=limit,
             article_ids=article_ids,
+            article_ids_by_query=article_ids_by_query,
             sections=sections,
             _manifest_validated=True,
         )

@@ -196,6 +196,8 @@ class ChatbotRetrievalTrace(BaseModel):
     cache_miss_count: int = Field(default=0, ge=0)
     lexical_candidate_count: int = Field(default=0, ge=0)
     dense_candidate_count: int = Field(default=0, ge=0)
+    dense_article_prefilter_article_count: int = Field(default=0, ge=0)
+    dense_global_query_count: int = Field(default=0, ge=0)
     rrf_unique_candidate_count: int = Field(default=0, ge=0)
     fused_candidate_count: int = Field(default=0, ge=0)
     pre_rerank_candidate_count: int = Field(default=0, ge=0)

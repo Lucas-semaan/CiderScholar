@@ -24,6 +24,25 @@ présenter comme acquise.
 Un exemple qui révèle un défaut doit conduire à une règle générale et à un test représentatif. Il ne
 faut pas coder une exception limitée au terme, à la question ou au DOI de l’exemple.
 
+### 1.1 Veille et densité rédactionnelle — décision utilisateur du 10 septembre 2026
+
+La veille hebdomadaire est activable dans les réglages administrateur, avec des thèmes modifiables
+initialisés aux huit thèmes existants. Elle privilégie les nouveautés et complète le fonds ancien,
+acquiert le texte intégral accessible légalement puis utilise l'abstract admissible en repli. Une
+échéance manquée est rattrapée au prochain lancement. Le budget validé est d'environ une heure,
+1 000 notices examinées et 100 acquisitions tentées ; le reste est reprenable. Le bilan est présenté
+dans l'application, sans notification Windows. Voir `BIBLIOGRAPHIC_WATCH.md` pour le contrat opérationnel.
+
+Les réponses du chatbot commencent par le contenu scientifique. La mini-introduction et les préfixes
+« preuve directe » ou « preuve indirecte » ne sont plus imposés et ne sont pas affichés. Nommer
+naturellement la matrice réellement étudiée dans le résultat cité ; préciser les différences de
+procédé et les limites de transposition seulement lorsqu'elles sont utiles à l'interprétation. Ne
+jamais inventer une matrice inconnue. Le classement interne A–D et les validations scientifiques sont
+conservés. Une clarification brève reste possible lorsqu'une ambiguïté réelle l'exige. Supprimer les
+reformulations de la question, les annonces de plan et les conclusions répétitives ; conserver les
+résultats, conditions, mécanismes, contradictions et limites documentés. Les budgets des efforts ne
+sont pas diminués : l'économie porte sur le remplissage, pas sur la richesse scientifique.
+
 ## 2. Choisir les publications admises dans le corpus
 
 ### 2.1 Périmètre éditorial
@@ -372,6 +391,15 @@ l'obtention d'un contenu scientifique.
 
 ### 4.1 Comprendre l’intention avant le retrieval
 
+Instruction utilisateur explicite et durable du 10 septembre 2026 : toute question conversationnelle
+manifestement hors du périmètre scientifique et technique cidricole est refusée localement avant toute
+ouverture SQLite/Qdrant, recherche lexicale ou vectorielle, réutilisation de sources, acquisition ou
+enrichissement externe. Le garde de périmètre accepte les formulations cidricoles directes, les matières,
+produits dérivés et procédés réellement transférables ; il conserve les relances courtes qui se réfèrent à
+une question cidricole précédente. Il ne transforme jamais une absence de résultats RAG en rejet de
+périmètre. Le refus explique brièvement le domaine couvert et possède un test qui prouve l'absence d'appel
+au retrieval.
+
 Représenter la question par au moins :
 
 - la matrice ou population ;
@@ -665,7 +693,12 @@ Le chemin de production suit désormais ce contrat vérifiable :
    l'original et les requêtes courtes des vérifications pour le lexical. Les variantes partagent la
    session SQLite, l'encodage est groupé, les collections réutilisent une seule ouverture Qdrant, puis
    l'union dédupliquée subit une fusion et un reranking globaux. Aucun besoin ne devient une unité de
-   recherche successive.
+   recherche successive. Pour réduire le coût des variantes denses sans réduire la vague, la première
+   requête dense reste globale ; lorsque FTS5 a trouvé un nombre minimal d'articles distincts, les
+   variantes denses suivantes sont filtrées sur ce pool borné d'articles. Un pool lexical trop pauvre,
+   un filtre explicite déjà fourni ou une seule requête dense désactive cette optimisation : toutes les
+   requêtes restent globales. Le filtre est tracé, borne des candidats et ne constitue jamais une
+   décision de pertinence ni une raison d'exclure une preuve A/B.
 4. Le contexte intra-article utilise un index logique `article -> section -> chunk` construit sur les
    colonnes SQLite persistées. Il part des chunks d'ancrage, lit leurs voisins bornés, puis seulement
    quelques chunks des mêmes sections ou de `Results`, `Discussion`, `Conclusion`, `Abstract` et,

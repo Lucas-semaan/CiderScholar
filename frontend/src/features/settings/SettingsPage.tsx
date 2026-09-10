@@ -5,6 +5,7 @@ import { Network } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { ErrorState, LoadingState } from "@/components/ui/Feedback";
 import { PageHeader } from "@/components/ui/PageHeader";
+import { BibliographicWatchCard } from "@/features/settings/BibliographicWatchCard";
 import { AdminMaintenanceCard } from "@/features/settings/AdminMaintenanceCard";
 import { LlmProviderSettingsCards } from "@/features/settings/LlmProviderSettingsCards";
 import { PublisherAccessCard } from "@/features/settings/PublisherAccessCard";
@@ -251,6 +252,7 @@ export function SettingsPage() {
         message={message}
         modelName={settings.llm_model}
       />
+      {settings.administrator && <BibliographicWatchCard />}
       {settings.administrator && <AdminMaintenanceCard />}
       <LlmProviderSettingsCards
         busy={busy}

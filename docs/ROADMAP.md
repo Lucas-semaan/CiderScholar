@@ -5,6 +5,12 @@ full-text approfondie et de découverte assistée. Cette roadmap remplace les hy
 central et de connexion LDAP. Elle décrit une application locale distribuée sur les postes
 personnels de l’équipe.
 
+Proposition complémentaire du 7 septembre 2026 :
+[`EXPERT_MEMORY_ROADMAP.md`](EXPERT_MEMORY_ROADMAP.md) décrit l’ajout d’une mémoire de méthode
+experte et d’une boucle de correction évaluée, avec contrats techniques, lots d’implémentation et
+tests. Il s’agit d’un plan à exécuter, pas d’une fonctionnalité déjà livrée ni d’une nouvelle méthode
+scientifique automatiquement adoptée.
+
 ## Cible produit confirmée
 
 - environ dix utilisateurs, chacun sur son poste personnel Windows 11 ;

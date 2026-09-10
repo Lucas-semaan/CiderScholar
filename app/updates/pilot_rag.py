@@ -21,13 +21,18 @@ from app.llm.argo_client import (
     ScientificValidationReason,
     classify_scientific_validation_failure,
 )
+from app.llm.chat_claims import ChatAnswerVerifier
 from app.llm.contracts import GenerationMessage, GenerationResponse
 from app.llm.response_language import (
     output_language_name,
     question_language,
     validate_output_language,
 )
-from app.llm.response_style import ResponseStyle, requested_response_style
+from app.llm.response_style import (
+    SCIENTIFIC_PROSE_INSTRUCTION,
+    ResponseStyle,
+    requested_response_style,
+)
 from app.models.chatbot import (
     ChatbotFacetDraft,
     ChatEvidencePassage,
@@ -37,6 +42,7 @@ from app.models.chatbot import (
 from app.numeric_verification import NumericVerdict, verify_numeric_claim
 from app.retrieval.coverage_assessment import AxisCoverageAssessment
 from app.retrieval.evidence_budget import select_records_with_axis_coverage
+from app.retrieval.evidence_selection import focused_excerpt
 from app.retrieval.scientific_intent import ScientificFacet, analyze_scientific_intent, facet_query
 from app.updates.vector_index import BibliographicHybridResult
 
@@ -131,7 +137,7 @@ _CORRECTION_ACTIONS: dict[ScientificValidationReason, str] = {
         "réellement."
     ),
     ScientificValidationReason.MISSING_CONTEXTUAL_INTRODUCTION: (
-        "Réécris definition en deux à quatre phrases contextualisées et directement utiles."
+        "Supprime le préambule inutile ; utilise definition=null sauf ambiguïté réelle à clarifier."
     ),
     ScientificValidationReason.PARAGRAPH_TOO_SHORT: (
         "Développe les paragraphes concernés avec constat, conditions, comparaison et portée "
@@ -153,8 +159,8 @@ _CORRECTION_ACTIONS: dict[ScientificValidationReason, str] = {
         "Retire toute preuve C ou D des affirmations et de leurs citations."
     ),
     ScientificValidationReason.MISSING_INDIRECT_EVIDENCE_LABEL: (
-        "Rends explicite dans le texte visible la portée indirecte de toute affirmation citant "
-        "une preuve B."
+        "Nomme naturellement la matrice et le procédé réellement étudiés, puis la limite "
+        "de transposition utile ; ne préfixe pas les résultats par un niveau de preuve."
     ),
     ScientificValidationReason.LANGUAGE_MISMATCH: (
         "Traduis intégralement tous les champs rédactionnels dans la langue de la question."
@@ -262,7 +268,7 @@ def _validation_correction_message(
         "permettent réellement aucune affirmation et qu'aucune preuve A ou B n'est signalée "
         "comme omise, utilise status=insufficient. Quand missing_required_evidence est signalé, "
         "produis au contraire une synthèse answerable des preuves A/B, en explicitant la portée "
-        "indirecte de B. Traduis "
+        "et la matrice réellement étudiée de B, sans libellé de niveau de preuve. Traduis "
         "intégralement chaque champ rédactionnel en "
         f"{output_language_label}."
     )
@@ -305,7 +311,13 @@ def _generation_input_failure_reason(error: ValueError) -> ScientificValidationR
 def _answer_evidence_ids(answer: CiderEvidenceAnswer) -> list[str]:
     return list(
         dict.fromkeys(
-            evidence_id for statement in answer.statements for evidence_id in statement.evidence_ids
+            [
+                evidence_id
+                for statement in answer.statements
+                for evidence_id in statement.evidence_ids
+            ]
+            + answer.definition_evidence_ids
+            + [identifier for ids in answer.limitation_evidence_ids for identifier in ids]
         )
     )
 
@@ -417,13 +429,12 @@ class CiderAbstractRagService:
         if self.experimental_profile == "p0":
             return ""
         instruction = (
-            " Si les preuves le permettent, commence par un bref cadrage technique directement "
+            " Commence par les résultats scientifiques. Ajoute un cadrage seulement s’il est "
             "utile à la question : définis les termes ambigus, précise la matrice et l'étape du "
             "procédé, et distingue les mécanismes démontrés, les hypothèses et les analogies. "
             "Chaque affirmation factuelle de ce cadrage doit être soutenue par les sources "
             "fournies. N'ajoute aucune généralité encyclopédique, historique ou contextuelle non "
-            "nécessaire. Si le cadrage n'est pas documenté, indique sobrement cette limite puis "
-            "réponds directement."
+            "nécessaire. Si le cadrage n'est pas documenté, omets-le."
         )
         if self.experimental_profile == "p2":
             instruction += (
@@ -480,7 +491,8 @@ class CiderAbstractRagService:
             {
                 "role": "system",
                 "content": (
-                    "Tu es un assistant scientifique INRAE. Adopte un ton froid, factuel "
+                    SCIENTIFIC_PROSE_INSTRUCTION
+                    + "Tu es un assistant scientifique INRAE. Adopte un ton froid, factuel "
                     "et non promotionnel. Utilise des phrases simples et un vocabulaire "
                     "scientifique précis. Présente avec la même attention les résultats "
                     "positifs et négatifs pertinents documentés par les sources. Distingue "
@@ -678,6 +690,8 @@ class CiderEvidenceAnswer(BaseModel):
     status: Literal["answerable", "insufficient"] = "answerable"
     response_format: ResponseStyle = ResponseStyle.PROSE
     definition: str | None = Field(default=None, min_length=2, max_length=800)
+    definition_evidence_ids: list[str] = Field(default_factory=list, max_length=48)
+    limitation_evidence_ids: list[list[str]] = Field(default_factory=list, max_length=4)
     statements: list[CitedEvidenceStatement] = Field(default_factory=list, max_length=16)
     limitations: list[str] = Field(max_length=4)
     insufficiency_message: str | None = Field(default=None, min_length=2, max_length=2_000)
@@ -790,9 +804,7 @@ def _insufficient_evidence_result(
     language = _question_language(question)
     topics = "; ".join(dict.fromkeys(record.title for record in records[:3]))
     if language == "fr":
-        definition = (
-            f"La question est interprétée comme portant sur : {' '.join(question.split())}."
-        )
+        definition = None
         message = (
             "Les documents récupérés ne permettent pas de répondre directement à la question. "
             "Une recherche bibliographique plus ciblée est nécessaire."
@@ -803,7 +815,7 @@ def _insufficient_evidence_result(
             else "Aucune source directement pertinente n'a été retrouvée."
         )
     else:
-        definition = f"The question is interpreted as concerning: {' '.join(question.split())}."
+        definition = None
         message = (
             "The retrieved documents do not support a direct answer to the question. "
             "A more targeted bibliographic search is required."
@@ -861,10 +873,12 @@ class CiderEvidenceRagService:
         answer_effort: AnswerEffort = AnswerEffort.BALANCED,
         correction_temperature: float = CORRECTION_TEMPERATURE_DEFAULT,
         max_input_characters: int = 64_000,
+        semantic_verifier: ChatAnswerVerifier | None = None,
     ) -> None:
         if max_input_characters < 8_192:
             raise ValueError("LLM input character limit must be at least 8192")
         self.client = client
+        self.semantic_verifier = semantic_verifier
         self.answer_effort = answer_effort
         self.budget = answer_effort_budget(answer_effort)
         self.correction_temperature = _correction_temperature(correction_temperature)
@@ -875,13 +889,12 @@ class CiderEvidenceRagService:
         instruction = ""
         if self.experimental_profile != "p0":
             instruction += (
-                " Si les preuves le permettent, commence par un bref cadrage technique directement "
+                " Commence par les résultats scientifiques. Ajoute un cadrage seulement s’il est "
                 "utile à la question : définis les termes ambigus, précise la matrice et l'étape "
                 "du procédé, et distingue les mécanismes démontrés, les hypothèses et les "
                 "analogies. Chaque affirmation factuelle de ce cadrage doit être soutenue par les "
                 "sources fournies. N'ajoute aucune généralité encyclopédique, historique ou "
-                "contextuelle non nécessaire. Si le cadrage n'est pas documenté, indique "
-                "sobrement cette limite puis réponds directement."
+                "contextuelle non nécessaire. Si le cadrage n'est pas documenté, omets-le."
             )
         if self.experimental_profile == "p2":
             instruction += (
@@ -977,7 +990,13 @@ class CiderEvidenceRagService:
         ) -> dict[str, Any]:
             fitted = dict(base_payload)
             fitted["evidence"] = [
-                {**item, "text": str(item.get("text") or "")[:text_limit]} for item in selected
+                {
+                    **item,
+                    "text": focused_excerpt(
+                        str(item.get("text") or ""), str(payload.get("question") or ""), text_limit
+                    ),
+                }
+                for item in selected
             ]
             if raw_drafts:
                 fitted["facet_drafts"] = self._compact_facet_drafts(
@@ -1098,12 +1117,11 @@ class CiderEvidenceRagService:
                     "dans une autre langue, traduis son contenu scientifique au lieu d'en "
                     "recopier la formulation. Ne traduis pas les titres ni les métadonnées "
                     "bibliographiques. Aucun mélange de langues n'est accepté. Le champ "
-                    "definition est une mini-introduction de deux à quatre phrases : situe le "
-                    "sujet, précise la matrice, le procédé et les distinctions indispensables, "
-                    "puis annonce l'angle de la synthèse. Il ne contient aucune généralité "
-                    "encyclopédique, valeur ou conclusion factuelle qui ne soit déjà présente "
-                    "dans la question ou les preuves. Si plusieurs sens restent "
-                    "possibles, signale sobrement l'ambiguïté et n'en choisis aucun implicitement. "
+                    "definition est facultatif : utilise null sauf si une ambiguïté réelle exige "
+                    "une clarification brève et étayée. Commence par le résultat scientifique. "
+                    "Ne reformule pas la question, n'annonce pas le plan, ne conclus pas en "
+                    "répétant les résultats. Économise ces tokens pour les mécanismes, conditions, "
+                    "contradictions et limites documentés. "
                     "Distingue le procédé exact de ses faux amis, des étapes amont ou aval et des "
                     "matrices seulement analogues. Utilise uniquement les éléments du tableau "
                     "JSON evidence. Si au moins une preuve A ou B répond réellement à la question, "
@@ -1115,15 +1133,14 @@ class CiderEvidenceRagService:
                     "extrait périphérique en conclusion. Chaque élément porte un evidence_grade : "
                     "A est directement "
                     "pertinent, B est une preuve mécanistique indirecte, C est périphérique et D "
-                    "est hors sujet. Le texte brut d'une preuve B n'a pas à contenir une formule "
-                    "particulière : c'est le statement visible qui l'utilise qui doit commencer "
-                    "explicitement par la formule « Preuve indirecte : cette étude porte "
-                    "sur [procédé ou matrice réellement étudié] et non sur "
-                    "[objet exact de la question]. »; "
-                    "Le statement peut aussi apparaître dans les effets documentés, avec la même "
-                    "formule explicite « Preuve indirecte : cette étude porte sur [procédé ou "
-                    "matrice réellement étudié] et non sur [objet exact de la question]. » Les "
-                    "preuves C et D ne sont jamais citées comme preuves scientifiques. "
+                    "est hors sujet. N'utilise jamais les libellés preuve directe, preuve "
+                    "indirecte, direct evidence ou indirect evidence dans la réponse. Intègre "
+                    "naturellement la matrice réellement étudiée dans chaque nouveau résultat, "
+                    "en te fondant sur les passages cités. Distingue les matrices de plusieurs "
+                    "études ; si la matrice est inconnue, ne l'invente pas. Précise les "
+                    "différences "
+                    "de procédé et limites de transposition qui changent l'interprétation, "
+                    "sans avertissement générique répétitif. C et D ne sont jamais cités. "
                     "Les éléments evidence_level=full_text sont des passages persistés du texte "
                     "intégral avec leurs pages ; ils priment sur les abstracts seulement lorsque "
                     "leur matrice, leur processus et leur résultat sont au moins aussi pertinents. "
@@ -1244,6 +1261,12 @@ class CiderEvidenceRagService:
             },
         ]
         messages[0]["content"] += self._profile_instruction()
+        messages[0]["content"] += (
+            " Chaque fait de definition et limitations cite ses passages via "
+            "definition_evidence_ids et limitation_evidence_ids (une liste par limitation). "
+            "Omettre les généralités sans source. Les propositions et mécanismes seront "
+            "vérifiés séparément contre leurs seules citations."
+        )
         try:
             fitted_payload = self._fit_prompt_payload(
                 str(messages[0]["content"]),
@@ -1279,6 +1302,7 @@ class CiderEvidenceRagService:
         validation_retries = 0
         length_retries = 0
         request_count = 0
+        locked_statements: list[CitedEvidenceStatement] = []
         encountered_validation_reasons: list[ScientificValidationReason] = []
         generation_status: Literal["generated", "partial_generated", "abstained"] = "generated"
         accepted_warning_reasons: list[ScientificValidationReason] = []
@@ -1382,6 +1406,18 @@ class CiderEvidenceRagService:
             candidate: CiderEvidenceAnswer | None = None
             try:
                 answer = CiderEvidenceAnswer.model_validate_json(response.content)
+                if locked_statements and answer.status == "answerable":
+                    combined = {
+                        item.statement: item for item in [*locked_statements, *answer.statements]
+                    }
+                    answer = answer.model_copy(
+                        update={
+                            "statements": list(combined.values())[: self.budget.mono_max_statements]
+                        }
+                    )
+                if self.semantic_verifier is not None:
+                    answer = self.semantic_verifier.admit(cleaned_question, answer, by_evidence_id)
+                    locked_statements = list(answer.statements)
                 candidate = answer
                 used_evidence_ids = _answer_evidence_ids(answer)
                 if len(answer.statements) > self.budget.mono_max_statements:
@@ -1650,6 +1686,15 @@ class CiderEvidenceRagService:
                 _validation_correction_message(
                     validation_error,
                     output_language_label=output_language_label,
+                )
+                + (
+                    "\nLes paragraphes suivants sont conservés et vérifiés par l'application ; "
+                    "retourne seulement les paragraphes à corriger ou ajouter : "
+                    + json.dumps(
+                        [item.statement[:80] for item in locked_statements], ensure_ascii=False
+                    )
+                    if locked_statements
+                    else ""
                 ),
             )
         if response is None or answer is None:
@@ -1660,6 +1705,14 @@ class CiderEvidenceRagService:
                 completion_tokens=total_completion_tokens,
                 generation_traces=[failure_trace],
             )
+
+        if self.semantic_verifier is not None:
+            answer = self.semantic_verifier.admit(cleaned_question, answer, by_evidence_id)
+            used_evidence_ids = _answer_evidence_ids(answer)
+            if self.semantic_verifier.removed_count:
+                generation_status = "partial_generated" if answer.statements else "abstained"
+            total_prompt_tokens += self.semantic_verifier.verifier.prompt_tokens
+            total_completion_tokens += self.semantic_verifier.verifier.completion_tokens
 
         source_record_ids = list(
             dict.fromkeys(by_evidence_id[item][0].record_id for item in used_evidence_ids)
@@ -2138,7 +2191,8 @@ class CiderEvidenceRagService:
             "enum": allowed_ids,
         }
         system = (
-            "Tu es un assistant scientifique INRAE. Réponds uniquement dans la langue de la "
+            SCIENTIFIC_PROSE_INSTRUCTION
+            + "Tu es un assistant scientifique INRAE. Réponds uniquement dans la langue de la "
             "question utilisateur originale et uniquement à partir des preuves JSON. Tous les "
             "champs rédactionnels visibles — definition, chaque statement, chaque mechanism, "
             f"chaque limitation et insufficiency_message — doivent être en "
@@ -2194,8 +2248,8 @@ class CiderEvidenceRagService:
                 "Assemble les brouillons auditables et les preuves originales en une "
                 f"réponse complète, au plus {max_statements} statements. "
                 "Choisis toi-même la typologie de réponse qui sert le mieux la question et les "
-                "preuves lorsque l'utilisateur n'en impose aucune. Commence definition par une "
-                "mini-introduction contextuelle de deux à quatre phrases, puis développe chaque "
+                "preuves lorsque l'utilisateur n'en impose aucune. Utilise definition=null sauf "
+                "ambiguïté réelle. Commence par les résultats puis développe chaque "
                 "statement comme un paragraphe scientifique substantiel de trois à six phrases "
                 "lorsque la richesse des passages le permet. Chaque preuve A ou B présentée dans "
                 "evidence doit contribuer à au moins un statement cité, sans citation "
@@ -2819,7 +2873,9 @@ SOURCE_EVALUATIVE_PATTERN = re.compile(
 )
 EMOJI_PATTERN = re.compile("[\U0001f1e6-\U0001f1ff\U0001f300-\U0001faff\u2600-\u27bf]")
 FORBIDDEN_INTRODUCTION_PATTERN = re.compile(
-    r"^\s*(excellente question|tres bonne question|great question)\b"
+    r"^\s*(excellente question|tres bonne question|great question|"
+    r"la question (?:portait|porte|est interpretee)|vous (?:demandez|souhaitez savoir)|"
+    r"cette synthese examine|the question (?:was|is)|this synthesis examines)\b"
 )
 INTERNAL_PROCESS_LEAK_PATTERN = re.compile(
     r"\b(?:rag|argo|record_ids?|evidence_ids?|facet_drafts?|click\s+and\s+read|"
@@ -3000,17 +3056,6 @@ def _validate_evidence_grounding(
             _validate_answer_language(question, answer_blocks)
         except RuntimeError as exc:
             reject(ScientificValidationReason.LANGUAGE_MISMATCH, str(exc))
-    if require_contextual_introduction and answer.status == "answerable":
-        if answer.definition is None:
-            reject(
-                ScientificValidationReason.MISSING_CONTEXTUAL_INTRODUCTION,
-                "ARGO omitted the required contextual introduction",
-            )
-        elif _sentence_count(answer.definition) < 2 or _word_count(answer.definition) < 12:
-            reject(
-                ScientificValidationReason.MISSING_CONTEXTUAL_INTRODUCTION,
-                "ARGO returned a contextual introduction that is too short",
-            )
     if require_structured_response and answer.status == "answerable":
         synthetic_count = sum(
             statement.section == "synthetic_answer" for statement in answer.statements
@@ -3060,13 +3105,6 @@ def _validate_evidence_grounding(
             reject(
                 ScientificValidationReason.UNSUPPORTED_EVIDENCE_GRADE,
                 "ARGO used peripheral or irrelevant evidence as a citation",
-            )
-        if "B" in cited_grades and not plain_statement.startswith(
-            ("preuve indirecte", "indirect evidence")
-        ):
-            reject(
-                ScientificValidationReason.MISSING_INDIRECT_EVIDENCE_LABEL,
-                "ARGO did not label indirect evidence explicitly",
             )
         if NORMATIVE_PATTERN.search(plain_statement) and not SOURCE_NORMATIVE_PATTERN.search(
             cited_text
@@ -3204,22 +3242,8 @@ def _salvage_grounded_evidence_answer(
         grounded.append(statement)
     if not grounded:
         return None
-    language = _question_language(question) if question else "fr"
-    cleaned_question = " ".join(question.split())
-    if language == "fr":
-        safe_definition = (
-            "Cette synthèse examine les connaissances documentées qui répondent à la question "
-            f"« {cleaned_question.rstrip(' ?.')} ». Elle met en relation les résultats cités, "
-            "leurs conditions d'observation et leurs limites de transposition, sans étendre "
-            "leur portée au-delà des études disponibles."
-        )
-    else:
-        safe_definition = (
-            "This synthesis examines the documented evidence relevant to the question "
-            f"“{cleaned_question.rstrip(' ?.')}”. It relates the cited findings to their "
-            "observational conditions and limits of transfer without extending them beyond "
-            "the available studies."
-        )
+    language = _question_language(question)
+    safe_definition = None
     salvaged = answer.model_copy(
         deep=True,
         update={
@@ -3572,17 +3596,31 @@ def _render_evidence_answer(
         citation = "; ".join(
             _evidence_citation(record, passages) for record, passages in grouped.values()
         )
-        paragraph = statement.statement.strip()
+        paragraph = re.sub(
+            r"^\s*(?:preuves? (?:directes?|indirectes?)|(?:direct|indirect) evidence)\s*[:—-]\s*",
+            "",
+            statement.statement.strip(),
+            flags=re.IGNORECASE,
+        )
         if expected_style is ResponseStyle.BULLET_LIST:
             return f"- {paragraph} {citation}"
         return f"{paragraph} {citation}"
 
     blocks: list[str] = []
     if answer.definition:
-        blocks.append(answer.definition.strip())
+        if answer.definition_evidence_ids:
+            blocks.append(
+                render_statement(
+                    CitedEvidenceStatement(
+                        statement=answer.definition, evidence_ids=answer.definition_evidence_ids
+                    )
+                )
+            )
+        else:
+            blocks.append(answer.definition.strip())
     if answer.status == "insufficient" and not facet_plans:
         blocks.append(answer.insufficiency_message or "")
-        blocks.extend([f"## {headings['effects']}", headings["no_effects"]])
+
     elif facet_plans:
         # Final statements declare their facet explicitly; shared evidence must not
         # cause a claim to be silently rendered under the first matching axis.
@@ -3629,7 +3667,20 @@ def _render_evidence_answer(
                 for statement in statements
             )
 
-    limitations = [item.strip() for item in answer.limitations if item.strip()]
+    limitations = []
+    for index, item in enumerate(answer.limitations):
+        if not item.strip():
+            continue
+        ids = (
+            answer.limitation_evidence_ids[index]
+            if index < len(answer.limitation_evidence_ids)
+            else []
+        )
+        limitations.append(
+            render_statement(CitedEvidenceStatement(statement=item, evidence_ids=ids))
+            if ids
+            else item.strip()
+        )
     if limitations or answer.status == "insufficient":
         blocks.append(f"## {headings['limits']}")
         blocks.extend(limitations or [headings["no_limits"]])
@@ -3719,7 +3770,12 @@ def _render_answer(
         citation = "; ".join(
             _author_date_citation(records[record_id]) for record_id in statement.record_ids
         )
-        paragraph = statement.statement.strip()
+        paragraph = re.sub(
+            r"^\s*(?:preuves? (?:directes?|indirectes?)|(?:direct|indirect) evidence)\s*[:—-]\s*",
+            "",
+            statement.statement.strip(),
+            flags=re.IGNORECASE,
+        )
         if expected_style is ResponseStyle.BULLET_LIST:
             blocks.append(f"- {paragraph} {citation}")
         else:

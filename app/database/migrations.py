@@ -4,9 +4,14 @@ from __future__ import annotations
 
 import sqlite3
 
-CURRENT_SCHEMA_VERSION = 34
+from app.database.expert_memory_migration import EXPERT_MEMORY_MIGRATION
+
+CURRENT_SCHEMA_VERSION = 37
 
 MIGRATIONS: dict[int, str] = {
+    37: "-- See retrieval_revision_migration.py",
+    35: EXPERT_MEMORY_MIGRATION,
+    36: "-- See bibliographic_watch_migration.py",
     2: """
         CREATE TABLE IF NOT EXISTS article_evidence_runs (
             query_id TEXT NOT NULL REFERENCES queries(id) ON DELETE CASCADE,
@@ -983,6 +988,14 @@ def ensure_current(connection: sqlite3.Connection) -> None:
             from app.database.chat_progress_migration import add_chat_progress_steps
 
             add_chat_progress_steps(connection)
+        elif target_version == 37:
+            from app.database.retrieval_revision_migration import add_retrieval_revision
+
+            add_retrieval_revision(connection)
+        elif target_version == 36:
+            from app.database.bibliographic_watch_migration import add_bibliographic_watch
+
+            add_bibliographic_watch(connection)
         elif target_version == 31:
             _ensure_bibliographic_type_columns(connection)
         else:

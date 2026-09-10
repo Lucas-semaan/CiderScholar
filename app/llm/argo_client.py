@@ -23,6 +23,7 @@ from app.llm.contracts import (
 from app.llm.providers import LlmProviderId, LlmProviderStore
 from app.memory import MemoryGuard
 from app.services.argo_quota import ArgoQuotaService
+from app.telemetry import measured
 
 _MODEL_VALIDATION_CACHE: dict[tuple[str, str, str], float] = {}
 _MODEL_VALIDATION_CACHE_LOCK = threading.Lock()
@@ -435,6 +436,7 @@ class OpenAICompatibleClient:
             )
         return validated
 
+    @measured("llm_request")
     def chat(
         self,
         messages: Sequence[GenerationMessage | Mapping[str, str]],

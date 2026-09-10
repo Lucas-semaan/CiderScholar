@@ -20,10 +20,12 @@ from app.llm.argo_client import (
     ArgoAuthenticationError,
     ArgoAuthorizationError,
     ArgoLocalQuotaError,
+    ArgoProtocolError,
     ArgoQuotaError,
     ArgoScientificValidationError,
     ArgoUnavailableError,
 )
+from app.llm.chat_claims import MandatoryVerificationError
 from app.services.chatbot import ChatbotNoSourcesError
 
 _PROCESS_WORKER_ID = f"worker-{uuid4().hex}"
@@ -268,6 +270,32 @@ class DurableJobWorker:
                     "remote LLM quota deferral could not be persisted"
                 ) from None
             return self._logged_result(deferred, cycle_started_monotonic)
+        except (MandatoryVerificationError, ArgoProtocolError) as error:
+            cause = error.__cause__ or error
+            kind = JobErrorKind.VALIDATION
+            code = "semantic_invalid_schema"
+            if isinstance(cause, ArgoUnavailableError):
+                kind, code = JobErrorKind.TIMEOUT, "semantic_timeout"
+            elif isinstance(cause, ArgoQuotaError):
+                kind, code = JobErrorKind.QUOTA, "semantic_quota"
+            elif isinstance(cause, (ArgoAuthenticationError, ArgoAuthorizationError)):
+                kind, code = JobErrorKind.AUTHENTICATION, "semantic_authentication"
+            elif "context_exceeded" in str(cause):
+                code = "semantic_context_exceeded"
+            elif "invalid_json" in str(cause):
+                code = "semantic_invalid_json"
+            failed = self.repository.fail_attempt(
+                job.id,
+                worker_id=self.worker_id,
+                error_code=kind,
+                diagnostic_code=code,
+                safe_message="La validation scientifique obligatoire n'a pas terminé. "
+                f"Les évaluations terminées sont conservées pour la reprise ({code}).",
+                now=self.clock(),
+            )
+            if failed is None:
+                raise JobLeaseLostError("semantic failure could not be persisted") from None
+            return self._logged_result(failed, cycle_started_monotonic)
         except ArgoUnavailableError:
             failed = self.repository.fail_attempt(
                 job.id,

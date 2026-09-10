@@ -33,6 +33,7 @@ def test_job_type_is_closed_and_reserves_future_names() -> None:
     assert tuple(JobType) == (
         JobType.CHAT_ANSWER,
         JobType.WEEKLY_MAINTENANCE,
+        JobType.BIBLIOGRAPHIC_WATCH,
         JobType.DEEP_RESEARCH,
         JobType.LONG_SYNTHESIS,
         JobType.CORPUS_INGESTION,

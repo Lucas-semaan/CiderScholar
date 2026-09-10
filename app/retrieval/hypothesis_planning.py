@@ -68,6 +68,17 @@ class HypotheticalResearchPlan(BaseModel):
             raise ValueError("verification need identifiers must be unique")
         return self
 
+    def dense_queries(self, original_question: str) -> list[str]:
+        return list(dict.fromkeys([" ".join(original_question.split()), self.hypothetical_answer]))
+
+    def lexical_queries(self, original_question: str) -> list[str]:
+        values = [" ".join(original_question.split())]
+        for need in self.verification_needs:
+            values.append(need.search_query)
+            if need.contradiction_query:
+                values.append(need.contradiction_query)
+        return list(dict.fromkeys(values))
+
     def retrieval_queries(self, original_question: str, *, limit: int) -> list[str]:
         """Return one grouped wave: two dense-friendly entries, then lexical checks."""
 

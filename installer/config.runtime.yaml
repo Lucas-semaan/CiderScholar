@@ -7,6 +7,15 @@ app:
   log_level: INFO
   chat_worker_concurrency: 20
 
+expert_memory:
+  mode: "off"
+  max_selected_items: 12
+  planning_max_characters: 2000
+  semantic_max_characters: 1600
+  generation_max_characters: 1600
+  max_candidate_items_changed: 3
+  max_compile_attempts: 2
+
 paths:
   data_dir: data
   pdf_dir: data/common/pdf
@@ -36,6 +45,11 @@ reranker:
   device: cpu
   local_files_only: true
   trust_remote_code: false
+
+retrieval:
+  dense_article_prefilter_enabled: true
+  dense_article_prefilter_max_articles: 60
+  dense_article_prefilter_min_articles: 4
 
 deep_research:
   rrf_k: 60

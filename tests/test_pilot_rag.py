@@ -235,7 +235,7 @@ def test_evidence_rag_uses_all_presented_evidence_and_argo_selected_typology() -
             ]
             payload = json.loads(messages[1]["content"])
             assert [item["evidence_id"] for item in payload["evidence"]] == expected_ids
-            assert "mini-introduction de deux à quatre phrases" in messages[0]["content"]
+            assert "definition est facultatif" in messages[0]["content"]
             assert "Choisis toi-même la typologie" in messages[0]["content"]
             assert "trois à six phrases liées" in messages[0]["content"]
             if self.calls == 1:
@@ -445,7 +445,7 @@ def test_evidence_grounding_requires_more_global_text_for_many_rich_citations() 
         status="answerable",
         response_format="prose",
         definition=(
-            "Cette synthèse examine les observations dans leurs cadres expérimentaux. "
+            "Les observations concernent des cadres expérimentaux distincts. "
             "Elle rapproche les résultats tout en conservant leurs limites."
         ),
         statements=[
@@ -812,7 +812,7 @@ def test_evidence_rag_uses_only_indirect_evidence_with_explicit_scope() -> None:
     assert result.answer.status == "answerable"
     assert result.cited_evidence_ids == ["common:indirect:abstract"]
     assert result.source_record_ids == ["common:indirect"]
-    assert "Preuve indirecte" in result.answer_markdown
+    assert "Preuve indirecte" not in result.answer_markdown
     assert "Définition retenue" not in result.answer_markdown
     assert result.answer_markdown.startswith("La question porte sur l'effet du procédé exact")
     assert "## Limites des preuves" in result.answer_markdown
@@ -820,7 +820,7 @@ def test_evidence_rag_uses_only_indirect_evidence_with_explicit_scope() -> None:
     assert "## Références" in result.answer_markdown
 
 
-def test_evidence_rag_keeps_unlabelled_indirect_claim_as_quality_warning() -> None:
+def test_evidence_rag_accepts_study_context_without_indirect_label() -> None:
     passage = ChatEvidencePassage(
         evidence_id="common:indirect-warning:abstract",
         text="The study describes a transferable mechanism in a related matrix.",
@@ -846,10 +846,7 @@ def test_evidence_rag_keeps_unlabelled_indirect_claim_as_quality_warning() -> No
                     {
                         "status": "answerable",
                         "response_format": "prose",
-                        "definition": (
-                            "La question porte sur un mécanisme dans la matrice demandée. "
-                            "La synthèse précise la portée de l'analogie disponible."
-                        ),
+                        "definition": None,
                         "statements": [
                             {
                                 "statement": (
@@ -874,10 +871,10 @@ def test_evidence_rag_keeps_unlabelled_indirect_claim_as_quality_warning() -> No
         [record],
     )
 
-    assert client.calls == 10
-    assert result.generation_status == "partial_generated"
+    assert client.calls == 1
+    assert result.generation_status == "generated"
     assert result.cited_evidence_ids == ["common:indirect-warning:abstract"]
-    assert result.validation_warning_codes == ["missing_indirect_evidence_label"]
+    assert result.validation_warning_codes == []
 
 
 def test_evidence_rag_retries_a_b_graded_abstention_then_keeps_safe_output() -> None:
@@ -1703,7 +1700,7 @@ def test_evidence_rag_correction_lists_every_current_violation_and_action() -> N
             if self.calls == 2:
                 correction = messages[-1]["content"]
                 assert '"code": "missing_required_evidence"' in correction
-                assert '"code": "missing_contextual_introduction"' in correction
+                assert '"code": "missing_contextual_introduction"' not in correction
                 assert '"code": "unsupported_numeric_claim"' in correction
                 assert "scientific_blocker" in correction
                 assert "quality_warning" in correction
@@ -1726,7 +1723,7 @@ def test_evidence_rag_correction_lists_every_current_violation_and_action() -> N
                             "Bref."
                             if self.calls == 1
                             else (
-                                "La question porte sur des observations dans une même matrice. "
+                                "Les observations portent sur une même matrice. "
                                 "La synthèse rapproche les deux études disponibles."
                             )
                         ),
@@ -2740,6 +2737,74 @@ def test_pilot_rag_uses_the_full_structural_correction_budget() -> None:
         CiderAbstractRagService(client).answer("Réponds en prose.", [record])
 
     assert client.calls == 10
+
+
+@pytest.mark.parametrize(
+    ("grade", "source_text", "statement"),
+    [
+        (
+            "A",
+            "Yeast growth was observed in cider.",
+            "Dans le cidre, une croissance des levures est observée.",
+        ),
+        (
+            "B",
+            "Yeast growth was observed in red wine.",
+            "Dans le vin rouge, une croissance des levures est observée.",
+        ),
+        (
+            "B",
+            "Yeast growth was observed in wine and apple juice.",
+            "Une croissance des levures est observée dans le vin et dans le jus de pomme.",
+        ),
+        (
+            "B",
+            "Yeast growth was observed. The substrate was not specified.",
+            "Une croissance des levures est observée ; la matrice n’est pas précisée.",
+        ),
+    ],
+)
+def test_results_start_with_documented_study_context_without_preamble(
+    grade, source_text, statement
+):
+    record = ChatEvidenceRecord(
+        record_id="common:matrix",
+        origin="local_rag",
+        evidence_level="abstract",
+        scope="common",
+        title="Experimental yeast growth",
+        evidence_grade=grade,
+        passages=[ChatEvidencePassage(evidence_id="matrix:abstract", text=source_text)],
+    )
+
+    class Client:
+        calls = 0
+
+        def chat(self, messages, **_options):
+            self.calls += 1
+            assert "definition est facultatif" in messages[0]["content"]
+            assert "si la matrice est inconnue, ne l'invente pas" in messages[0]["content"]
+            return _response(
+                json.dumps(
+                    {
+                        "status": "answerable",
+                        "definition": None,
+                        "statements": [
+                            {"statement": statement, "evidence_ids": ["matrix:abstract"]}
+                        ],
+                        "limitations": [],
+                        "insufficiency_message": None,
+                    },
+                    ensure_ascii=False,
+                )
+            )
+
+    client = Client()
+    result = CiderEvidenceRagService(client).answer("Que montrent les observations ?", [record])
+    assert result.answer_markdown.startswith(statement)
+    assert "Preuve indirecte" not in result.answer_markdown
+    assert result.cited_evidence_ids == ["matrix:abstract"]
+    assert client.calls == 1
 
 
 def test_pilot_rag_rejects_known_empty_introduction() -> None:

@@ -129,6 +129,9 @@ class HybridSearchResponse(BaseModel):
     lexical_candidates: int = Field(ge=0)
     vector_candidates: int = Field(ge=0)
     vector_query_count: int = Field(default=0, ge=0)
+    dense_article_prefilter_used: bool = False
+    dense_article_prefilter_article_count: int = Field(default=0, ge=0)
+    dense_global_query_count: int = Field(default=0, ge=0)
     vector_search_degraded: bool = False
     unique_candidates: int = Field(ge=0)
     lexical_weight: float = Field(ge=0.0)
@@ -195,11 +198,49 @@ class HybridSearchService:
             raise ValueError("too many hybrid query variants")
         return unique
 
+    def _dense_article_prefilter(
+        self,
+        lexical_results_by_query: Sequence[Sequence[Any]],
+        *,
+        article_ids: Sequence[str] | None,
+        vector_query_limit: int,
+    ) -> tuple[str, ...]:
+        """Choose lexical candidates for non-anchor dense query variants.
+
+        The first dense query remains global. It protects recall when a relevant
+        article uses terminology absent from FTS5; only later variants use the
+        bounded lexical article set.
+        """
+
+        config = self.settings.retrieval
+        if (
+            not config.dense_article_prefilter_enabled
+            or article_ids is not None
+            or vector_query_limit < 2
+        ):
+            return ()
+        candidates: list[str] = []
+        seen: set[str] = set()
+        for results in lexical_results_by_query:
+            for result in results:
+                article_id = result.article_id
+                if article_id not in seen:
+                    seen.add(article_id)
+                    candidates.append(article_id)
+                if len(candidates) >= config.dense_article_prefilter_max_articles:
+                    break
+            if len(candidates) >= config.dense_article_prefilter_max_articles:
+                break
+        if len(candidates) < config.dense_article_prefilter_min_articles:
+            return ()
+        return tuple(candidates)
+
     def search(
         self,
         query: str,
         *,
         query_variants: Sequence[str] | None = None,
+        dense_queries: Sequence[str] | None = None,
         limit: int | None = None,
         candidate_limit: int | None = None,
         max_vector_query_variants: int | None = None,
@@ -229,6 +270,12 @@ class HybridSearchService:
             else min(max_vector_query_variants, len(queries))
         )
 
+        vector_queries = (
+            queries[:vector_query_limit]
+            if dense_queries is None
+            else list(dict.fromkeys(dense_queries))[:2]
+        )
+        vector_query_limit = len(vector_queries)
         rankings: list[RankedList] = []
         lexical_candidates = 0
         vector_candidates = 0
@@ -257,6 +304,14 @@ class HybridSearchService:
                 )
                 lexical_results_by_query.append(lexical_response.results)
 
+        dense_prefilter_article_ids = self._dense_article_prefilter(
+            lexical_results_by_query,
+            article_ids=article_ids,
+            vector_query_limit=vector_query_limit,
+        )
+        applied_dense_prefilter_article_ids: tuple[str, ...] = ()
+        dense_global_query_count = 0
+
         vector_results_by_query: list[list[Any]] = [[] for _query in queries]
         if not self._vector_disabled_by_memory and vector_query_limit:
             try:
@@ -268,10 +323,17 @@ class HybridSearchService:
                 )
             else:
                 try:
+                    dense_article_filters: list[Sequence[str] | None] | None = None
+                    if dense_prefilter_article_ids:
+                        dense_article_filters = [
+                            article_ids,
+                            *[dense_prefilter_article_ids] * (vector_query_limit - 1),
+                        ]
                     batched = self.vector.search_many(
-                        queries[:vector_query_limit],
+                        vector_queries,
                         limit=retrieval_limit,
                         article_ids=article_ids,
+                        article_ids_by_query=dense_article_filters,
                         sections=sections,
                     )
                 except MemoryLimitError as exc:
@@ -281,6 +343,10 @@ class HybridSearchService:
                     )
                 else:
                     vector_results_by_query[:vector_query_limit] = batched
+                    applied_dense_prefilter_article_ids = dense_prefilter_article_ids
+                    dense_global_query_count = (
+                        1 if applied_dense_prefilter_article_ids else vector_query_limit
+                    )
                     try:
                         self.memory.check("hybrid vector result batch")
                     except MemoryLimitError as exc:
@@ -310,8 +376,7 @@ class HybridSearchService:
                 )
                 matched_queries.setdefault(result.chunk_id, []).append(current_query)
 
-            if query_index >= vector_query_limit:
-                continue
+        for query_index, current_query in enumerate(vector_queries):
             vector_results = vector_results_by_query[query_index]
             vector_candidates += len(vector_results)
             rankings.append(
@@ -381,6 +446,9 @@ class HybridSearchService:
             vector_query_count=sum(
                 1 for ranking in rankings if ranking.source.startswith("vector:")
             ),
+            dense_article_prefilter_used=bool(applied_dense_prefilter_article_ids),
+            dense_article_prefilter_article_count=len(applied_dense_prefilter_article_ids),
+            dense_global_query_count=dense_global_query_count,
             reserved_reranker_weight=self.settings.retrieval.reranker_weight,
             rrf_k=self.settings.retrieval.rrf_k,
             duration_seconds=perf_counter() - started,
