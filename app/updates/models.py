@@ -24,6 +24,29 @@ def clean_text(value: object) -> str | None:
     return " ".join(without_tags.split()) or None
 
 
+def verified_normalized_doi(value: object) -> str | None:
+    """Accept only a complete, bare DOI that normalizes without correction."""
+
+    if not isinstance(value, str):
+        return None
+    cleaned = value.strip().casefold()
+    normalized = normalize_doi(cleaned)
+    return normalized if normalized is not None and normalized == cleaned else None
+
+
+def author_names(value: object) -> list[str]:
+    """Clean name-based provider records, retaining the original author order."""
+
+    if not isinstance(value, list):
+        return []
+    names = [
+        name
+        for author in value
+        if isinstance(author, dict) and (name := clean_text(author.get("name"))) is not None
+    ]
+    return list(dict.fromkeys(names))
+
+
 def integer_or_none(value: object) -> int | None:
     try:
         return int(value)  # type: ignore[arg-type]

@@ -11,6 +11,7 @@ from app.updates.models import (
     integer_or_none,
     normalize_doi,
 )
+from app.updates.models import author_names as _authors
 
 
 class IstexClient(OfficialBibliographicClient):
@@ -77,17 +78,6 @@ class IstexClient(OfficialBibliographicClient):
 def _first_text(value: object) -> str | None:
     values = value if isinstance(value, list) else [value]
     return next((text for item in values if (text := clean_text(item)) is not None), None)
-
-
-def _authors(value: object) -> list[str]:
-    if not isinstance(value, list):
-        return []
-    names = [
-        name
-        for author in value
-        if isinstance(author, dict) and (name := clean_text(author.get("name"))) is not None
-    ]
-    return list(dict.fromkeys(names))
 
 
 def _first_doi(value: object) -> str | None:

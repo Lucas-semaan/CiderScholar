@@ -20,7 +20,8 @@ from app.config import Settings
 from app.database.sqlite import Database
 from app.updates.base import BibliographicApiDeferred
 from app.updates.doi_exclusions import DoiExclusionRegistry
-from app.updates.models import BibliographicRecord, clean_text, normalize_doi
+from app.updates.models import BibliographicRecord, clean_text
+from app.updates.models import verified_normalized_doi as _verified_normalized_doi
 from app.updates.openalex import OpenAlexClient
 from app.updates.service import CLIENTS
 
@@ -2500,13 +2501,6 @@ class BibliographicHarvestStore:
                 )
                 updated += int(cursor.rowcount)
         return updated
-
-
-def _verified_normalized_doi(value: object) -> str | None:
-    if not isinstance(value, str):
-        return None
-    normalized = value.strip().casefold()
-    return normalized if normalize_doi(normalized) == normalized else None
 
 
 class CiderPilotHarvester:

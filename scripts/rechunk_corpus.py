@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import shutil
 import sqlite3
@@ -14,6 +13,7 @@ from typing import Any
 
 from app.config import Settings, load_settings
 from app.corpora import CorpusScope, settings_for_corpus
+from app.file_integrity import sha256_file as _sha256
 from app.ingestion.chunker import ScientificChunker
 from app.ingestion.pdf_extractor import PageText
 from app.ingestion.token_budget import LocalEmbeddingTokenBudget
@@ -26,14 +26,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--apply", action="store_true", help="Apply staged chunks to SQLite")
     parser.add_argument("--keep-staging", action="store_true", help="Retain the staging database")
     return parser
-
-
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        while block := stream.read(1024 * 1024):
-            digest.update(block)
-    return digest.hexdigest()
 
 
 def _assert_quiescent(connection: sqlite3.Connection) -> None:

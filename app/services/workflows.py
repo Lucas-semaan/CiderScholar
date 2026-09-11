@@ -37,6 +37,7 @@ from app.ingestion.embeddings import (
 )
 from app.ingestion.pdf_extractor import PdfExtractor
 from app.ingestion.pipeline import IngestionPipeline, IngestionReport
+from app.knowledge.wiki import ReasoningWikiError, load_reasoning_wiki
 from app.llm.argo_client import (
     ArgoAuthenticationError,
     ArgoAuthorizationError,
@@ -54,7 +55,6 @@ from app.llm.claim_verification import ClaimVerifier
 from app.llm.figure_analysis import (
     FigureAnalysisUnavailable,
     OllamaFigureAnalysisService,
-    attach_figure_evidence,
     figure_references_from_chat_records,
 )
 from app.llm.final_synthesis import (
@@ -86,10 +86,6 @@ from app.retrieval.axis_coverage import (
     merge_axis_rankings,
     select_with_axis_coverage,
 )
-from app.retrieval.coverage_assessment import (
-    ArgoEvidenceCoverageAssessor,
-    CoverageAssessmentResult,
-)
 from app.retrieval.evidence_selection import distinct_evidence
 from app.retrieval.global_semantic_filter import (
     ArgoGlobalSemanticEvidenceFilter,
@@ -112,13 +108,7 @@ from app.retrieval.index_manifest import (
 )
 from app.retrieval.lexical_search import LexicalSearchService
 from app.retrieval.query_planning import (
-    ArgoQueryPlanningService as LegacyArgoQueryPlanningService,
-)
-from app.retrieval.query_planning import (
     QueryPlanningProtocolError,
-    QueryPlanningResult,
-    ResearchAxis,
-    deterministic_query_plan,
 )
 from app.retrieval.query_scope import classify_query_scope
 from app.retrieval.rehydration import rehydrate_records
@@ -133,10 +123,6 @@ from app.retrieval.scientific_intent import (
     analyze_scientific_intent,
     score_scientific_text,
 )
-from app.retrieval.semantic_filter import (
-    ArgoSemanticEvidenceFilter,
-    SemanticFilterResult,
-)
 from app.retrieval.vector_search import QdrantLocalIndex, VectorSearchService
 from app.services.chatbot import (
     chatbot_sources_from_evidence,
@@ -147,7 +133,8 @@ from app.services.chatbot import (
 from app.telemetry import measured, timing_scope
 from app.updates.full_text import FullTextHarvestService
 from app.updates.harvest import BibliographicHarvestStore
-from app.updates.models import BibliographicSearchReport, normalize_doi
+from app.updates.models import BibliographicSearchReport
+from app.updates.models import verified_normalized_doi as _verified_normalized_doi
 from app.updates.pilot_rag import (
     CiderAbstractRagResult,
     CiderAbstractRagService,
@@ -415,7 +402,9 @@ def _chat_retrieval_cache_signature(
             "manifest_sha256": _manifest_sha256(reranker_path),
         },
         filters_limits={
-            "pipeline_version": "rag-v2",
+            "pipeline_version": "rag-v3-conservative-evidence-selection",
+            "article_ranking": settings.article_ranking.model_dump(mode="json"),
+            "evidence": settings.evidence.model_dump(mode="json"),
             "operation": operation,
             **dict(filters_limits),
         },
@@ -459,25 +448,6 @@ def _chat_llm_client(settings: Settings, request_timeout_seconds: float) -> Argo
         {"request_timeout_seconds": max(1.0, request_timeout_seconds)} if supports_timeout else {}
     )
     return ArgoClient(settings, **options)
-
-
-def _serialized_chat_retrieval(
-    operation: Callable[..., Any],
-    *args: Any,
-    timing: _ChatTimingCollector | None = None,
-    timing_stage: str = "local_retrieval",
-    **kwargs: Any,
-) -> Any:
-    """Keep local model/index access exclusive without serializing LLM generation."""
-
-    with _serialized_chat_retrieval_scope(timing=timing):
-        return _timed_chat_retrieval_operation(
-            operation,
-            *args,
-            timing=timing,
-            timing_stage=timing_stage,
-            **kwargs,
-        )
 
 
 @contextmanager
@@ -873,18 +843,6 @@ def _bibliographic_key(record: BibliographicHybridResult) -> str:
     return f"title:{' '.join(record.title.casefold().split())}"
 
 
-def _verified_normalized_doi(value: object) -> str | None:
-    """Return a DOI only when the persisted value is complete and already normalized."""
-
-    if not isinstance(value, str):
-        return None
-    cleaned = value.strip().casefold()
-    normalized = normalize_doi(cleaned)
-    if normalized is None or normalized != cleaned:
-        return None
-    return normalized
-
-
 def rerank_bibliographic_candidates(
     query: str,
     records: Sequence[BibliographicHybridResult],
@@ -970,36 +928,6 @@ def _abstract_search_failure_code(stage: str, error: Exception) -> str:
     else:
         category = "unexpected"
     return f"abstract_{stage}_{category}"[:80]
-
-
-def _abstract_search_warning(
-    question: str,
-    *,
-    has_results: bool,
-    supplemental: bool = False,
-) -> str:
-    is_french = question_language(question) == "fr"
-    if is_french:
-        scope = "complémentaire " if supplemental else ""
-        if has_results:
-            return (
-                f"La recherche {scope}dans les résumés bibliographiques a été partiellement "
-                "dégradée ; les résultats valides et les passages locaux restent utilisables."
-            )
-        return (
-            f"La recherche {scope}dans les résumés bibliographiques n'a pas abouti ; les "
-            "autres passages locaux disponibles restent utilisables."
-        )
-    scope = "supplemental " if supplemental else ""
-    if has_results:
-        return (
-            f"The {scope}bibliographic abstract search was partially degraded; valid results "
-            "and other local passages remain usable."
-        )
-    return (
-        f"The {scope}bibliographic abstract search did not complete; other available local "
-        "passages remain usable."
-    )
 
 
 def _evidence_level_trace_counts(
@@ -1400,18 +1328,11 @@ def search_common_corpus_abstracts(
             except Exception as exc:
                 record_failure("hybrid_close", exc)
 
-    try:
-        full_text_dois = {
-            doi
-            for row in database.list_articles()
-            if (doi := _verified_normalized_doi(row["doi"])) is not None
-        }
-    except Exception as exc:
-        record_failure("full_text_doi_lookup", exc)
-        full_text_dois = set()
-    filtered_abstracts = [result for result in abstract_results if result.doi not in full_text_dois]
-    reranker_input_count = len(article_results) + len(filtered_abstracts)
-    reranker_candidates = [*article_results, *filtered_abstracts]
+    # An article's presence in SQLite does not imply that this search found its
+    # abstract or a usable full-text passage. Deduplicate actual candidates here,
+    # then compare available full-text/abstract evidence in merge_chat_evidence.
+    reranker_input_count = len(article_results) + len(abstract_results)
+    reranker_candidates = [*article_results, *abstract_results]
     try:
         ranked = rerank_bibliographic_candidates(
             query,
@@ -1444,7 +1365,6 @@ def search_common_corpus_abstracts(
             selected_abstract_article_count=len(ranked),
             rejection_counts={
                 "abstract_without_verified_doi": unverified_abstract_count,
-                "duplicate_of_full_text": len(abstract_results) - len(filtered_abstracts),
                 "not_selected_after_reranking": max(0, reranker_input_count - len(ranked)),
                 **failure_counts,
             },
@@ -2387,221 +2307,6 @@ def answer_from_harvested_abstracts(
         ).answer(question, search_response.results)
 
 
-def _semantic_filter_and_coverage(
-    settings: Settings,
-    *,
-    question: str,
-    axes: Sequence[ResearchAxis],
-    evidence: Sequence[ChatEvidenceRecord],
-    on_argo_reserved: Callable[[], None] | None,
-    on_coverage_started: Callable[[], None] | None = None,
-    timings: _ChatTimingCollector | None = None,
-    request_timeout_seconds: float | None = None,
-) -> tuple[SemanticFilterResult, CoverageAssessmentResult]:
-    """Filter evidence by scientific meaning, then assess each planned axis."""
-
-    with _chat_llm_client(
-        settings,
-        request_timeout_seconds or settings.argo.request_timeout_seconds,
-    ) as llm:
-        semantic_started = perf_counter()
-        semantic_memory = timings.snapshot() if timings is not None else None
-        try:
-            semantic_filter = ArgoSemanticEvidenceFilter(llm).filter_records(
-                question,
-                axes,
-                evidence,
-                on_argo_reserved=on_argo_reserved,
-            )
-        finally:
-            if timings is not None:
-                timings.add(
-                    "argo_semantic_filter",
-                    perf_counter() - semantic_started,
-                    before=semantic_memory,
-                )
-        if timings is not None:
-            timings.add_tokens(
-                "argo_semantic_filter",
-                prompt_tokens=semantic_filter.prompt_tokens,
-                completion_tokens=semantic_filter.completion_tokens,
-            )
-        if on_coverage_started is not None:
-            on_coverage_started()
-        coverage_started = perf_counter()
-        coverage_memory = timings.snapshot() if timings is not None else None
-        try:
-            coverage = ArgoEvidenceCoverageAssessor(llm).assess(
-                question,
-                axes,
-                evidence,
-                semantic_filter,
-                on_argo_reserved=on_argo_reserved,
-            )
-        finally:
-            if timings is not None:
-                timings.add(
-                    "argo_coverage",
-                    perf_counter() - coverage_started,
-                    before=coverage_memory,
-                )
-        if timings is not None:
-            timings.add_tokens(
-                "argo_coverage",
-                prompt_tokens=coverage.prompt_tokens,
-                completion_tokens=coverage.completion_tokens,
-            )
-    return semantic_filter, coverage
-
-
-def _run_semantic_filter_and_coverage(
-    settings: Settings,
-    *,
-    question: str,
-    axes: Sequence[ResearchAxis],
-    evidence: Sequence[ChatEvidenceRecord],
-    on_argo_reserved: Callable[[], None] | None,
-    on_coverage_started: Callable[[], None] | None,
-    timings: _ChatTimingCollector,
-    request_timeout_seconds: float,
-) -> tuple[SemanticFilterResult, CoverageAssessmentResult]:
-    """Supply latency telemetry when supported by an injected semantic adaptor."""
-
-    parameters = inspect.signature(_semantic_filter_and_coverage).parameters.values()
-    timing_options = (
-        {"timings": timings}
-        if any(
-            parameter.name == "timings" or parameter.kind is inspect.Parameter.VAR_KEYWORD
-            for parameter in parameters
-        )
-        else {}
-    )
-    timeout_options = (
-        {"request_timeout_seconds": request_timeout_seconds}
-        if any(
-            parameter.name == "request_timeout_seconds"
-            or parameter.kind is inspect.Parameter.VAR_KEYWORD
-            for parameter in parameters
-        )
-        else {}
-    )
-    return _semantic_filter_and_coverage(
-        settings,
-        question=question,
-        axes=axes,
-        evidence=evidence,
-        on_argo_reserved=on_argo_reserved,
-        on_coverage_started=on_coverage_started,
-        **timing_options,
-        **timeout_options,
-    )
-
-
-def _coverage_follow_up_queries(
-    axes: Sequence[ResearchAxis],
-    coverage: CoverageAssessmentResult,
-    *,
-    include_all_axes: bool = False,
-    target_axis_keys: set[str] | None = None,
-    exclude_queries: Sequence[str] = (),
-) -> dict[str, list[str]]:
-    """Return bounded follow-up queries only for axes not proven covered."""
-
-    coverage_by_key = {assessment.axis_key: assessment for assessment in coverage.axes}
-    excluded = {" ".join(query.split()).casefold() for query in exclude_queries}
-    follow_up: dict[str, list[str]] = {}
-    for axis in axes:
-        assessment = coverage_by_key.get(axis.key)
-        if target_axis_keys is not None and axis.key not in target_axis_keys:
-            continue
-        if (
-            target_axis_keys is None
-            and not include_all_axes
-            and assessment is not None
-            and assessment.status == "covered"
-        ):
-            continue
-        generated = [] if assessment is None else assessment.suggested_queries
-        queries = list(
-            dict.fromkeys(
-                cleaned
-                for query in [*generated, *axis.search_queries]
-                if len(cleaned := " ".join(query.split())[:600]) >= 2
-                and cleaned.casefold() not in excluded
-            )
-        )[:4]
-        if queries:
-            follow_up[axis.key] = queries
-    return follow_up
-
-
-def _first_query_per_axis(axes: Sequence[ResearchAxis]) -> dict[str, list[str]]:
-    """Build the cheap first wave: one distinct planned query for every axis."""
-
-    selected: dict[str, list[str]] = {}
-    seen: set[str] = set()
-    for axis in axes:
-        for query in axis.search_queries:
-            cleaned = " ".join(query.split())[:600]
-            normalized = cleaned.casefold()
-            if len(cleaned) < 2 or normalized in seen:
-                continue
-            selected[axis.key] = [cleaned]
-            seen.add(normalized)
-            break
-    return selected
-
-
-def _incomplete_coverage_axis_keys(
-    axes: Sequence[ResearchAxis],
-    coverage: CoverageAssessmentResult | None,
-    semantic_filter: SemanticFilterResult | None,
-    *,
-    minimum_candidates_per_axis: int,
-) -> set[str]:
-    """Identify axes that lack reliable coverage or enough semantic A/B candidates."""
-
-    if (
-        coverage is None
-        or coverage.used_fallback
-        or semantic_filter is None
-        or semantic_filter.used_fallback
-    ):
-        return {axis.key for axis in axes}
-    coverage_by_axis = {assessment.axis_key: assessment for assessment in coverage.axes}
-    return {
-        axis.key
-        for axis in axes
-        if (assessment := coverage_by_axis.get(axis.key)) is None
-        or assessment.status != "covered"
-        or len(set(semantic_filter.eligible_ids_for_axis(axis.key))) < minimum_candidates_per_axis
-    }
-
-
-def _coverage_notes(
-    axes: Sequence[ResearchAxis],
-    coverage: CoverageAssessmentResult | None,
-) -> list[str]:
-    """Translate a reliable incomplete-coverage assessment into synthesis constraints."""
-
-    if coverage is None or coverage.used_fallback:
-        return []
-    labels = {axis.key: axis.label for axis in axes}
-    notes: list[str] = []
-    for assessment in coverage.axes:
-        if assessment.status == "covered":
-            continue
-        missing = "; ".join(assessment.missing_information[:3])
-        note = (
-            f"Axe « {labels.get(assessment.axis_key, assessment.axis_key)} » : "
-            f"couverture documentaire {assessment.status}."
-        )
-        if missing:
-            note += f" Informations encore non documentées : {missing}."
-        notes.append(note[:700])
-    return notes
-
-
 def _argo_diagnostic_code(error: ArgoError) -> str:
     if isinstance(error, ArgoScientificValidationError):
         return error.reason.value
@@ -2967,8 +2672,16 @@ def _answer_chatbot(
             answer_effort=answer_effort,
         )
 
-    source_database = Database(corpus_paths(settings, CorpusScope.COMMON).database_path)
     warnings: list[str] = []
+    try:
+        reasoning_wiki = load_reasoning_wiki(retrieval_query)
+    except (OSError, UnicodeError, ReasoningWikiError) as exc:
+        reasoning_wiki = None
+        warnings.append(
+            "Le wiki de raisonnement local est indisponible "
+            f"({type(exc).__name__}); la recherche reste fondée sur le corpus scientifique."
+        )
+    source_database = Database(corpus_paths(settings, CorpusScope.COMMON).database_path)
 
     def reserve_llm_request() -> None:
         if on_argo_reserved is not None:
@@ -3013,6 +2726,9 @@ def _answer_chatbot(
                     settings.argo.max_input_characters,
                 )
                 rag.experimental_profile = active_experimental_profile
+                rag.organizational_reasoning_context = (
+                    reasoning_wiki.content if reasoning_wiki is not None else ""
+                )
                 rag.semantic_verifier = ChatAnswerVerifier(
                     ClaimVerifier(
                         llm,
@@ -3227,17 +2943,26 @@ def _answer_chatbot(
             ):
                 planning_options["conversation_history"] = context
             if supports_kwargs or any(
+                parameter.name == "reasoning_context" for parameter in plan_parameters
+            ):
+                planning_options["reasoning_context"] = (
+                    reasoning_wiki.content if reasoning_wiki is not None else ""
+                )
+            if supports_kwargs or any(
                 parameter.name == "on_argo_reserved" for parameter in plan_parameters
             ):
                 planning_options["on_argo_reserved"] = reserve_llm_request
             plan_cache = ValidationCache(settings.paths.cache_dir / "hypothesis_plans")
             plan_key = content_key(
                 {
-                    "version": "hypothesis-v2",
+                    "version": "hypothesis-v3-wiki",
                     "client": client_identity(planning_client),
                     "question": retrieval_query,
                     "history": context,
                     "effort": answer_effort.value,
+                    "reasoning_wiki_sha256": (
+                        reasoning_wiki.manifest_sha256 if reasoning_wiki is not None else None
+                    ),
                 }
             )
             planning = plan_cache.get(plan_key, HypothesisPlanningResult)
@@ -3492,6 +3217,8 @@ def _answer_chatbot(
                 evidence,
                 on_argo_reserved=reserve_llm_request,
             )
+    except ArgoError as error:
+        raise MandatoryVerificationError("mandatory_semantic_filter_incomplete") from error
     finally:
         timings.add(
             "argo_semantic_filter",
@@ -3612,951 +3339,6 @@ def _answer_chatbot(
         figure_analysis_count=figure_analysis_count,
         figure_analysis_duration=figure_analysis_duration,
         figure_analysis_model=figure_analysis_model,
-    )
-
-
-def _answer_chatbot_axis_legacy(
-    settings: Settings,
-    database: Database,
-    *,
-    message: str,
-    history: Sequence[Mapping[str, str]],
-    use_external_sources: bool,
-    analyze_figures: bool = False,
-    interaction_mode: str = "research",
-    previous_sources: Sequence[ChatbotSource] = (),
-    on_figure_analysis: Callable[[], None] | None = None,
-    on_argo_reserved: Callable[[], None] | None = None,
-    on_argo_response: Callable[[], None] | None = None,
-    on_progress: ChatbotProgressCallback | None = None,
-    experimental_profile: Literal["p0", "p1", "p2"] | None = None,
-    answer_effort: AnswerEffort = AnswerEffort.BALANCED,
-    retrieval_resources: _ChatRetrievalResources,
-    timings: _ChatTimingCollector,
-    retrieval_traces: _ChatRetrievalTraceCollector,
-) -> ChatbotResult:
-    """Answer with local full-text passages, abstract fallback and bounded enrichment."""
-
-    del database  # The chat database is distinct from the common corpus authority.
-    source_database = Database(corpus_paths(settings, CorpusScope.COMMON).database_path)
-    started = perf_counter()
-    effort_budget = answer_effort_budget(answer_effort)
-
-    def reserve_llm_request() -> None:
-        if on_argo_reserved is not None:
-            on_argo_reserved()
-
-    def llm_request_timeout_seconds() -> float:
-        # Bound each remote call independently without imposing a whole-answer deadline.
-        return 60.0
-
-    def publish_progress(stage: ChatbotProgressStage) -> None:
-        if on_progress is not None:
-            on_progress(stage)
-
-    publish_progress("planning")
-    active_experimental_profile = experimental_profile or settings.app.experimental_chat_profile
-    context = conversation_context(history)
-    retrieval_query = contextualize_retrieval_query(message, context)
-    warnings: list[str] = []
-    try:
-        reused_evidence = (
-            chat_evidence_from_previous_sources(
-                settings,
-                query=retrieval_query,
-                sources=previous_sources,
-            )
-            if interaction_mode == "conversation"
-            else []
-        )
-    except Exception as exc:
-        reused_evidence = []
-        warnings.append(
-            "Les preuves de la conversation n'ont pas pu être rechargées "
-            f"({type(exc).__name__}); une nouvelle recherche locale est exécutée."
-        )
-    if reused_evidence:
-        retrieval_traces.add(
-            "llm_context",
-            selected_article_count=len(reused_evidence),
-            selected_passage_count=sum(len(record.passages) for record in reused_evidence),
-            **_evidence_level_trace_counts(reused_evidence),
-        )
-        publish_progress("generation")
-        generation_started = perf_counter()
-        generation_memory = timings.snapshot()
-        try:
-            with _chat_llm_client(settings, llm_request_timeout_seconds()) as llm:
-                rag = _evidence_rag_service(
-                    llm,
-                    answer_effort,
-                    settings.argo.scientific_correction_temperature,
-                    settings.argo.max_input_characters,
-                )
-                rag.experimental_profile = active_experimental_profile
-                answer = rag.answer(
-                    message,
-                    reused_evidence,
-                    conversation_history=context,
-                    on_argo_reserved=reserve_llm_request,
-                    on_argo_response=on_argo_response,
-                )
-        except ArgoQuotaError:
-            timings.add(
-                "argo_generation",
-                perf_counter() - generation_started,
-                before=generation_memory,
-            )
-            return _fallback_chatbot_result(
-                message=message,
-                retrieval_query=retrieval_query,
-                evidence=reused_evidence,
-                warnings=warnings,
-                diagnostic_code="provider_quota_after_retrieval",
-                started=started,
-                interaction_mode="conversation",
-                reused_previous_sources=True,
-                answer_effort=answer_effort,
-                timings=timings.models(),
-                retrieval_traces=retrieval_traces.models(),
-            )
-        except ArgoError as exc:
-            timings.add(
-                "argo_generation",
-                perf_counter() - generation_started,
-                before=generation_memory,
-            )
-            failed_prompt_tokens, failed_completion_tokens, failed_traces = (
-                _argo_failed_generation_usage(exc)
-            )
-            timings.add_tokens(
-                "argo_generation",
-                prompt_tokens=failed_prompt_tokens,
-                completion_tokens=failed_completion_tokens,
-            )
-            return _fallback_chatbot_result(
-                message=message,
-                retrieval_query=retrieval_query,
-                evidence=reused_evidence,
-                warnings=warnings,
-                diagnostic_code=_argo_diagnostic_code(exc),
-                started=started,
-                external_result_count=sum(
-                    record.origin == "external_api" for record in reused_evidence
-                ),
-                interaction_mode="conversation",
-                reused_previous_sources=True,
-                figure_analysis_requested=analyze_figures,
-                prompt_tokens=failed_prompt_tokens,
-                completion_tokens=failed_completion_tokens,
-                answer_effort=answer_effort,
-                timings=timings.models(),
-                retrieval_traces=retrieval_traces.models(),
-                generation_traces=failed_traces,
-                diagnostic_codes=_argo_diagnostic_codes(exc),
-            )
-        timings.add(
-            "argo_generation",
-            perf_counter() - generation_started,
-            before=generation_memory,
-        )
-        timings.add_tokens(
-            "argo_generation",
-            prompt_tokens=answer.prompt_tokens,
-            completion_tokens=answer.completion_tokens,
-        )
-        sources = chatbot_sources_from_evidence(
-            reused_evidence,
-            answer.cited_evidence_ids,
-            source_database,
-        )
-        return ChatbotResult(
-            message=" ".join(message.split()),
-            retrieval_query=retrieval_query,
-            answer_markdown=answer.answer_markdown,
-            sources=sources,
-            warnings=_generation_quality_warnings(
-                message,
-                getattr(answer, "validation_warning_codes", []),
-            ),
-            model=answer.model,
-            local_result_count=sum(record.origin == "local_rag" for record in reused_evidence),
-            external_result_count=sum(
-                record.origin == "external_api" for record in reused_evidence
-            ),
-            external_enrichment_used=any(source.origin == "external_api" for source in sources),
-            prompt_tokens=answer.prompt_tokens,
-            completion_tokens=answer.completion_tokens,
-            duration_seconds=perf_counter() - started,
-            interaction_mode="conversation",
-            reused_previous_sources=True,
-            figure_analysis_requested=analyze_figures,
-            generation_status=getattr(answer, "generation_status", "generated"),
-            diagnostic_codes=getattr(answer, "validation_warning_codes", []),
-            answer_effort=answer_effort,
-            timings=timings.models(),
-            retrieval_traces=retrieval_traces.models(),
-            generation_traces=getattr(answer, "generation_traces", []),
-        )
-    planning: QueryPlanningResult
-    planning_started = perf_counter()
-    planning_memory = timings.snapshot()
-    try:
-        with _chat_llm_client(settings, llm_request_timeout_seconds()) as planning_client:
-            planning = LegacyArgoQueryPlanningService(planning_client).plan(
-                retrieval_query,
-                deep=answer_effort is AnswerEffort.DEEP,
-                conversation_history=context,
-                on_argo_reserved=reserve_llm_request,
-            )
-    except ArgoQuotaError:
-        raise
-    except ArgoError as exc:
-        planning = deterministic_query_plan(
-            retrieval_query,
-            deep=answer_effort is AnswerEffort.DEEP,
-        )
-        warnings.append(
-            "La planification LLM est indisponible "
-            f"({_query_planning_diagnostic_code(exc)}); utilisation du planificateur local "
-            "de secours."
-        )
-    except Exception as exc:
-        planning = deterministic_query_plan(
-            retrieval_query,
-            deep=answer_effort is AnswerEffort.DEEP,
-        )
-        warnings.append(
-            "La compréhension adaptative de la requête est indisponible "
-            f"({type(exc).__name__}); utilisation du planificateur local de secours."
-        )
-    finally:
-        timings.add(
-            "argo_planning",
-            perf_counter() - planning_started,
-            before=planning_memory,
-        )
-    timings.add_tokens(
-        "argo_planning",
-        prompt_tokens=planning.prompt_tokens,
-        completion_tokens=planning.completion_tokens,
-    )
-    intent = planning.plan.scientific_intent(
-        retrieval_query,
-        deep=answer_effort is AnswerEffort.DEEP,
-    )
-    planned_search_queries = planning.plan.retrieval_queries
-    adaptive_retrieval = effort_budget.follow_up_incomplete_axes
-    initial_axis_queries = _first_query_per_axis(planning.plan.axes)
-    if adaptive_retrieval:
-        search_queries = list(
-            dict.fromkeys(query for queries in initial_axis_queries.values() for query in queries)
-        )
-        full_text_search_queries: Sequence[str] = ()
-        full_text_axis_queries: Mapping[str, Sequence[str]] = initial_axis_queries
-        initial_candidate_limit = _initial_retrieval_candidate_limit(settings, effort_budget)
-        initial_prefix_matching: bool | None = False
-    else:
-        search_queries = planned_search_queries
-        full_text_search_queries = search_queries
-        full_text_axis_queries = {axis.key: axis.search_queries for axis in planning.plan.axes}
-        initial_candidate_limit = None
-        initial_prefix_matching = None
-
-    publish_progress("search")
-    retrieval_failed = False
-    abstract_diagnostics: list[str] = []
-    # Keep the initial abstract/full-text wave coherent under one lock.  This avoids
-    # rejoining the local-model queue between two stages of the same user request.
-    with (
-        _serialized_chat_retrieval_scope(timing=timings),
-        retrieval_resources.qdrant_wave(settings) as qdrant_client_owner,
-    ):
-        try:
-            local_results = _timed_chat_retrieval_operation(
-                search_common_corpus_abstracts,
-                settings,
-                query=retrieval_query,
-                limit=effort_budget.abstract_result_limit,
-                search_queries=search_queries,
-                intent_override=intent,
-                max_query_variants=effort_budget.max_query_variants,
-                max_vector_query_variants=effort_budget.max_vector_query_variants,
-                candidate_limit=initial_candidate_limit,
-                prefix_matching=initial_prefix_matching,
-                retrieval_resources=retrieval_resources,
-                retrieval_trace=retrieval_traces,
-                qdrant_client_owner=qdrant_client_owner,
-                diagnostics=abstract_diagnostics,
-                timing=timings,
-                timing_stage="abstract_search",
-            )
-        except Exception as exc:
-            retrieval_failed = True
-            local_results = []
-            code = _abstract_search_failure_code("unhandled", exc)
-            abstract_diagnostics.append(code)
-            retrieval_traces.add("abstract_search", rejection_counts={code: 1})
-            LOGGER.warning("abstract_search_unhandled error_type=%s", type(exc).__name__)
-        if use_external_sources:
-            publish_progress("enrichment")
-        if use_external_sources and settings.full_text.enabled:
-            acquired_article_ids, acquisition_warnings = _timed_chat_retrieval_operation(
-                acquire_common_full_text_for_chat,
-                settings,
-                local_results,
-                max_downloads=2,
-                qdrant_client_owner=qdrant_client_owner,
-                timing=timings,
-                timing_stage="full_text_acquisition",
-            )
-            warnings.extend(acquisition_warnings)
-            if acquired_article_ids:
-                retrieval_resources.invalidate_corpus_fingerprint()
-
-        try:
-            full_text_records = _timed_chat_retrieval_operation(
-                search_common_corpus_full_text_evidence,
-                settings,
-                query=retrieval_query,
-                article_count=effort_budget.article_count,
-                search_queries=full_text_search_queries,
-                axis_queries=full_text_axis_queries,
-                intent_override=intent,
-                max_query_variants=effort_budget.max_query_variants,
-                max_vector_query_variants=effort_budget.max_vector_query_variants,
-                candidate_limit=initial_candidate_limit,
-                prefix_matching=initial_prefix_matching,
-                include_fallback_variants=not adaptive_retrieval,
-                passage_count=effort_budget.passages_per_article,
-                candidate_chunks_per_article=effort_budget.candidate_chunks_per_article,
-                context_radius=effort_budget.context_radius,
-                retrieval_resources=retrieval_resources,
-                retrieval_trace=retrieval_traces,
-                qdrant_client_owner=qdrant_client_owner,
-                timing=timings,
-                timing_stage="full_text_search",
-            )
-        except Exception as exc:
-            retrieval_failed = True
-            full_text_records = []
-            warnings.append(
-                "La recherche dans les textes intégraux est indisponible pour cette réponse "
-                f"({type(exc).__name__}); repli sur les abstracts."
-            )
-
-    if abstract_warning := _abstract_route_warning(
-        message,
-        diagnostics=abstract_diagnostics,
-        abstract_result_count=len(local_results),
-        full_text_records=full_text_records,
-    ):
-        warnings.append(abstract_warning)
-
-    external_report: BibliographicSearchReport | None = None
-    if use_external_sources:
-        enrichment_started = perf_counter()
-        enrichment_memory = timings.snapshot()
-        try:
-            external_report = discover_bibliographic_records(
-                settings,
-                query=retrieval_query,
-                limit_per_source=4,
-            )
-        except Exception as exc:
-            warnings.append(
-                "L'enrichissement bibliographique externe est indisponible pour cette réponse "
-                f"({type(exc).__name__})."
-            )
-        finally:
-            timings.add(
-                "external_enrichment",
-                perf_counter() - enrichment_started,
-                before=enrichment_memory,
-            )
-
-    publish_progress("reranking")
-    merge_started = perf_counter()
-    merge_memory = timings.snapshot()
-    external_records = external_report.records if external_report else []
-    candidates, external_count = merge_chatbot_candidates(
-        local_results,
-        external_records,
-        limit=effort_budget.abstract_result_limit,
-    )
-    abstract_evidence = abstract_candidates_to_chat_evidence(candidates)
-    evidence = merge_chat_evidence(
-        full_text_records,
-        abstract_evidence,
-        query=retrieval_query,
-        limit=effort_budget.evidence_record_limit,
-        intent_override=intent,
-    )
-    timings.add("evidence_merge", perf_counter() - merge_started, before=merge_memory)
-    merge_input_count = len(full_text_records) + len(abstract_evidence)
-    retrieval_traces.add(
-        "evidence_merge",
-        pre_rerank_candidate_count=merge_input_count,
-        post_rerank_candidate_count=len(evidence),
-        selected_article_count=len(evidence),
-        selected_passage_count=sum(len(record.passages) for record in evidence),
-        **_evidence_level_trace_counts(evidence),
-        rejection_counts={"duplicate_or_not_selected": max(0, merge_input_count - len(evidence))},
-    )
-    if not evidence:
-        return _fallback_chatbot_result(
-            message=message,
-            retrieval_query=retrieval_query,
-            evidence=[],
-            warnings=warnings,
-            diagnostic_code=(
-                "retrieval_unavailable" if retrieval_failed else "retrieval_no_qualified_evidence"
-            ),
-            started=started,
-            external_result_count=external_count,
-            prompt_tokens=planning.prompt_tokens,
-            completion_tokens=planning.completion_tokens,
-            figure_analysis_requested=analyze_figures,
-            answer_effort=answer_effort,
-            timings=timings.models(),
-            retrieval_traces=retrieval_traces.models(),
-        )
-    if external_report:
-        warnings.extend(
-            f"La source {error.source} n'a pas répondu à cette requête."
-            for error in external_report.errors
-        )
-
-    retrieved_evidence = evidence
-    semantic_prompt_tokens = 0
-    semantic_completion_tokens = 0
-    coverage_prompt_tokens = 0
-    coverage_completion_tokens = 0
-    semantic_filter: SemanticFilterResult | None = None
-    coverage: CoverageAssessmentResult | None = None
-    publish_progress("evidence_selection")
-    try:
-        semantic_filter, coverage = _run_semantic_filter_and_coverage(
-            settings,
-            question=retrieval_query,
-            axes=planning.plan.axes,
-            evidence=evidence,
-            on_argo_reserved=reserve_llm_request,
-            on_coverage_started=lambda: publish_progress("coverage"),
-            timings=timings,
-            request_timeout_seconds=llm_request_timeout_seconds(),
-        )
-    except ArgoQuotaError:
-        warnings.append(
-            "Le quota fournisseur a été atteint après la recherche ; la sélection locale "
-            "est conservée sans recommencer le pipeline."
-        )
-    except Exception as exc:
-        warnings.append(
-            "Le contrôle sémantique des preuves est indisponible "
-            f"({type(exc).__name__}); les candidats classés localement sont conservés."
-        )
-    else:
-        semantic_prompt_tokens += semantic_filter.prompt_tokens
-        semantic_completion_tokens += semantic_filter.completion_tokens
-        coverage_prompt_tokens += coverage.prompt_tokens
-        coverage_completion_tokens += coverage.completion_tokens
-        if semantic_filter.used_fallback:
-            warnings.append(
-                "Le filtrage sémantique multilingue est partiellement indisponible ; "
-                "les candidats concernés ont été conservés par prudence."
-            )
-        if coverage.used_fallback:
-            warnings.append(
-                "La couverture documentaire n'a pas pu être vérifiée par l'API ; "
-                "la synthèse conserve le classement scientifique local."
-            )
-    semantic_trace_input_count = len(evidence)
-    filtered_evidence = (
-        evidence if semantic_filter is None else semantic_filter.selected_records(evidence)
-    )
-    if intent.is_structured and not filtered_evidence:
-        recall_preserving_evidence = [
-            record for record in evidence if record.evidence_grade in {"A", "B", "unassessed"}
-        ]
-        if recall_preserving_evidence:
-            filtered_evidence = recall_preserving_evidence
-            warnings.append(
-                "Le filtrage sémantique n'a retenu aucun candidat ; conservation prudente "
-                "des preuves locales A/B qualifiées."
-            )
-    if intent.is_structured and (semantic_filter is None or semantic_filter.used_fallback):
-        locally_eligible = [
-            record
-            for record in filtered_evidence
-            if record.evidence_grade in {"A", "B", "unassessed"}
-        ]
-        # Keep C/D only when no better candidate exists so the synthesis layer can
-        # return a precise, topic-aware abstention instead of fabricating an answer.
-        if locally_eligible:
-            filtered_evidence = locally_eligible
-    minimum_candidates_per_axis = 2 if answer_effort is AnswerEffort.DEEP else 1
-    incomplete_coverage_axis_keys = _incomplete_coverage_axis_keys(
-        planning.plan.axes,
-        coverage,
-        semantic_filter,
-        minimum_candidates_per_axis=minimum_candidates_per_axis,
-    )
-    adaptive_coverage_sufficient = not incomplete_coverage_axis_keys
-    needs_follow_up = (
-        effort_budget.max_retrieval_waves > 1
-        and semantic_filter is not None
-        and coverage is not None
-        and (
-            not filtered_evidence
-            or (adaptive_retrieval and not adaptive_coverage_sufficient)
-            or (
-                effort_budget.follow_up_incomplete_axes
-                and not coverage.used_fallback
-                and any(assessment.status != "covered" for assessment in coverage.axes)
-            )
-        )
-    )
-    if needs_follow_up:
-        include_all_follow_up_axes = not filtered_evidence or coverage.used_fallback
-        follow_up_by_axis = _coverage_follow_up_queries(
-            planning.plan.axes,
-            coverage,
-            include_all_axes=include_all_follow_up_axes,
-            target_axis_keys=(
-                None if include_all_follow_up_axes else incomplete_coverage_axis_keys
-            ),
-            exclude_queries=[retrieval_query, *search_queries],
-        )
-        follow_up_queries = list(
-            dict.fromkeys(query for queries in follow_up_by_axis.values() for query in queries)
-        )[: effort_budget.follow_up_query_limit]
-        if follow_up_queries:
-            supplemental_abstract_diagnostics: list[str] = []
-            with (
-                _serialized_chat_retrieval_scope(timing=timings),
-                retrieval_resources.qdrant_wave(settings) as qdrant_client_owner,
-            ):
-                try:
-                    supplemental_abstracts = _timed_chat_retrieval_operation(
-                        search_common_corpus_abstracts,
-                        settings,
-                        query=follow_up_queries[0],
-                        limit=effort_budget.abstract_result_limit,
-                        search_queries=follow_up_queries,
-                        intent_override=intent,
-                        max_query_variants=effort_budget.max_query_variants,
-                        max_vector_query_variants=effort_budget.max_vector_query_variants,
-                        retrieval_resources=retrieval_resources,
-                        retrieval_trace=retrieval_traces,
-                        qdrant_client_owner=qdrant_client_owner,
-                        supplemental=True,
-                        diagnostics=supplemental_abstract_diagnostics,
-                        timing=timings,
-                        timing_stage="supplemental_abstract_search",
-                    )
-                except Exception as exc:
-                    supplemental_abstracts = []
-                    code = _abstract_search_failure_code("supplemental_unhandled", exc)
-                    supplemental_abstract_diagnostics.append(code)
-                    retrieval_traces.add(
-                        "supplemental_abstract_search",
-                        rejection_counts={code: 1},
-                    )
-                    LOGGER.warning(
-                        "supplemental_abstract_search_unhandled error_type=%s",
-                        type(exc).__name__,
-                    )
-                try:
-                    supplemental_full_text = _timed_chat_retrieval_operation(
-                        search_common_corpus_full_text_evidence,
-                        settings,
-                        query=follow_up_queries[0],
-                        article_count=effort_budget.article_count,
-                        search_queries=follow_up_queries,
-                        axis_queries=follow_up_by_axis,
-                        intent_override=intent,
-                        max_query_variants=effort_budget.max_query_variants,
-                        max_vector_query_variants=effort_budget.max_vector_query_variants,
-                        passage_count=effort_budget.passages_per_article,
-                        candidate_chunks_per_article=(effort_budget.candidate_chunks_per_article),
-                        context_radius=effort_budget.context_radius,
-                        retrieval_resources=retrieval_resources,
-                        retrieval_trace=retrieval_traces,
-                        qdrant_client_owner=qdrant_client_owner,
-                        supplemental=True,
-                        timing=timings,
-                        timing_stage="supplemental_full_text_search",
-                    )
-                except Exception as exc:
-                    supplemental_full_text = []
-                    warnings.append(
-                        "La recherche complémentaire dans les textes intégraux est indisponible "
-                        f"({type(exc).__name__}); les abstracts complémentaires sont conservés."
-                    )
-            if supplemental_warning := _abstract_route_warning(
-                message,
-                diagnostics=supplemental_abstract_diagnostics,
-                abstract_result_count=len(supplemental_abstracts),
-                full_text_records=supplemental_full_text,
-                supplemental=True,
-            ):
-                warnings.append(supplemental_warning)
-            expanded_evidence = merge_chat_evidence(
-                [
-                    *(record for record in evidence if record.evidence_level == "full_text"),
-                    *supplemental_full_text,
-                ],
-                [
-                    *(record for record in evidence if record.evidence_level == "abstract"),
-                    *abstract_candidates_to_chat_evidence(supplemental_abstracts),
-                ],
-                query=retrieval_query,
-                limit=effort_budget.evidence_record_limit,
-                intent_override=intent,
-            )
-            expanded_input_count = (
-                sum(record.evidence_level == "full_text" for record in evidence)
-                + len(supplemental_full_text)
-                + sum(record.evidence_level == "abstract" for record in evidence)
-                + len(supplemental_abstracts)
-            )
-            retrieval_traces.add(
-                "evidence_merge",
-                pre_rerank_candidate_count=expanded_input_count,
-                post_rerank_candidate_count=len(expanded_evidence),
-                selected_article_count=len(expanded_evidence),
-                selected_passage_count=sum(len(record.passages) for record in expanded_evidence),
-                **_evidence_level_trace_counts(expanded_evidence),
-                rejection_counts={
-                    "duplicate_or_not_selected": max(
-                        0, expanded_input_count - len(expanded_evidence)
-                    )
-                },
-            )
-            original_signature = [(record.record_id, record.evidence_level) for record in evidence]
-            expanded_signature = [
-                (record.record_id, record.evidence_level) for record in expanded_evidence
-            ]
-            if expanded_signature != original_signature:
-                previous_coverage = coverage
-                try:
-                    second_semantic_filter, second_coverage = _run_semantic_filter_and_coverage(
-                        settings,
-                        question=retrieval_query,
-                        axes=planning.plan.axes,
-                        evidence=expanded_evidence,
-                        on_argo_reserved=reserve_llm_request,
-                        on_coverage_started=lambda: publish_progress("coverage"),
-                        timings=timings,
-                        request_timeout_seconds=llm_request_timeout_seconds(),
-                    )
-                except ArgoQuotaError:
-                    warnings.append(
-                        "Le quota fournisseur a interrompu le contrôle complémentaire ; "
-                        "la première sélection validée est conservée sans reprise du pipeline."
-                    )
-                except Exception as exc:
-                    warnings.append(
-                        "Le second contrôle sémantique est indisponible "
-                        f"({type(exc).__name__}); conservation de la première sélection."
-                    )
-                else:
-                    semantic_prompt_tokens += second_semantic_filter.prompt_tokens
-                    semantic_completion_tokens += second_semantic_filter.completion_tokens
-                    coverage_prompt_tokens += second_coverage.prompt_tokens
-                    coverage_completion_tokens += second_coverage.completion_tokens
-                    if second_semantic_filter.used_fallback:
-                        warnings.append(
-                            "Le second filtrage sémantique n'a pas pu qualifier les nouveaux "
-                            "candidats ; conservation de la première sélection validée."
-                        )
-                    else:
-                        second_filtered_evidence = second_semantic_filter.selected_records(
-                            expanded_evidence
-                        )
-                        if second_filtered_evidence:
-                            semantic_filter = second_semantic_filter
-                            filtered_evidence = second_filtered_evidence
-                            semantic_trace_input_count = len(expanded_evidence)
-                            coverage = (
-                                previous_coverage
-                                if second_coverage.used_fallback
-                                else second_coverage
-                            )
-                        else:
-                            warnings.append(
-                                "Le second filtrage sémantique n'a retenu aucun nouveau candidat ; "
-                                "conservation de la première sélection validée."
-                            )
-
-    evidence = filtered_evidence
-    retrieval_traces.add(
-        "semantic_filter",
-        pre_rerank_candidate_count=semantic_trace_input_count,
-        post_rerank_candidate_count=len(evidence),
-        selected_article_count=len(evidence),
-        selected_passage_count=sum(len(record.passages) for record in evidence),
-        **_evidence_level_trace_counts(evidence),
-        rejection_counts={
-            "semantic_or_scientific_grade_rejected": max(
-                0, semantic_trace_input_count - len(evidence)
-            )
-        },
-    )
-    if not evidence:
-        return _fallback_chatbot_result(
-            message=message,
-            retrieval_query=retrieval_query,
-            evidence=retrieved_evidence,
-            warnings=warnings,
-            diagnostic_code="semantic_filter_empty",
-            started=started,
-            external_result_count=external_count,
-            prompt_tokens=(
-                planning.prompt_tokens + semantic_prompt_tokens + coverage_prompt_tokens
-            ),
-            completion_tokens=(
-                planning.completion_tokens + semantic_completion_tokens + coverage_completion_tokens
-            ),
-            figure_analysis_requested=analyze_figures,
-            answer_effort=answer_effort,
-            timings=timings.models(),
-            retrieval_traces=retrieval_traces.models(),
-        )
-    coverage_notes = _coverage_notes(planning.plan.axes, coverage)
-    if coverage_notes:
-        warnings.append(
-            "La couverture documentaire reste partielle pour : "
-            + ", ".join(
-                axis.label
-                for axis, assessment in zip(planning.plan.axes, coverage.axes, strict=True)
-                if assessment.status != "covered"
-            )
-            + "."
-        )
-
-    figure_analysis_count = 0
-    figure_analysis_duration = 0.0
-    figure_analysis_model: str | None = None
-    if analyze_figures:
-        figure_started = perf_counter()
-        figure_memory = timings.snapshot()
-
-        def publish_figure_analysis() -> None:
-            publish_progress("figure_analysis")
-            if on_figure_analysis is not None:
-                on_figure_analysis()
-
-        try:
-            with OllamaFigureAnalysisService(settings) as figure_service:
-                figure_batch = figure_service.analyze(
-                    retrieval_query,
-                    figure_references_from_chat_records(evidence),
-                    on_analysis_started=publish_figure_analysis,
-                )
-        except FigureAnalysisUnavailable as exc:
-            warnings.append(str(exc))
-        except Exception as exc:
-            warnings.append(
-                "L’analyse locale des figures est indisponible "
-                f"({type(exc).__name__}); la réponse reste fondée sur le texte."
-            )
-        else:
-            evidence = attach_figure_evidence(evidence, figure_batch.admitted)
-            warnings.extend(figure_batch.warnings)
-            figure_analysis_count = len(figure_batch.admitted)
-            figure_analysis_duration = figure_batch.duration_seconds
-            figure_analysis_model = figure_batch.model_name
-        finally:
-            timings.add(
-                "figure_analysis",
-                perf_counter() - figure_started,
-                before=figure_memory,
-            )
-
-    retrieval_traces.add(
-        "llm_context",
-        selected_article_count=len(evidence),
-        selected_passage_count=sum(len(record.passages) for record in evidence),
-        **_evidence_level_trace_counts(evidence),
-    )
-
-    publish_progress("generation")
-    generation_started = perf_counter()
-    generation_memory = timings.snapshot()
-    try:
-        with _chat_llm_client(settings, llm_request_timeout_seconds()) as llm:
-            rag = _evidence_rag_service(
-                llm,
-                answer_effort,
-                settings.argo.scientific_correction_temperature,
-                settings.argo.max_input_characters,
-            )
-            rag.experimental_profile = active_experimental_profile
-            if planning.plan.requires_faceted_answer:
-                answer = rag.answer_faceted(
-                    message,
-                    evidence,
-                    facets=intent.facets,
-                    conversation_history=context,
-                    coverage_notes=coverage_notes,
-                    axis_coverage=(
-                        coverage.axes if coverage is not None and not coverage.used_fallback else ()
-                    ),
-                    axis_candidate_ids=(
-                        {
-                            assessment.axis_key: semantic_filter.eligible_ids_for_axis(
-                                assessment.axis_key
-                            )
-                            for assessment in semantic_filter.axes
-                        }
-                        if semantic_filter is not None
-                        else None
-                    ),
-                    concept_definition=(
-                        planning.plan.concept_definition or planning.plan.interpreted_question
-                    ),
-                    ambiguities=planning.plan.ambiguities,
-                    excluded_concepts=planning.plan.excluded_concepts,
-                    on_argo_reserved=reserve_llm_request,
-                    on_argo_response=on_argo_response,
-                )
-            else:
-                answer = rag.answer(
-                    message,
-                    evidence,
-                    conversation_history=context,
-                    coverage_notes=coverage_notes,
-                    concept_definition=(
-                        planning.plan.concept_definition or planning.plan.interpreted_question
-                    ),
-                    ambiguities=planning.plan.ambiguities,
-                    excluded_concepts=planning.plan.excluded_concepts,
-                    on_argo_reserved=reserve_llm_request,
-                    on_argo_response=on_argo_response,
-                )
-    except ArgoQuotaError:
-        timings.add(
-            "argo_generation",
-            perf_counter() - generation_started,
-            before=generation_memory,
-        )
-        return _fallback_chatbot_result(
-            message=message,
-            retrieval_query=retrieval_query,
-            evidence=evidence,
-            warnings=warnings,
-            diagnostic_code="provider_quota_after_retrieval",
-            started=started,
-            external_result_count=external_count,
-            prompt_tokens=(
-                planning.prompt_tokens + semantic_prompt_tokens + coverage_prompt_tokens
-            ),
-            completion_tokens=(
-                planning.completion_tokens + semantic_completion_tokens + coverage_completion_tokens
-            ),
-            answer_effort=answer_effort,
-            timings=timings.models(),
-            retrieval_traces=retrieval_traces.models(),
-        )
-    except ArgoError as exc:
-        timings.add(
-            "argo_generation",
-            perf_counter() - generation_started,
-            before=generation_memory,
-        )
-        failed_prompt_tokens, failed_completion_tokens, failed_traces = (
-            _argo_failed_generation_usage(exc)
-        )
-        timings.add_tokens(
-            "argo_generation",
-            prompt_tokens=failed_prompt_tokens,
-            completion_tokens=failed_completion_tokens,
-        )
-        return _fallback_chatbot_result(
-            message=message,
-            retrieval_query=retrieval_query,
-            evidence=evidence,
-            warnings=warnings,
-            diagnostic_code=_argo_diagnostic_code(exc),
-            started=started,
-            external_result_count=external_count,
-            prompt_tokens=(
-                planning.prompt_tokens
-                + semantic_prompt_tokens
-                + coverage_prompt_tokens
-                + failed_prompt_tokens
-            ),
-            completion_tokens=(
-                planning.completion_tokens
-                + semantic_completion_tokens
-                + coverage_completion_tokens
-                + failed_completion_tokens
-            ),
-            figure_analysis_requested=analyze_figures,
-            figure_analysis_count=figure_analysis_count,
-            figure_analysis_duration_seconds=figure_analysis_duration,
-            figure_analysis_model=figure_analysis_model,
-            answer_effort=answer_effort,
-            timings=timings.models(),
-            retrieval_traces=retrieval_traces.models(),
-            generation_traces=failed_traces,
-            diagnostic_codes=_argo_diagnostic_codes(exc),
-        )
-    timings.add(
-        "argo_generation",
-        perf_counter() - generation_started,
-        before=generation_memory,
-    )
-    timings.add_tokens(
-        "argo_generation",
-        prompt_tokens=answer.prompt_tokens,
-        completion_tokens=answer.completion_tokens,
-    )
-    sources = chatbot_sources_from_evidence(evidence, answer.cited_evidence_ids, source_database)
-    return ChatbotResult(
-        message=" ".join(message.split()),
-        retrieval_query=retrieval_query,
-        answer_markdown=answer.answer_markdown,
-        sources=sources,
-        warnings=[
-            *warnings,
-            *_generation_quality_warnings(
-                message,
-                getattr(answer, "validation_warning_codes", []),
-            ),
-        ],
-        model=answer.model,
-        local_result_count=sum(record.origin == "local_rag" for record in evidence),
-        external_result_count=external_count,
-        external_enrichment_used=any(source.origin == "external_api" for source in sources),
-        prompt_tokens=(
-            planning.prompt_tokens
-            + semantic_prompt_tokens
-            + coverage_prompt_tokens
-            + answer.prompt_tokens
-        ),
-        completion_tokens=(
-            planning.completion_tokens
-            + semantic_completion_tokens
-            + coverage_completion_tokens
-            + answer.completion_tokens
-        ),
-        duration_seconds=perf_counter() - started,
-        interaction_mode="research",
-        reused_previous_sources=False,
-        facet_drafts=getattr(answer, "facet_drafts", []),
-        figure_analysis_requested=analyze_figures,
-        figure_analysis_count=figure_analysis_count,
-        figure_analysis_duration_seconds=figure_analysis_duration,
-        figure_analysis_model=figure_analysis_model,
-        generation_status=getattr(answer, "generation_status", "generated"),
-        diagnostic_codes=getattr(answer, "validation_warning_codes", []),
-        answer_effort=answer_effort,
-        timings=timings.models(),
-        retrieval_traces=retrieval_traces.models(),
-        generation_traces=getattr(answer, "generation_traces", []),
     )
 
 

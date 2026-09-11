@@ -5,12 +5,12 @@ from __future__ import annotations
 import json
 import unicodedata
 from collections.abc import Callable, Mapping, Sequence
-from typing import Annotated, Any, Literal, Protocol
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from app.llm.argo_client import ArgoProtocolError
-from app.llm.contracts import GenerationMessage, GenerationResponse
+from app.llm.contracts import ReservedGenerationClient as QueryPlanningClient
 from app.retrieval.scientific_intent import (
     ScientificFacet,
     ScientificIntent,
@@ -86,17 +86,6 @@ def _parse_generated_plan(content: str) -> ResearchQueryPlan:
     ):
         cleaned = "\n".join(lines[1:-1]).strip()
     return ResearchQueryPlan.model_validate(_sanitize_generated_payload(json.loads(cleaned)))
-
-
-class QueryPlanningClient(Protocol):
-    def chat(
-        self,
-        messages: Sequence[GenerationMessage | Mapping[str, str]],
-        *,
-        json_schema: Mapping[str, Any] | None = None,
-        max_output_tokens: int | None = None,
-        on_request_reserved: Callable[[], None] | None = None,
-    ) -> GenerationResponse: ...
 
 
 class ResearchAxis(BaseModel):

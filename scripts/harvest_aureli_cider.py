@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import shutil
 import sqlite3
@@ -18,6 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from app.config import load_settings
 from app.corpora import CorpusScope, settings_for_corpus
 from app.database.sqlite import Database
+from app.file_integrity import sha256_file as _sha256_file
 from app.ingestion.embeddings import SentenceTransformerBackend
 from app.updates.aureli import AureliClient, aureli_max_offset
 from app.updates.cleanup import archive_and_purge_rejected_records
@@ -592,14 +592,6 @@ def _backup_database(database: Database, data_dir: Path) -> tuple[Path, Path]:
     )
     print(f"backup=verified sha256={digest}", flush=True)
     return target.resolve(), manifest.resolve()
-
-
-def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        while block := handle.read(8 * 1024 * 1024):
-            digest.update(block)
-    return digest.hexdigest()
 
 
 def _export_run_audit(

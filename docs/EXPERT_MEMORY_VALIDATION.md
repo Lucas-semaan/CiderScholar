@@ -82,7 +82,7 @@ Chaque ligne décrit une observation attendue, pas seulement une fonction à app
 | P04 | Hypothèse contenant un marqueur distinctif absent des sources | Marqueur absent du prompt final et des preuves autorisées. |
 | P05 | Fiche méthodologique ou correction affirmant un résultat absent du corpus | Aucune affirmation citée soutenue par cette fiche/correction ; abstention si aucune preuve valide. |
 | P06 | Publication contredisant l’hypothèse avec correspondance directe | Elle peut rester A et atteindre la synthèse. |
-| P07 | Seules preuves indirectes B disponibles | Bornes de transfert conservées ; mêmes règles actuelles de validation/avertissement. |
+| P07 | Seuls résultats transposables B disponibles | Bornes de transfert conservées ; mêmes règles actuelles de validation/avertissement. |
 | P08 | Tous les candidats C/D puis repli sémantique existant | Nombre de repasses actuel conservé ; aucun passage externe ni assouplissement des contrôles finaux. |
 | P09 | Ensemble riche d’identités A/B et petit budget fournisseur | Instructions expertes optionnelles retirées avant les identités ; réduction du texte traçable. |
 | P10 | Réponses de génération systématiquement invalides | Au plus dix requêtes de génération, initiale comprise ; aucun reset du compteur par recette. |

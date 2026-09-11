@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { DurableJob } from "@/types/api";
 
@@ -21,6 +21,54 @@ function makeJob(state: DurableJob["state"]): DurableJob {
 }
 
 describe("pollDurableJob", () => {
+  afterEach(() => vi.useRealTimers());
+
+  it("releases abort listeners after every completed polling delay", async () => {
+    vi.useFakeTimers();
+    const controller = new AbortController();
+    const add = vi.spyOn(controller.signal, "addEventListener");
+    const remove = vi.spyOn(controller.signal, "removeEventListener");
+    const poll = vi
+      .fn()
+      .mockResolvedValueOnce(makeJob("running"))
+      .mockResolvedValueOnce(makeJob("running"))
+      .mockResolvedValueOnce(makeJob("succeeded"));
+    const polling = pollDurableJob(makeJob("queued"), {
+      poll,
+      onUpdate: vi.fn(),
+      signal: controller.signal,
+    });
+
+    await vi.runAllTimersAsync();
+    await expect(polling).resolves.toMatchObject({ state: "succeeded" });
+    expect(add).toHaveBeenCalledTimes(3);
+    expect(remove).toHaveBeenCalledTimes(3);
+    for (const [event, listener] of add.mock.calls) {
+      expect(remove).toHaveBeenCalledWith(event, listener);
+    }
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("cancels a pending delay immediately without issuing a network request", async () => {
+    vi.useFakeTimers();
+    const controller = new AbortController();
+    const poll = vi.fn();
+    const onUpdate = vi.fn();
+    const polling = pollDurableJob(makeJob("queued"), {
+      poll,
+      onUpdate,
+      signal: controller.signal,
+    });
+    const rejection = expect(polling).rejects.toBe("view closed");
+
+    controller.abort("view closed");
+
+    await rejection;
+    expect(vi.getTimerCount()).toBe(0);
+    expect(poll).not.toHaveBeenCalled();
+    expect(onUpdate).not.toHaveBeenCalled();
+  });
+
   it("stops immediately after a terminal response", async () => {
     const poll = vi.fn().mockResolvedValue(makeJob("succeeded"));
     const wait = vi.fn().mockResolvedValue(undefined);

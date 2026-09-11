@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import csv
-import hashlib
 import json
 import re
 import shutil
@@ -20,6 +19,7 @@ from typing import Any
 from app.config import load_settings
 from app.corpora import CorpusScope, settings_for_corpus
 from app.database.sqlite import Database
+from app.file_integrity import sha256_file as _sha256_file
 from app.updates.scopus_text import (
     ScopusSourceTitlePlan,
     ScopusTextRecord,
@@ -364,14 +364,6 @@ def _write_json(path: Path, payload: Any) -> None:
         json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
-
-
-def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        while chunk := handle.read(1024 * 1024):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 if __name__ == "__main__":

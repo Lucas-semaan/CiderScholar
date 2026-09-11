@@ -5,12 +5,13 @@ from __future__ import annotations
 import json
 import unicodedata
 from collections.abc import Callable, Mapping, Sequence
-from typing import Annotated, Any, Literal, Protocol
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from app.llm.argo_client import ArgoQuotaError
-from app.llm.contracts import GenerationMessage, GenerationResponse
+from app.llm.contracts import GenerationResponse
+from app.llm.contracts import ReservedGenerationClient as SemanticFilterClient
 from app.models.chatbot import ChatEvidenceRecord
 from app.retrieval.evidence_selection import focused_excerpt
 from app.retrieval.query_planning import ResearchAxis
@@ -34,17 +35,6 @@ MAX_FILTER_CANDIDATES = 48
 MAX_FILTER_BATCH_CANDIDATES = 10
 MAX_CANDIDATE_TEXT_CHARACTERS = 1_600
 MAX_FILTER_INPUT_CHARACTERS = 42_000
-
-
-class SemanticFilterClient(Protocol):
-    def chat(
-        self,
-        messages: Sequence[GenerationMessage | Mapping[str, str]],
-        *,
-        json_schema: Mapping[str, Any] | None = None,
-        max_output_tokens: int | None = None,
-        on_request_reserved: Callable[[], None] | None = None,
-    ) -> GenerationResponse: ...
 
 
 class SemanticCandidate(BaseModel):
@@ -377,14 +367,14 @@ class ArgoSemanticEvidenceFilter:
                     "pour l'axe demandé d'après son sens scientifique, jamais par simple présence "
                     "de mots-clés. Reconnais les traductions entre langues, synonymes, acronymes, "
                     "taxonomies, formulations historiques et vocabulaire mécanistique connexe. "
-                    "Applique ce classement générique pour toute requête : A/direct étudie "
+                    "Applique ce classement générique pour toute requête : A/exact étudie "
                     "exactement la matrice, le procédé et le résultat demandés (ou une équivalence "
-                    "explicite). B/supportive apporte un mécanisme réellement applicable mais "
-                    "clairement indirect : étiquette explicitement cette preuve indirecte dans la "
-                    "rationale, notamment si sa matrice diffère. C/peripheral traite une autre "
+                    "explicite). B/transposable apporte un mécanisme réellement applicable avec "
+                    "des bornes explicites dans la rationale, notamment si sa matrice diffère. "
+                    "C/périphérique traite une autre "
                     "matrice, un procédé différent, ou un élément en amont ou en aval; "
-                    "D/irrelevant est hors sujet. Les niveaux C et D ne sont jamais des preuves "
-                    "directes. "
+                    "D/hors sujet est sans rapport utile. Les niveaux C et D ne répondent pas à "
+                    "la question. "
                     "Une correspondance lexicale sans relation entre la matrice, le procédé et le "
                     "résultat est C ou D. N'invente aucun contenu, DOI, auteur, page ou référence. "
                     "N'utilise que les candidate_id fournis, une seule fois chacun, et produis une "

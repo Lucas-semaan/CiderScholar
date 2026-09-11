@@ -20,6 +20,7 @@ from app.models.chatbot import (
 from app.retrieval.coverage_assessment import (
     AxisCoverageAssessment,
     CoverageAssessmentResult,
+    incomplete_coverage_axis_keys,
 )
 from app.retrieval.global_semantic_filter import (
     GlobalSemanticDecision,
@@ -51,7 +52,6 @@ from app.services.workflows import (
     _ChatRetrievalTraceCollector,
     _fallback_chatbot_result,
     _full_text_intermediate_pool_sizes,
-    _incomplete_coverage_axis_keys,
     _initial_retrieval_candidate_limit,
     _query_planning_diagnostic_code,
     acquire_common_full_text_for_chat,
@@ -252,7 +252,7 @@ def test_covered_axis_without_semantic_ab_evidence_still_requires_follow_up() ->
         completion_tokens=0,
     )
 
-    assert _incomplete_coverage_axis_keys(
+    assert incomplete_coverage_axis_keys(
         [axis],
         coverage,
         semantic,
@@ -599,6 +599,7 @@ def test_answer_chatbot_prefers_full_text_over_the_matching_abstract(
 
         def answer(self, _question, records, **_kwargs):
             captured["records"] = records
+            captured["reasoning_wiki"] = self.organizational_reasoning_context
             return SimpleNamespace(
                 answer_markdown="Réponse fondée sur le texte intégral.",
                 cited_evidence_ids=[passage_id],
@@ -631,6 +632,8 @@ def test_answer_chatbot_prefers_full_text_over_the_matching_abstract(
     )
 
     assert [record.evidence_level for record in captured["records"]] == ["full_text"]
+    assert "# Le cœur de raisonnement AsCoCid" in captured["reasoning_wiki"]
+    assert "# Piloter la fermentation et la cuverie" in captured["reasoning_wiki"]
     assert result.answer_markdown == "Réponse fondée sur le texte intégral."
     assert result.sources[0].evidence_level == "full_text"
     assert result.sources[0].page_ranges == ["7-8"]
@@ -990,6 +993,7 @@ def test_answer_chatbot_runs_one_grouped_wave_without_axis_follow_up(
     monkeypatch.setattr(
         "app.services.workflows._semantic_filter_and_coverage",
         fake_filter_and_coverage,
+        raising=False,
     )
     monkeypatch.setattr("app.services.workflows.ArgoClient", FakeArgoClient)
     monkeypatch.setattr("app.services.workflows.ArgoQueryPlanningService", FakePlanningService)
@@ -1101,6 +1105,7 @@ def test_answer_chatbot_does_not_restart_retrieval_after_late_quota(
     monkeypatch.setattr(
         "app.services.workflows._semantic_filter_and_coverage",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(ArgoQuotaError("late quota")),
+        raising=False,
     )
     monkeypatch.setattr(
         "app.services.workflows.CiderEvidenceRagService",
@@ -1493,7 +1498,9 @@ def test_answer_chatbot_uses_one_validated_synthesis_for_multidimensional_resear
         )
         return semantic, coverage
 
-    monkeypatch.setattr("app.services.workflows._semantic_filter_and_coverage", accept_all)
+    monkeypatch.setattr(
+        "app.services.workflows._semantic_filter_and_coverage", accept_all, raising=False
+    )
     monkeypatch.setattr("app.services.workflows.ArgoClient", FakeArgoClient)
     monkeypatch.setattr(
         "app.services.workflows.CiderEvidenceRagService",

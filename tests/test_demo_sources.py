@@ -64,6 +64,33 @@ def test_demo_sources_verify_pdf_metadata_and_page_evidence(tmp_path: Path) -> N
     assert report["source_check_count"] == 4
 
 
+@pytest.mark.parametrize("corrupted", [False, True])
+def test_demo_verification_closes_sqlite_even_when_a_source_is_invalid(
+    tmp_path, monkeypatch, corrupted
+) -> None:
+    database, manifest, pdf = _fixture(tmp_path)
+    if corrupted:
+        pdf.write_bytes(b"modified")
+    connections = []
+    connect = sqlite3.connect
+
+    def tracked_connect(*args, **kwargs):
+        connection = connect(*args, **kwargs)
+        connections.append(connection)
+        return connection
+
+    monkeypatch.setattr(sqlite3, "connect", tracked_connect)
+    if corrupted:
+        with pytest.raises(DemoSourceVerificationError):
+            verify_demo_sources(database, manifest)
+    else:
+        verify_demo_sources(database, manifest)
+
+    assert len(connections) == 1
+    with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+        connections[0].execute("SELECT 1")
+
+
 def test_demo_sources_detect_a_modified_corpus_file(tmp_path: Path) -> None:
     database, manifest, pdf = _fixture(tmp_path)
     pdf.write_bytes(b"modified")

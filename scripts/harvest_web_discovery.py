@@ -13,6 +13,8 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from app.updates.base import BibliographicApiDeferred
+from app.updates.checkpoints import append_jsonl_object as _append_jsonl
+from app.updates.checkpoints import read_jsonl_objects as _jsonl
 from app.updates.harvest import (
     CIDER_BULK_QUERY_WAVES,
     assess_cider_relevance,
@@ -387,23 +389,6 @@ def _seen_results(path: Path) -> set[str]:
         for item in _jsonl(path)
         if item.get("title") and item.get("url")
     }
-
-
-def _jsonl(path: Path) -> list[dict[str, Any]]:
-    if not path.is_file():
-        return []
-    rows: list[dict[str, Any]] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        with suppress(json.JSONDecodeError):
-            value = json.loads(line)
-            if isinstance(value, dict):
-                rows.append(value)
-    return rows
-
-
-def _append_jsonl(path: Path, payload: dict[str, Any]) -> None:
-    with path.open("a", encoding="utf-8", newline="\n") as stream:
-        stream.write(json.dumps(payload, ensure_ascii=False) + "\n")
 
 
 def _load_checkpoint(path: Path) -> dict[str, Any]:

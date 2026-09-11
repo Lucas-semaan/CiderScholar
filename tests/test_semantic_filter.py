@@ -142,11 +142,11 @@ def test_semantic_filter_uses_meaning_and_selects_direct_and_supportive_candidat
     system_prompt = client.calls[0][0][0]["content"]
     assert "jamais par simple présence de mots-clés" in system_prompt
     assert "traductions entre langues" in system_prompt
-    assert "A/direct" in system_prompt
-    assert "B/supportive" in system_prompt
-    assert "C/peripheral" in system_prompt
-    assert "D/irrelevant" in system_prompt
-    assert "Les niveaux C et D ne sont jamais des preuves directes" in system_prompt
+    assert "A/exact" in system_prompt
+    assert "B/transposable" in system_prompt
+    assert "C/périphérique" in system_prompt
+    assert "D/hors sujet" in system_prompt
+    assert "Les niveaux C et D ne répondent pas à la question" in system_prompt
     schema = client.calls[0][1]["json_schema"]
     decision = schema["$defs"]["CandidateSemanticDecision"]
     assert decision["properties"]["candidate_id"]["enum"] == ["fr", "en", "noise"]

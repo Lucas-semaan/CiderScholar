@@ -44,7 +44,10 @@ def record(index=0):
         source_id=f"10.1234/watch-{index}",
         doi=f"10.1234/watch-{index}",
         title=f"Cider fermentation yeast metabolism of apple juice batch {index}",
-        abstract="Cider fermentation with yeast in apple juice: microbiology and organic acid metabolism.",
+        abstract=(
+            "Cider fermentation with yeast in apple juice: microbiology and organic acid "
+            "metabolism."
+        ),
         publication_year=2025,
     )
 

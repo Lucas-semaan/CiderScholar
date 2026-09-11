@@ -30,6 +30,7 @@ from app.services.bibliographic_metadata_enrichment import (
     target_from_row,
 )
 from app.updates.base import BibliographicApiDeferred
+from app.updates.checkpoints import read_jsonl_objects as _jsonl
 from app.updates.clarivate import ClarivateClient
 from app.updates.crossref import CrossrefClient
 from app.updates.elsevier import ElsevierClient
@@ -78,21 +79,6 @@ def _arguments() -> argparse.Namespace:
         help="Back up SQLite and atomically apply accepted, non-conflicting updates.",
     )
     return parser.parse_args()
-
-
-def _jsonl(path: Path) -> list[dict[str, Any]]:
-    if not path.is_file():
-        return []
-    values: list[dict[str, Any]] = []
-    with path.open("r", encoding="utf-8") as handle:
-        for line in handle:
-            try:
-                value = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(value, dict):
-                values.append(value)
-    return values
 
 
 def _append_jsonl(path: Path, value: dict[str, Any]) -> None:

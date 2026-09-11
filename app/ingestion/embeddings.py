@@ -143,6 +143,7 @@ class SentenceTransformerBackend:
             required=self.require_model_manifest if required is None else required,
         )
 
+    @measured("embedding_model_load")
     def _load(self) -> Any:
         if self._model is not None:
             return self._model

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import sqlite3
 from contextlib import closing
@@ -14,6 +13,7 @@ from typing import Any
 from app.config import load_settings
 from app.corpora import CorpusScope, settings_for_corpus
 from app.database.sqlite import Database
+from app.file_integrity import sha256_file as _sha256_file
 from app.ingestion.embeddings import SentenceTransformerBackend
 from app.updates.cleanup import archive_and_purge_rejected_records
 from app.updates.harvest import BibliographicHarvestStore
@@ -156,14 +156,6 @@ def _require_no_running_harvest(database: Database) -> None:
     if rows:
         profiles = ", ".join(str(row["profile"]) for row in rows[:5])
         raise RuntimeError(f"bibliographic harvest is still running: {profiles}")
-
-
-def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        while block := handle.read(8 * 1024 * 1024):
-            digest.update(block)
-    return digest.hexdigest()
 
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:

@@ -69,8 +69,8 @@ DEFAULT_RUBRIC = PairwiseRubric(
         ),
         RubricCriterion(
             name="evidence_quality",
-            low_anchor="Dépend de preuves indirectes, faibles ou contradictoires.",
-            high_anchor="Repose sur plusieurs observations directes et convergentes.",
+            low_anchor="Dépend d'analogies distantes, faibles ou contradictoires.",
+            high_anchor="Repose sur plusieurs observations exactes et convergentes.",
         ),
         RubricCriterion(
             name="cost",

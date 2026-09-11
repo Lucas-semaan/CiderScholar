@@ -8,6 +8,17 @@ import sqlite3
 def add_bibliographic_watch(connection: sqlite3.Connection) -> None:
     """Extend the closed jobs contract without changing existing job data."""
 
+    existing_tables = {
+        str(row[0])
+        for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+    }
+    # Version 31 deliberately repairs databases that only contain the scientific
+    # tables from an interrupted version-30 migration. Such a partial database has
+    # no durable-job contract to rebuild; later startup repairs can still advance
+    # its scientific schema safely.
+    if not {"jobs", "job_events"} <= existing_tables:
+        return
+
     connection.executescript(
         """
         DROP INDEX IF EXISTS idx_jobs_claim;

@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Literal, Protocol
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from app.llm.contracts import DictionaryGenerationClient as SemanticVerificationClient
 from app.llm.validation_cache import ValidationCache, client_identity, content_key
 from app.telemetry import measured
 
@@ -79,17 +80,6 @@ class _VerificationDrafts(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     verifications: list[_VerificationDraft] = Field(default_factory=list, max_length=20)
-
-
-class SemanticVerificationClient(Protocol):
-    def chat(
-        self,
-        messages: list[dict[str, str]],
-        *,
-        json_schema: dict[str, Any] | None = None,
-        temperature: float | None = None,
-        max_output_tokens: int | None = None,
-    ) -> Any: ...
 
 
 class SemanticVerificationError(RuntimeError):
@@ -209,12 +199,18 @@ class ClaimVerifier:
                     },
                 ]
 
-            while (
-                len(batch) > 1
-                and sum(len(item["content"]) for item in messages()) > self.max_input_characters
-            ):
+            def input_size() -> int:
+                return len(
+                    json.dumps(
+                        {"messages": messages(), "json_schema": _RESPONSE_SCHEMA},
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    )
+                )
+
+            while len(batch) > 1 and input_size() > self.max_input_characters:
                 batch.pop()
-            if sum(len(item["content"]) for item in messages()) > self.max_input_characters:
+            if input_size() > self.max_input_characters:
                 raise SemanticVerificationError("claim_context_exceeded")
             response = self.client.chat(
                 messages(), json_schema=_RESPONSE_SCHEMA, temperature=0.0, max_output_tokens=4096

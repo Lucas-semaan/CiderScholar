@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.deep_research.models import ContextualSummaryResult
 from app.jobs.contracts import DeepResearchPayload
+from app.llm.contracts import DictionaryGenerationClient as _GenerationClient
 from app.llm.response_language import (
     output_language_name,
     question_language,
@@ -117,17 +118,6 @@ class ResearchGapAssessor(Protocol):
         question: str,
         evidence: tuple[ContextualSummaryResult, ...],
     ) -> MissingInformationAssessment | None: ...
-
-
-class _GenerationClient(Protocol):
-    def chat(
-        self,
-        messages: list[dict[str, str]],
-        *,
-        json_schema: dict[str, Any] | None = None,
-        temperature: float | None = None,
-        max_output_tokens: int | None = None,
-    ) -> Any: ...
 
 
 _ASSESSMENT_SCHEMA: dict[str, Any] = {

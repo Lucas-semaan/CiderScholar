@@ -7,7 +7,7 @@ import os
 import shutil
 import sqlite3
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from threading import Event, Thread
@@ -343,7 +343,7 @@ def _worker_rss_bytes(pid: int | None) -> int | None:
 
 def _corpus_check(settings: Settings) -> dict[str, str]:
     try:
-        with sqlite3.connect(settings.paths.common_database_path) as connection:
+        with closing(sqlite3.connect(settings.paths.common_database_path)) as connection:
             articles = int(connection.execute("SELECT COUNT(*) FROM articles").fetchone()[0])
             chunks = int(connection.execute("SELECT COUNT(*) FROM chunks").fetchone()[0])
     except (OSError, sqlite3.Error, TypeError):

@@ -1154,6 +1154,9 @@ def test_evidence_rag_uses_full_text_passages_and_renders_exact_pages() -> None:
             assert payload["documentary_coverage_notes"] == [
                 "Axe « mécanismes » : couverture documentaire partial."
             ]
+            assert payload["organizational_reasoning"] == (
+                "Cadre wiki : distinguer la mesure, le mécanisme et la décision."
+            )
             assert (
                 "contraintes de prudence, pas des preuves scientifiques" in (messages[0]["content"])
             )
@@ -1183,7 +1186,11 @@ def test_evidence_rag_uses_full_text_passages_and_renders_exact_pages() -> None:
                 )
             )
 
-    result = CiderEvidenceRagService(FakeClient()).answer(
+    service = CiderEvidenceRagService(FakeClient())
+    service.organizational_reasoning_context = (
+        "Cadre wiki : distinguer la mesure, le mécanisme et la décision."
+    )
+    result = service.answer(
         "Que montre l'article sur la température ?",
         [record],
         coverage_notes=["Axe « mécanismes » : couverture documentaire partial."],

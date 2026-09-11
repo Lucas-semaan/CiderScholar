@@ -9,13 +9,14 @@ DRS-010 — filters summaries below the relevance threshold so that a rejected
 from __future__ import annotations
 
 import json
-from typing import Any, Literal, Protocol
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.corpora import CorpusScope
 from app.deep_research.models import ContextualEvidenceGate, ContextualSummaryResult
 from app.deep_research.retrieval import DeepResearchFragmentHit
+from app.llm.contracts import DictionaryGenerationClient as _ArgoGenerationProtocol
 
 # ---------------------------------------------------------------------------
 # Maximum number of fragments sent to ARGO for contextual summarisation.
@@ -92,17 +93,6 @@ _SYSTEM_PROMPT = (
     "Réponds uniquement avec l'objet JSON demandé. "
     "N'invente aucune donnée, DOI, auteur ou page absents du fragment fourni."
 )
-
-
-class _ArgoGenerationProtocol(Protocol):
-    def chat(
-        self,
-        messages: list[dict[str, str]],
-        *,
-        json_schema: dict[str, Any] | None = None,
-        temperature: float | None = None,
-        max_output_tokens: int | None = None,
-    ) -> Any: ...
 
 
 # ---------------------------------------------------------------------------

@@ -60,7 +60,7 @@ le guide avec sa date et sa provenance.
 | Élément | Point d’appui vérifié | Conséquence pour l’implémentation |
 |---|---|---|
 | Orchestration chatbot | `app/services/workflows.py::answer_chatbot` et `_answer_chatbot` | Ajouter des services dédiés ; ne pas dupliquer ce pipeline volumineux. |
-| Ancien chemin par axes | `_answer_chatbot_axis_legacy` dans le même fichier | Lisibilité historique seulement ; ne pas le choisir comme cible. |
+| Ancien chemin par axes | Retiré du code le 10 septembre 2026 après vérification de l'absence d'appel ; conservé dans l'historique Git | Les structures de migration et les services d'évaluation encore utilisés restent disponibles. |
 | Préparation hypothétique | `app/retrieval/hypothesis_planning.py::ArgoHypothesisPlanningService` | Point d’insertion des synonymes et contraintes de recherche. |
 | Intention et vocabulaire | `app/retrieval/scientific_intent.py::analyze_scientific_intent` | Extraire progressivement les données lexicales ; conserver les algorithmes Python. |
 | Filtre global | `app/retrieval/global_semantic_filter.py` | Tracer décisions par candidat et adapter les instructions sans affaiblir les contrôles. |

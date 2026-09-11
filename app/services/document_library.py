@@ -13,7 +13,7 @@ from threading import Lock
 from typing import Any, Literal
 
 from app.database.sqlite import Database
-from app.updates.models import normalize_doi
+from app.updates.models import verified_normalized_doi as _verified_doi
 
 DocumentAvailability = Literal["all", "full_text", "abstract_only", "metadata_only"]
 
@@ -199,18 +199,6 @@ def _load_rows(database: Database) -> tuple[list[dict[str, Any]], list[dict[str,
             article["chunk_count"] = chunk_count
             article["indexed_chunk_count"] = indexed_chunk_count
     return notice_rows, article_rows
-
-
-def _verified_doi(value: object) -> str | None:
-    """Accept only a complete, bare DOI that normalizes without correction."""
-
-    if not isinstance(value, str):
-        return None
-    cleaned = value.strip().casefold()
-    normalized = normalize_doi(cleaned)
-    if normalized is None or normalized != cleaned:
-        return None
-    return normalized
 
 
 def _abstract_document(record: dict[str, Any], article: dict[str, Any] | None) -> dict[str, Any]:

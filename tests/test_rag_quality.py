@@ -262,21 +262,24 @@ def test_revision_rolls_back_and_covers_metadata_and_exclusions(settings):
     before = _chat_retrieval_corpus_fingerprint(settings)
     with closing(database.connect()) as connection:
         connection.execute(
-            "INSERT INTO articles(id,sha256,title,pdf_path,validation_status,source) VALUES ('1', ?, 'Study', 'test.pdf', 'validated', 'local')",
+            "INSERT INTO articles(id,sha256,title,pdf_path,validation_status,source) "
+            "VALUES ('1', ?, 'Study', 'test.pdf', 'validated', 'local')",
             ("a" * 64,),
         )
         connection.rollback()
     assert _chat_retrieval_corpus_fingerprint(settings) == before
     with closing(database.connect()) as connection, connection:
         connection.execute(
-            "INSERT INTO articles(id,sha256,title,pdf_path,validation_status,source) VALUES ('1', ?, 'Study', 'test.pdf', 'validated', 'local')",
+            "INSERT INTO articles(id,sha256,title,pdf_path,validation_status,source) "
+            "VALUES ('1', ?, 'Study', 'test.pdf', 'validated', 'local')",
             ("a" * 64,),
         )
     inserted = _chat_retrieval_corpus_fingerprint(settings)
     assert inserted != before
     with closing(database.connect()) as connection, connection:
         connection.execute(
-            "UPDATE articles SET abstract='Current original abstract', authors='[\"Current author\"]' WHERE id='1'"
+            "UPDATE articles SET abstract='Current original abstract', "
+            "authors='[\"Current author\"]' WHERE id='1'"
         )
     assert _chat_retrieval_corpus_fingerprint(settings) != inserted
     source = record(text="Stale cached text")
@@ -285,6 +288,7 @@ def test_revision_rolls_back_and_covers_metadata_and_exclusions(settings):
     assert hydrated.authors == ["Current author"]
     with closing(database.connect()) as connection, connection:
         connection.execute(
-            "INSERT INTO article_retrieval_exclusions(article_id,reason) VALUES ('1','Excluded explicitly')"
+            "INSERT INTO article_retrieval_exclusions(article_id,reason) "
+            "VALUES ('1','Excluded explicitly')"
         )
     assert rehydrate_records(settings, [source]) == []

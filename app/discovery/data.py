@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import csv
-import hashlib
 import shutil
 from datetime import UTC, datetime
 from pathlib import Path
@@ -13,6 +12,7 @@ from uuid import UUID, uuid4
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.database.sqlite import Database
+from app.file_integrity import sha256_file
 
 
 class FermentationPoint(BaseModel):
@@ -158,14 +158,11 @@ class ExperimentalDatasetImporter:
         transformations: list[DatasetTransformation] | None = None,
     ) -> ExperimentalDatasetManifest:
         source = Path(path)
-        raw_sha256 = hashlib.sha256(source.read_bytes()).hexdigest()
+        raw_sha256 = sha256_file(source)
         dataset = load_experimental_dataset(source)
         destination = self.storage_root / raw_sha256 / f"raw{source.suffix.lower()}"
         destination.parent.mkdir(parents=True, exist_ok=True)
-        if (
-            destination.exists()
-            and hashlib.sha256(destination.read_bytes()).hexdigest() != raw_sha256
-        ):
+        if destination.exists() and sha256_file(destination) != raw_sha256:
             raise RuntimeError("immutable experimental raw-file collision")
         if not destination.exists():
             shutil.copyfile(source, destination)

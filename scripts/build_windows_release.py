@@ -208,7 +208,7 @@ def _smoke_test_runtime(runtime: Path, application: Path) -> None:
 def _copy_application(staging: Path) -> None:
     application = staging / "application"
     application.mkdir()
-    for directory in ("app", "scripts"):
+    for directory in ("app", "scripts", "wiki"):
         shutil.copytree(
             PROJECT_ROOT / directory,
             application / directory,

@@ -2,22 +2,16 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import sqlite3
+from contextlib import closing
 from pathlib import Path
+
+from app.file_integrity import sha256_file as _sha256
 
 
 class DemoSourceVerificationError(RuntimeError):
     """A versioned demonstration source no longer matches the local corpus."""
-
-
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        while block := handle.read(1024 * 1024):
-            digest.update(block)
-    return digest.hexdigest()
 
 
 def verify_demo_sources(database_path: Path, manifest_path: Path) -> dict[str, object]:
@@ -37,7 +31,7 @@ def verify_demo_sources(database_path: Path, manifest_path: Path) -> dict[str, o
         )
 
     source_checks: list[dict[str, object]] = []
-    with sqlite3.connect(database_path) as connection:
+    with closing(sqlite3.connect(database_path)) as connection:
         connection.row_factory = sqlite3.Row
         for question in questions:
             if not isinstance(question, dict) or not isinstance(question.get("sources"), list):

@@ -55,7 +55,7 @@ Une introduction est utile lorsqu'elle accomplit au moins une fonction scientifi
 - délimiter la matrice, l'étape du procédé, les conditions et le résultat étudié ;
 - distinguer deux phénomènes voisins qu'il serait dangereux de confondre ;
 - fournir le cadre mécanistique indispensable à la lecture des résultats ;
-- distinguer preuve directe, mécanisme plausible et analogie ;
+- distinguer résultat sur matrice exacte, mécanisme plausible et analogie ;
 - annoncer une lacune documentaire structurante.
 
 Toute affirmation factuelle de l'introduction doit être reliée à une preuve fournie à ARGO. Une
@@ -97,7 +97,7 @@ questions envoyées à CiderScholar.
 | Q7 | Souches de *S. cerevisiae* et composés volatils | effet souche ; familles de volatils ; conditions de fermentation ; interactions matrice × souche ; reproductibilité |
 | Q8 | Fermentation malolactique | transformation malique/lactique ; acidité ; arômes ; microorganismes ; stabilité et compromis |
 | Q9 | Limitation des amines biogènes | précurseurs ; microorganismes ; conditions ; prévention ; suivi ; prudence sanitaire |
-| Q10 | Grain, chauffe et âge du bois | propriétés du bois ; extraction et réactions ; oxygénation ; effets sensoriels ; preuve directe versus analogie |
+| Q10 | Grain, chauffe et âge du bois | propriétés du bois ; extraction et réactions ; oxygénation ; effets sensoriels ; matrice exacte versus analogie |
 | Q11 | Micro-oxygénation du Calvados | dose et durée ; ellagitanins ; couleur ; arômes ; oxydation ; preuve Calvados directe |
 | Q12 | Diagnostic différentiel des troubles | hypothèses concurrentes ; tests orthogonaux ; témoins ; séquence décisionnelle ; interprétation causale |
 
@@ -215,7 +215,7 @@ Ne jamais changer récupération et génération dans le même candidat.
 - `I-UNSOURCED` : définition ou fait non soutenu ;
 - `I-SCOPE` : matrice, procédé ou temporalité mal délimités ;
 - `I-MECHANISM` : mécanisme supposé présenté comme établi ;
-- `I-ANALOGY` : preuve indirecte non signalée ;
+- `I-ANALOGY` : analogie non signalée ;
 - `I-DUPLICATE` : introduction répétée dans le corps ;
 - `I-DISPROPORTIONATE` : introduction trop longue ;
 - `I-DECORATIVE` : préambule exact mais inutile.
@@ -270,7 +270,7 @@ Mesures séparées :
 - pourcentage d'axes couverts ;
 - affirmations distinctes et étayées ;
 - affirmations non étayées ;
-- proportion de preuves directes ;
+- proportion de résultats sur la matrice exacte ;
 - citations traçables ;
 - longueur en mots ;
 - prompt et completion tokens ;

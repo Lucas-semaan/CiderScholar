@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import shutil
 import uuid
 import zipfile
@@ -17,6 +16,7 @@ from app.corpus_packages.builder import build_corpus_package
 from app.corpus_packages.installer import CorpusInstallError, safe_archive_destination
 from app.corpus_packages.models import CorpusManifest
 from app.corpus_packages.publisher import archive_published_package
+from app.file_integrity import HASH_BLOCK_SIZE, sha256_file
 from app.services.corpus_updates import activate_prepared_common_corpus
 
 
@@ -67,7 +67,7 @@ def rollback_maintenance_backup(
     version = Path(backup.version_directory).resolve()
     manifest = CorpusManifest.model_validate_json((version / "manifest.json").read_bytes())
     archive_path = version / manifest.archive.filename
-    if hashlib.sha256(archive_path.read_bytes()).hexdigest() != backup.archive_sha256:
+    if sha256_file(archive_path) != backup.archive_sha256:
         raise CorpusInstallError("Le hash de la sauvegarde de rollback est invalide.")
     # Keep the extraction path short for the same Windows path-budget reason as
     # the immutable package build above.  UUIDs retain collision resistance;
@@ -81,15 +81,18 @@ def rollback_maintenance_backup(
             if set(archive.namelist()) != set(expected):
                 raise CorpusInstallError("La sauvegarde contient des artefacts inattendus.")
             for name, artifact in expected.items():
-                payload = archive.read(name)
-                if (
-                    len(payload) != artifact.size_bytes
-                    or hashlib.sha256(payload).hexdigest() != artifact.sha256
-                ):
+                member = archive.getinfo(name)
+                if member.file_size != artifact.size_bytes:
                     raise CorpusInstallError(f"Artefact de rollback invalide : {name}")
                 destination = safe_archive_destination(extracted, name)
                 destination.parent.mkdir(parents=True, exist_ok=True)
-                destination.write_bytes(payload)
+                with archive.open(member) as source, destination.open("wb") as target:
+                    shutil.copyfileobj(source, target, length=HASH_BLOCK_SIZE)
+                if (
+                    destination.stat().st_size != artifact.size_bytes
+                    or sha256_file(destination) != artifact.sha256
+                ):
+                    raise CorpusInstallError(f"Artefact de rollback invalide : {name}")
         swap = activate_prepared_common_corpus(
             settings,
             extracted,

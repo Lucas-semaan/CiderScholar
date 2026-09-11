@@ -312,14 +312,14 @@ def apply_reviewed_audit(
     candidates = audit.get("candidates")
     if not isinstance(expected_fingerprint, str) or not isinstance(candidates, list):
         raise ValueError("audit must contain database_fingerprint and candidates")
-    with sqlite3.connect(
-        f"file:{database_path.resolve().as_posix()}?mode=ro", uri=True
+    with closing(
+        sqlite3.connect(f"file:{database_path.resolve().as_posix()}?mode=ro", uri=True)
     ) as read_only:
         if _article_fingerprint(read_only) != expected_fingerprint:
             raise RuntimeError("articles changed since the audit; generate and review a new audit")
     backup = _snapshot_database(database_path, backup_dir)
     applied: list[dict[str, object]] = []
-    with sqlite3.connect(database_path) as connection:
+    with closing(sqlite3.connect(database_path)) as connection, connection:
         connection.row_factory = sqlite3.Row
         connection.execute("BEGIN IMMEDIATE")
         try:
@@ -487,7 +487,7 @@ def apply_terra_reviews(
     ]
     prepared: list[dict[str, object]] = []
     uri = f"file:{database_path.resolve().as_posix()}?mode=ro"
-    with sqlite3.connect(uri, uri=True) as connection:
+    with closing(sqlite3.connect(uri, uri=True)) as connection:
         connection.row_factory = sqlite3.Row
         for review in accepted:
             record_id = str(review["record_id"])
@@ -603,7 +603,7 @@ def apply_terra_reviews(
         }
     backup = _snapshot_database(database_path, backup_dir)
     applied: list[dict[str, object]] = []
-    with sqlite3.connect(database_path) as connection:
+    with closing(sqlite3.connect(database_path)) as connection, connection:
         connection.execute("BEGIN IMMEDIATE")
         try:
             for update in prepared:

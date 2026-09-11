@@ -12,6 +12,7 @@ from app.updates.models import (
     integer_or_none,
     normalize_doi,
 )
+from app.updates.models import author_names as _authors
 
 
 class DoajClient(OfficialBibliographicClient):
@@ -80,17 +81,6 @@ def _doi(value: object) -> str | None:
         if doi:
             return doi
     return None
-
-
-def _authors(value: object) -> list[str]:
-    if not isinstance(value, list):
-        return []
-    names = [
-        name
-        for author in value
-        if isinstance(author, dict) and (name := clean_text(author.get("name"))) is not None
-    ]
-    return list(dict.fromkeys(names))
 
 
 def _url(value: object, doi: str | None) -> str | None:

@@ -44,7 +44,10 @@ def test_new_database_and_second_initialization_preserve_import(
     with database.read_session() as session:
         connection = session.connection
         assert _tables(connection) >= EXPERT_TABLES
-        assert connection.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == 35
+        assert (
+            connection.execute("SELECT MAX(version) FROM schema_version").fetchone()[0]
+            == migrations.CURRENT_SCHEMA_VERSION
+        )
         assert connection.execute("SELECT COUNT(*) FROM expert_releases").fetchone()[0] == 1
         assert connection.execute("SELECT COUNT(*) FROM expert_active_release").fetchone()[0] == 1
         assert connection.execute("PRAGMA foreign_key_check").fetchall() == []

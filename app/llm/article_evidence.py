@@ -8,17 +8,18 @@ import re
 import unicodedata
 from collections.abc import Mapping, Sequence
 from time import perf_counter
-from typing import Any, Protocol
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from app.config import Settings
 from app.database.sqlite import Database
+from app.llm.contracts import GenerationClient as EvidenceChatClient
 from app.llm.contracts import (
     GenerationMetrics,
-    GenerationResponse,
 )
 from app.models.evidence import ArticleEvidence
+from app.retrieval.evidence_selection import exact_sentence_units
 from app.retrieval.hierarchical_index import SqliteHierarchicalIndex
 from app.retrieval.lexical_search import STOPWORDS, TOKEN_PATTERN
 
@@ -141,17 +142,6 @@ class EvidenceSourceValidationError(EvidenceExtractionError):
     """Generated evidence does not point exactly to supplied SQLite sources."""
 
 
-class EvidenceChatClient(Protocol):
-    def chat(
-        self,
-        messages: Sequence[Mapping[str, str]],
-        *,
-        json_schema: Mapping[str, Any] | None = None,
-        temperature: float | None = None,
-        max_output_tokens: int | None = None,
-    ) -> GenerationResponse: ...
-
-
 class SelectedPassage(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -207,12 +197,6 @@ def _terms(value: str) -> frozenset[str]:
         for token in TOKEN_PATTERN.findall(_normalized_text(value))
         if len(token) >= 2 and token not in STOPWORDS
     )
-
-
-def _jaccard(left: frozenset[str], right: frozenset[str]) -> float:
-    if not left or not right:
-        return 0.0
-    return len(left.intersection(right)) / len(left.union(right))
 
 
 def _is_methods(section: str | None) -> bool:
@@ -393,9 +377,12 @@ class EvidencePassageSelector:
             ):
                 deferred_roles.append(candidate)
                 continue
-            candidate_terms = _terms(candidate.text)
+            # Lexical similarity cannot establish scientific redundancy: changing
+            # only a negation, value or condition may reverse the result. Apply the
+            # same conservative rule used immediately before final synthesis.
+            candidate_sentences = exact_sentence_units(candidate.text)
             if any(
-                _jaccard(candidate_terms, _terms(existing.text)) >= config.near_duplicate_threshold
+                candidate_sentences and candidate_sentences <= exact_sentence_units(existing.text)
                 for existing in chosen
             ):
                 deferred_duplicates.append(candidate)

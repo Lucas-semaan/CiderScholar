@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-import hashlib
 from pathlib import Path
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from app.file_integrity import sha256_file as file_sha256
 
 CiderQASplit = Literal["development", "validation", "final_test"]
 CiderQAPurpose = Literal["development", "validation", "final_test"]
@@ -138,14 +139,6 @@ class CiderQAManifest(BaseModel):
 
     def split_file(self, split: CiderQASplit) -> CiderQASplitFile:
         return getattr(self, split)
-
-
-def file_sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def load_ciderqa_split(path: str | Path) -> CiderQASplitDataset:

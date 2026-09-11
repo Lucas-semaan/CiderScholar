@@ -216,7 +216,7 @@ Les paragraphes historiques ci-dessus qui décrivent des axes ou une vague compl
 Si un fragment A ou B d’un texte intégral est retenu, le sélecteur peut rechercher dans le même
 article des passages complémentaires bornés : voisins, résultats, méthodes/conditions et
 discussion/limites. Chaque passage conserve sa page et son rôle contextuel. Cette expansion améliore
-la compréhension de l’article mais ne transforme pas un passage périphérique en preuve directe.
+la compréhension de l’article mais ne transforme pas un passage périphérique en résultat de niveau A.
 
 ## Trace de génération scientifique
 

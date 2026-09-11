@@ -96,7 +96,22 @@ def test_hypothesis_planner_builds_adaptive_non_axis_grouped_queries() -> None:
         "apple pre-press holding phenolic compounds",
     ]
     assert client.options[0]["json_schema"]["properties"]["verification_needs"]["maxItems"] == 3
+    schema = client.options[0]["json_schema"]
+    assert schema["properties"]["interpreted_question"]["maxLength"] == 2_000
+    assert schema["$defs"]["VerificationNeed"]["properties"]["claim_to_verify"]["maxLength"] == 500
     assert "ni des axes de travail" in client.messages[0][0]["content"]
+
+
+def test_hypothesis_planner_uses_wiki_only_as_reasoning_context() -> None:
+    client = _Client([_payload()])
+    ArgoHypothesisPlanningService(client).plan(
+        "Quels effets le cuvage a-t-il avant pressurage ?",
+        reasoning_context="Cadre local : distinguer rendement, qualité et risque.",
+    )
+
+    user_payload = json.loads(client.messages[0][1]["content"])
+    assert user_payload["organizational_reasoning"].startswith("Cadre local")
+    assert "n'est ni une preuve scientifique" in client.messages[0][0]["content"]
 
 
 def test_hypothesis_planner_rejects_unverified_numbers_after_one_correction() -> None:

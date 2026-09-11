@@ -204,7 +204,11 @@ export function BibliographicWatchCard() {
         </Badge>
       </CardHeader>
       <CardBody className="space-y-5">
-        {remote.data.suspended_reason && <p role="status" className="text-sm text-amber-800">{remote.data.suspended_reason}</p>}
+        {remote.data.suspended_reason && (
+          <p role="status" className="text-sm text-amber-800">
+            {remote.data.suspended_reason}
+          </p>
+        )}
         <WatchForm
           key={JSON.stringify(configuration)}
           configuration={configuration}

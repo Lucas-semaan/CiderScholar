@@ -6,13 +6,14 @@ import hashlib
 import json
 import re
 from pathlib import Path
-from typing import Any, Literal, Protocol
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.corpora import CorpusScope
 from app.deep_research.citations import CitationSourceFragment
 from app.jobs.contracts import DeepResearchPayload
+from app.llm.contracts import DictionaryGenerationClient as AtomicClaimClient
 from app.llm.response_language import (
     output_language_name,
     question_language,
@@ -123,17 +124,6 @@ class _AtomicClaimDrafts(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     claims: list[_AtomicClaimDraft] = Field(default_factory=list, max_length=20)
-
-
-class AtomicClaimClient(Protocol):
-    def chat(
-        self,
-        messages: list[dict[str, str]],
-        *,
-        json_schema: dict[str, Any] | None = None,
-        temperature: float | None = None,
-        max_output_tokens: int | None = None,
-    ) -> Any: ...
 
 
 class AtomicClaimExtractionError(RuntimeError):

@@ -387,6 +387,27 @@ abstract de la base documentaire. Une référence qui ne possède ni texte inté
 pas faussement appelée `Abstract only` : elle demeure une notice d'acquisition séparée jusqu'à
 l'obtention d'un contenu scientifique.
 
+### 3.6 Séparer le wiki de raisonnement et les sources RAG
+
+Instruction utilisateur explicite et durable du 10 septembre 2026 : les sources denses, fréquemment
+consultées et qui décrivent la manière de raisonner sur le domaine sont distillées dans un wiki local
+versionné. Ce wiki contient notamment les cadres de décision, les distinctions, les compromis, les cas
+frontières et les interprétations stratégiques. Le chatbot charge son cœur pour toute question
+scientifique cidricole acceptée, puis un petit nombre de pages thématiques déterminées par la question.
+Le contexte est borné et son empreinte participe aux clés de cache concernées.
+
+Le wiki oriente l'interprétation, la formulation des hypothèses de recherche et l'organisation de la
+réponse, mais ne constitue jamais une preuve scientifique. Chaque affirmation affichée reste fondée sur
+les passages persistés et validés du corpus SQLite. Une contradiction documentaire ne doit pas être
+masquée par le wiki : elle reste pertinente pour le retrieval et déclenche une revue de la page concernée.
+
+Les sources rares ou utiles seulement dans certaines situations restent dans le RAG : spécifications
+détaillées, valeurs et seuils, protocoles complets, documents réglementaires, décisions historiques,
+résultats particuliers et connaissances externes de niche. Leur absence du wiki n'est jamais interprétée
+comme une absence du corpus. Pour les fiches AsCoCid, conserver l'empreinte du document, un repère local
+dans l'original et les réserves documentaires ; ne pas présenter une distillation éditoriale comme une
+validation experte sans événement de revue lié à la version exacte.
+
 ## 4. Rechercher et classer les preuves pour une question
 
 ### 4.1 Comprendre l’intention avant le retrieval
@@ -443,18 +464,18 @@ Exemples validés :
 Un terme commun, une similarité générale ou une mention incidente de la matrice ne suffit pas. Le
 reranking porte sur la combinaison `matrice + procédé/mécanisme + résultat + conditions`.
 
-### 4.3 Niveaux de preuve A à D
+### 4.3 Niveaux de pertinence A à D
 
 Attribuer les niveaux relativement à chaque question ou axe :
 
-- `A — direct` : matrice, procédé et résultat correspondent directement ;
-- `B — supportive` : mécanisme ou méthode transférable, avec différence explicitement bornée ;
+- `A — exact` : matrice, procédé et résultat correspondent à la question ;
+- `B — transposable` : mécanisme ou méthode applicable, avec différence explicitement bornée ;
 - `C — peripheral` : contexte utile mais ne répond pas à l’effet demandé ;
 - `D — irrelevant` : hors sujet ou homonyme.
 
 Les niveaux A et B peuvent alimenter la synthèse. C et D peuvent aider au diagnostic du retrieval mais
-ne deviennent pas des preuves directes. Sans preuve A, la réponse doit annoncer la portée indirecte ou
-s’abstenir ; elle ne comble pas la lacune avec une analogie.
+ne répondent pas à la question. Sans niveau A, la réponse nomme la matrice et les bornes de
+transposition du niveau B, ou s’abstient ; elle ne comble pas la lacune avec une analogie.
 
 Le texte intégral ne prime sur un abstract que s’il est au moins aussi pertinent. Un abstract A peut
 donc précéder un texte intégral B ou C. À pertinence comparable, le texte intégral paginé reste
@@ -591,7 +612,7 @@ proposés par le planificateur, même lorsque le nombre maximal d'axes est déj�
 s'applique à toute question et à tout domaine : aucune liste d'agents, de procédés ou de substances
 n'est codée comme exception de génération. Un élément précis, comme la bentonite dans le collage des
 jus, sert uniquement de cas de non-régression pour cette règle générale. Si le corpus contient des
-preuves directes sur une dimension prioritaire, son absence de la synthèse est un défaut de
+résultats de niveau A sur une dimension prioritaire, leur absence de la synthèse est un défaut de
 planification, de retrieval ou d'assemblage, pas une lacune documentaire. Lorsque le nombre minimal
 d'affirmations distinctes défini par l'effort est déjà validé dans les axes, toute récupération qui
 fait repasser l'assemblage sous ce seuil déclenche une unique relance fondée sur les mêmes preuves ou
@@ -690,7 +711,8 @@ Le chemin de production suit désormais ce contrat vérifiable :
    dimensions explicitement demandées restent obligatoires même en mode concis. La brièveté réduit le
    nombre d'affirmations finales, jamais le niveau de validation.
 3. Une **seule vague groupée** interroge localement l'original et l'hypothèse pour le dense, puis
-   l'original et les requêtes courtes des vérifications pour le lexical. Les variantes partagent la
+   l'original, les requêtes courtes des vérifications et une contradiction par besoin pour le lexical.
+   Les variantes partagent la
    session SQLite, l'encodage est groupé, les collections réutilisent une seule ouverture Qdrant, puis
    l'union dédupliquée subit une fusion et un reranking globaux. Aucun besoin ne devient une unité de
    recherche successive. Pour réduire le coût des variantes denses sans réduire la vague, la première
@@ -714,16 +736,32 @@ Le chemin de production suit désormais ce contrat vérifiable :
 6. Argo qualifie globalement les candidats A à D par rapport à la question complète et aux besoins de
    vérification. Une contradiction qui étudie directement la question reste A ; elle n'est pas
    rejetée parce qu'elle contredit l'hypothèse. Ce filtre n'évalue aucune couverture et ne déclenche
-   aucune nouvelle recherche.
-7. Argo produit enfin une synthèse unique à partir des seuls passages SQLite retenus. Chaque
+   aucune nouvelle recherche. Ce contrôle est obligatoire, travaille par lots séquentiels de dix
+   candidats au maximum et respecte aussi la taille du message fournisseur. Un verdict C ou D valide
+   reste un rejet scientifique valide. Chaque lot terminé est mis en cache par question, preuves,
+   modèle et version du validateur ; une reprise ne rejoue que les lots manquants. Une erreur
+   d'authentification, de quota, de délai, de contexte ou de JSON produit un état technique reprenable
+   et aucune synthèse ne contourne le filtre.
+7. Avant la génération, les passages strictement redondants sont regroupés au sein d'un même article.
+   Chaque résultat, condition, contradiction et limite distincts est conservé ; une similarité seule
+   ne peut jamais supprimer une contradiction. Les exclusions pour redondance sont tracées et chaque
+   preuve finalement transmise doit être exploitable et citée. Les extraits restent verbatim, centrés
+   sur l'information utile, avec leur contexte et leur provenance.
+8. Argo produit enfin une synthèse unique à partir des seuls passages SQLite retenus. Chaque
    affirmation cite un identifiant de preuve autorisé ; valeurs numériques, causalité, pages,
    métadonnées, langue et pertinence A/B repassent par les validateurs applicatifs. Une lacune donne
    une abstention localisée ou `partial_generated`, jamais une recherche implicite ni une affirmation
-   complétée par la mémoire du modèle.
+   complétée par la mémoire du modèle. Les affirmations atomiques des résultats, mécanismes,
+   définitions et limitations sont comparées uniquement à leurs passages cités sur l'implication, la
+   négation, la population ou matrice, les conditions, la temporalité et les unités. Les éléments non
+   étayés sont retirés ou corrigés, puis la réponse assemblée est revalidée.
+9. Une relance conversationnelle recharge abstracts, passages et métadonnées depuis SQLite, applique
+   le budget de l'effort demandé et repasse par le filtre obligatoire. Une décision n'est réutilisée
+   que si la question, les preuves, le modèle et les versions du pipeline sont identiques.
 
 Le retriever et le reranker peuvent être spécialisés progressivement hors ligne. CiderQA
 `development` fournit les positifs traçables ; les décisions A–D validées fournissent positifs,
-preuves indirectes et négatifs difficiles, dont le texte est toujours réhydraté depuis SQLite. Les
+cas transposables et négatifs difficiles, dont le texte est toujours réhydraté depuis SQLite. Les
 labels `validation` et `final_test` ne servent jamais à l'entraînement. Chaque entraînement continue
 depuis un modèle local signé vers un nouveau répertoire candidat, sans écraser ni activer le modèle
 courant. La promotion exige les gates CiderQA de retrieval, exactitude, citations, nombres et
@@ -769,6 +807,28 @@ Pydantic, mais jamais la question, la sortie générée, une valeur fautive ou l
 Les budgets de caractères des filtres sémantiques s'appliquent au payload assemblé, séparateurs
 compris ; un extrait multi-passages ne doit jamais dépasser silencieusement la borne du modèle.
 
+### 6.1 Complément d'audit du 11 septembre 2026
+
+Instruction utilisateur explicite de la mission d'audit RAG : l'exactitude, la couverture, la
+pertinence et la traçabilité scientifiques priment sur le coût et la latence. Ne pas réduire fortement
+le rappel pour accélérer la recherche. Distinguer défaut observé, conséquence inférée et hypothèse à
+tester ; reconstruire le chemin réellement appelé avant de modifier l'architecture. Une technologie
+ou une deuxième recherche proposée par l'audit reste expérimentale tant que son bénéfice n'est pas
+mesuré, sans réactivation implicite des axes conversationnels retirés.
+
+Corrections techniques appliquées dans le workspace, et non réglages scientifiques validés par un
+benchmark expert : les sélecteurs de passages utilisent une redondance textuelle exacte plutôt qu'une
+similarité de vocabulaire pour ne pas écarter négations, valeurs et conditions distinctes. La présence
+d'un DOI dans les articles du corpus ne suffit pas à supprimer un abstract retrouvé : comparer les
+preuves effectivement disponibles. Le plan de secours conserve la question originale jusqu'à la
+borne autorisée de 4 000 caractères ; les champs générés par le planificateur restent plus courts.
+Toute évolution de sélection invalide le cache retrieval, dont la signature inclut aussi les réglages
+de classement des articles et de sélection des passages.
+
+Le rapport `RAG_SCIENTIFIC_AUDIT_2026-09-11.md` distingue les contre-exemples synthétiques reproductibles
+des futures mesures CiderQA sur preuves expertes. Un test synthétique réussi ne démontre ni une
+amélioration globale des réponses ni un gain de latence sur le corpus installé.
+
 ## 7. Traçabilité des décisions consolidées
 
 Les règles ci-dessus proviennent notamment des conversations suivantes :
@@ -806,7 +866,7 @@ Avant de conclure une tâche concernée par ce guide, vérifier :
 - DOI, doublons, niveau de contenu et provenance ont été contrôlés ;
 - toute exploration de publications connexes conserve le DOI source, la relation, le fournisseur et
   des bornes explicites de profondeur, volume et durée ;
-- les filières connexes n’ont pas été transformées en preuves directes sans justification ;
+- les résultats de filières connexes conservent leur matrice et leurs bornes de transposition ;
 - les états `accepted/review/rejected` et `Full article/Abstract only` sont rapportés séparément ;
 - les écritures importantes ont une sauvegarde et une stratégie de reprise ;
 - un changement de comportement possède un test de non-régression représentatif ;

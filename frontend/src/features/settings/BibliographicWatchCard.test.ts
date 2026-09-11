@@ -8,10 +8,16 @@ import { WatchForm, WatchSummary } from "./BibliographicWatchCard";
 
 describe("bibliographic watch", () => {
   it("labels configuration controls and explains activation and catchup", () => {
-    const html = renderToStaticMarkup(createElement(WatchForm, {
-      configuration: { enabled: false, themes: [{ key: "microbiologie", query: "cider fermentation" }] },
-      save: async () => {}, busy: false,
-    }));
+    const html = renderToStaticMarkup(
+      createElement(WatchForm, {
+        configuration: {
+          enabled: false,
+          themes: [{ key: "microbiologie", query: "cider fermentation" }],
+        },
+        save: async () => {},
+        busy: false,
+      }),
+    );
     expect(html).toContain("Activer la veille hebdomadaire");
     expect(html).toContain("rattrapée à la réouverture");
     expect(html).toContain("Mots-clés");
@@ -21,10 +27,22 @@ describe("bibliographic watch", () => {
 
   it("distinguishes indexed additions from discoveries, failures and deferred contents", () => {
     const report: WatchReport = {
-      job_id: "watch-1", state: "partial", started_at: "2026-09-10T12:00:00Z", completed_at: null,
-      examined: 500, duplicates: 200, accepted: 30, review: 12, rejected: 250,
-      acquisitions_attempted: 30, added_to_rag: 5, full_articles: 2, abstracts_only: 3,
-      deferred: 25, errors: ["crossref: deferred_429"], limitations: [],
+      job_id: "watch-1",
+      state: "partial",
+      started_at: "2026-09-10T12:00:00Z",
+      completed_at: null,
+      examined: 500,
+      duplicates: 200,
+      accepted: 30,
+      review: 12,
+      rejected: 250,
+      acquisitions_attempted: 30,
+      added_to_rag: 5,
+      full_articles: 2,
+      abstracts_only: 3,
+      deferred: 25,
+      errors: ["crossref: deferred_429"],
+      limitations: [],
     };
     const html = renderToStaticMarkup(createElement(WatchSummary, { report }));
     expect(html).toContain("5 ajout(s) au RAG");

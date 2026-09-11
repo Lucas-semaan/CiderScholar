@@ -8,7 +8,7 @@ from collections import defaultdict
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from time import perf_counter
-from typing import Any, Protocol, TypeVar
+from typing import Any, TypeVar
 from urllib.parse import quote
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -16,9 +16,9 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from app.config import Settings
 from app.corpora import CorpusScope
 from app.database.sqlite import Database
+from app.llm.contracts import GenerationClient as SynthesisChatClient
 from app.llm.contracts import (
     GenerationMetrics,
-    GenerationResponse,
 )
 from app.llm.providers import active_llm_model
 from app.llm.response_language import (
@@ -54,17 +54,6 @@ class SynthesisError(RuntimeError):
 
 class SynthesisSourceValidationError(SynthesisError):
     """A synthesis referenced an unavailable article or evidence row."""
-
-
-class SynthesisChatClient(Protocol):
-    def chat(
-        self,
-        messages: Sequence[Mapping[str, str]],
-        *,
-        json_schema: Mapping[str, Any] | None = None,
-        temperature: float | None = None,
-        max_output_tokens: int | None = None,
-    ) -> GenerationResponse: ...
 
 
 class EvidenceSource(BaseModel):

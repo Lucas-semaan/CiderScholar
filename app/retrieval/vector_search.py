@@ -17,7 +17,7 @@ from qdrant_client import QdrantClient, models
 from app.config import Settings
 from app.corpora import CorpusScope
 from app.database.sqlite import Database
-from app.desktop.model_integrity import ModelIntegrityError
+from app.desktop.model_integrity import MODEL_MANIFEST, ModelIntegrityError
 from app.ingestion.embeddings import (
     EmbeddedChunkBatch,
     EmbeddingBackend,
@@ -70,8 +70,13 @@ def _query_model_identity(backend: object, index: QdrantLocalIndex) -> str:
     settings = getattr(index, "settings", None)
     if settings is None:
         return content_key([index.model_name, id(backend)])
-    path = local_model_path(settings)
-    manifest_path = path / "ciderscholar-model-manifest.json"
+    backend_path = getattr(backend, "path", None)
+    path = (
+        Path(backend_path).resolve()
+        if backend_path is not None
+        else local_model_path(settings, index.model_name).resolve()
+    )
+    manifest_path = path / MODEL_MANIFEST
     try:
         manifest_hash = sha256(manifest_path.read_bytes()).hexdigest()
     except OSError:

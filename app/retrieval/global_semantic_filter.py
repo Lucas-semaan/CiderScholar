@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable, Mapping, Sequence
-from typing import Any, Literal, Protocol
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from app.llm.argo_client import ArgoProtocolError, ArgoQuotaError
-from app.llm.contracts import GenerationMessage, GenerationResponse
+from app.llm.contracts import GenerationResponse
+from app.llm.contracts import ReservedGenerationClient as GlobalSemanticFilterClient
 from app.llm.validation_cache import ValidationCache, client_identity, content_key
 from app.models.chatbot import ChatEvidenceRecord
 from app.retrieval.hypothesis_planning import VerificationNeed
@@ -27,17 +28,6 @@ _GRADE_BY_RELEVANCE: dict[GlobalRelevance, str | None] = {
 MAX_GLOBAL_FILTER_CANDIDATES = 48
 MAX_GLOBAL_BATCH_CANDIDATES = 10
 MAX_GLOBAL_SEMANTIC_FILTER_REQUESTS = 3
-
-
-class GlobalSemanticFilterClient(Protocol):
-    def chat(
-        self,
-        messages: Sequence[GenerationMessage | Mapping[str, str]],
-        *,
-        json_schema: Mapping[str, Any] | None = None,
-        max_output_tokens: int | None = None,
-        on_request_reserved: Callable[[], None] | None = None,
-    ) -> GenerationResponse: ...
 
 
 class GlobalSemanticDecision(BaseModel):
@@ -257,11 +247,11 @@ class ArgoGlobalSemanticEvidenceFilter:
                 "content": (
                     "Tu valides globalement des candidats issus d'une seule vague d'un RAG "
                     "scientifique. Évalue chaque candidat par rapport à la question complète et "
-                    "aux propositions atomiques à vérifier. direct=A seulement si le passage "
+                    "aux propositions atomiques à vérifier. exact=A seulement si le passage "
                     "étudie réellement la matrice, le procédé ou mécanisme et le résultat "
-                    "demandés. supportive=B pour une preuve indirecte scientifiquement "
-                    "transposable dont la différence devra être explicitée. peripheral=C pour "
-                    "un contexte connexe insuffisant, irrelevant=D pour un faux ami ou un hors "
+                    "demandés. transposable=B pour un mécanisme scientifiquement applicable dont "
+                    "la différence devra être explicitée. périphérique=C pour un contexte "
+                    "connexe insuffisant, hors_sujet=D pour un faux ami ou un hors "
                     "sujet. Un résultat qui contredit l'hypothèse mais répond directement à la "
                     "question est A, jamais D. Un abstract ne devient pas texte intégral. Ne "
                     "déduis aucun fait absent des extraits. Retourne une décision pour chaque "
@@ -294,8 +284,17 @@ class ArgoGlobalSemanticEvidenceFilter:
         needs: Sequence[VerificationNeed],
         candidates: Sequence[SemanticCandidate],
     ) -> int:
-        return sum(
-            len(message["content"]) for message in self._messages(question, needs, candidates)
+        candidate_ids = [candidate.candidate_id for candidate in candidates]
+        need_ids = [need.need_id for need in needs]
+        return len(
+            json.dumps(
+                {
+                    "messages": self._messages(question, needs, candidates),
+                    "json_schema": _schema(candidate_ids, need_ids),
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
         )
 
     @measured("semantic_batch")

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import csv
-import hashlib
 import json
 import re
 import sqlite3
@@ -21,6 +20,7 @@ import fitz
 from app.config import load_settings
 from app.corpora import CorpusScope, settings_for_corpus
 from app.database.sqlite import Database
+from app.file_integrity import sha256_file
 
 FERMENTATION_TARGET = 55
 CONTAMINANT_TARGET = 45
@@ -232,7 +232,7 @@ def _verify_pdf(path: Path) -> tuple[str, int, int, int]:
     with resolved.open("rb") as stream:
         if stream.read(5) != b"%PDF-":
             raise ValueError("file does not start with a PDF signature")
-    digest = hashlib.sha256(resolved.read_bytes()).hexdigest()
+    digest = sha256_file(resolved)
     with fitz.open(resolved) as document:
         page_count = document.page_count
         text_characters = sum(len(page.get_text("text").strip()) for page in document)

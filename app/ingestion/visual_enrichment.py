@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Protocol
+from typing import Any
 
 from app.database.sqlite import Database
 from app.ingestion.visual_contracts import (
@@ -13,18 +13,7 @@ from app.ingestion.visual_contracts import (
     VisualCaptionContext,
     VisualContextCell,
 )
-
-
-class VisualCaptionClient(Protocol):
-    def chat(
-        self,
-        messages: list[dict[str, str]],
-        *,
-        json_schema: dict[str, Any] | None = None,
-        temperature: float | None = None,
-        max_output_tokens: int | None = None,
-    ) -> Any: ...
-
+from app.llm.contracts import DictionaryGenerationClient as VisualCaptionClient
 
 _CAPTION_SCHEMA: dict[str, Any] = {
     "type": "object",

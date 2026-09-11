@@ -6,7 +6,8 @@ import hashlib
 import re
 import unicodedata
 from collections.abc import Iterable
-from pathlib import Path
+
+from app.file_integrity import sha256_file as sha256_file
 
 MIN_SPECIFIC_TITLE_CHARACTERS = 40
 MIN_SPECIFIC_TITLE_WORDS = 5
@@ -22,14 +23,6 @@ GENERIC_TITLES = {
     "research article",
     "untitled",
 }
-
-
-def sha256_file(path: str | Path, block_size: int = 1024 * 1024) -> str:
-    digest = hashlib.sha256()
-    with Path(path).open("rb") as handle:
-        while block := handle.read(block_size):
-            digest.update(block)
-    return digest.hexdigest()
 
 
 def normalize_title(title: str) -> str:

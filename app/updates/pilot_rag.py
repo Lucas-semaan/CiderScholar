@@ -44,6 +44,7 @@ from app.retrieval.coverage_assessment import AxisCoverageAssessment
 from app.retrieval.evidence_budget import select_records_with_axis_coverage
 from app.retrieval.evidence_selection import focused_excerpt
 from app.retrieval.scientific_intent import ScientificFacet, analyze_scientific_intent, facet_query
+from app.telemetry import measured_scope
 from app.updates.vector_index import BibliographicHybridResult
 
 
@@ -425,28 +426,6 @@ class CiderAbstractRagService:
         self.experimental_profile = experimental_profile
         self.correction_temperature = _correction_temperature(correction_temperature)
 
-    def _long_synthesis_instruction(self) -> str:
-        if self.experimental_profile == "p0":
-            return ""
-        instruction = (
-            " Commence par les résultats scientifiques. Ajoute un cadrage seulement s’il est "
-            "utile à la question : définis les termes ambigus, précise la matrice et l'étape du "
-            "procédé, et distingue les mécanismes démontrés, les hypothèses et les analogies. "
-            "Chaque affirmation factuelle de ce cadrage doit être soutenue par les sources "
-            "fournies. N'ajoute aucune généralité encyclopédique, historique ou contextuelle non "
-            "nécessaire. Si le cadrage n'est pas documenté, omets-le."
-        )
-        if self.experimental_profile == "p2":
-            instruction += (
-                " Après ce cadrage, développe une synthèse scientifique approfondie couvrant tous "
-                "les axes réellement documentés, les conditions expérimentales, les résultats "
-                "convergents ou contradictoires et les limites de transposition. Vise environ 900 "
-                "à 1 400 mots seulement si les preuves permettent au moins six affirmations "
-                "distinctes et utiles. Sinon, reste plus court : ne répète pas, ne dilue pas et ne "
-                "complète jamais la longueur par des connaissances non sourcées."
-            )
-        return instruction
-
     def answer(
         self,
         question: str,
@@ -575,7 +554,13 @@ class CiderAbstractRagService:
                 if on_argo_reserved is not None:
                     request_options["on_request_reserved"] = on_argo_reserved
                 request_count += 1
-                response = self.client.chat(messages, **request_options)
+                stage = (
+                    f"abstract_generation_correction_{validation_retries}"
+                    if validation_retries
+                    else "abstract_generation_initial"
+                )
+                with measured_scope(stage):
+                    response = self.client.chat(messages, **request_options)
                 if on_argo_response is not None:
                     on_argo_response()
             except ValueError as exc:
@@ -884,6 +869,7 @@ class CiderEvidenceRagService:
         self.correction_temperature = _correction_temperature(correction_temperature)
         self.max_input_characters = max_input_characters
         self.experimental_profile: Literal["p0", "p1", "p2"] = "p0"
+        self.organizational_reasoning_context = ""
 
     def _profile_instruction(self) -> str:
         instruction = ""
@@ -1131,10 +1117,9 @@ class CiderEvidenceRagService:
                     "abstention documentaire est un résultat valide : ne renvoie jamais "
                     "status=answerable avec un tableau statements vide et ne transforme pas un "
                     "extrait périphérique en conclusion. Chaque élément porte un evidence_grade : "
-                    "A est directement "
-                    "pertinent, B est une preuve mécanistique indirecte, C est périphérique et D "
-                    "est hors sujet. N'utilise jamais les libellés preuve directe, preuve "
-                    "indirecte, direct evidence ou indirect evidence dans la réponse. Intègre "
+                    "A correspond exactement à la question, B apporte un mécanisme transposable, "
+                    "C est périphérique et D est hors sujet. N'affiche aucun libellé de niveau "
+                    "de pertinence dans la réponse. Intègre "
                     "naturellement la matrice réellement étudiée dans chaque nouveau résultat, "
                     "en te fondant sur les passages cités. Distingue les matrices de plusieurs "
                     "études ; si la matrice est inconnue, ne l'invente pas. Précise les "
@@ -1227,6 +1212,11 @@ class CiderEvidenceRagService:
                     "contradiction interne, "
                     "aucune référence non citée, distinction explicite des preuves B et réponse "
                     "réelle à la question."
+                    " Le champ organizational_reasoning contient, lorsqu'il est présent, un wiki "
+                    "local de cadres de décision. Utilise-le pour organiser les distinctions et "
+                    "compromis, jamais comme preuve d'un fait, d'une valeur, d'une norme ou d'une "
+                    "recommandation. Toute affirmation visible reste entièrement soutenue par les "
+                    "evidence_ids."
                 ),
             },
             {
@@ -1255,6 +1245,9 @@ class CiderEvidenceRagService:
                         "conversation_history": list(conversation_history or []),
                         "evidence": evidence,
                         "documentary_coverage_notes": bounded_coverage_notes,
+                        "organizational_reasoning": (
+                            self.organizational_reasoning_context[:12_000] or None
+                        ),
                     },
                     ensure_ascii=False,
                 ),
@@ -1346,7 +1339,13 @@ class CiderEvidenceRagService:
                 if on_argo_reserved is not None:
                     request_options["on_request_reserved"] = on_argo_reserved
                 request_count += 1
-                response = self.client.chat(messages, **request_options)
+                stage = (
+                    f"evidence_generation_correction_{validation_retries}"
+                    if validation_retries
+                    else "evidence_generation_initial"
+                )
+                with measured_scope(stage):
+                    response = self.client.chat(messages, **request_options)
                 if on_argo_response is not None:
                     on_argo_response()
             except ValueError as exc:
@@ -2396,7 +2395,13 @@ class CiderEvidenceRagService:
                     options["on_request_reserved"] = on_argo_reserved
                 shared_request_budget.reserve()
                 request_count += 1
-                response = self.client.chat(messages, **options)
+                stage = (
+                    f"{phase}_generation_correction_{validation_retries}"
+                    if validation_retries
+                    else f"{phase}_generation_initial"
+                )
+                with measured_scope(stage):
+                    response = self.client.chat(messages, **options)
                 if on_argo_response is not None:
                     on_argo_response()
             except ValueError as exc:
@@ -2886,7 +2891,6 @@ INTERNAL_PROCESS_LEAK_PATTERN = re.compile(
 )
 _BARE_NUMBER_PATTERN = re.compile(r"\b\d+(?:[.,]\d+)?\b")
 _WORD_PATTERN = re.compile(r"\b\w+[\w'-]*\b", re.UNICODE)
-_SENTENCE_END_PATTERN = re.compile(r"[.!?](?:[\s\]\)\"'»]|$)")
 
 
 def _plain_text(value: str) -> str:
@@ -2896,10 +2900,6 @@ def _plain_text(value: str) -> str:
 
 def _word_count(value: str) -> int:
     return len(_WORD_PATTERN.findall(value))
-
-
-def _sentence_count(value: str) -> int:
-    return len(_SENTENCE_END_PATTERN.findall(value.strip()))
 
 
 def _reject_internal_process_leaks(answer_blocks: Sequence[str]) -> None:

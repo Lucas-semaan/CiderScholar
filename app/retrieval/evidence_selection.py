@@ -8,6 +8,15 @@ from collections.abc import Sequence
 from app.models.chatbot import ChatEvidenceRecord
 
 
+def exact_sentence_units(text: str) -> frozenset[str]:
+    """Ignore layout whitespace, preserving negation, numbers, conditions and case."""
+    return frozenset(
+        " ".join(sentence.split())
+        for sentence in re.split(r"(?<=[.!?])\s+|\n+", text)
+        if sentence.strip()
+    )
+
+
 def focused_excerpt(text: str, question: str, limit: int) -> str:
     """Return a contiguous original window around the most discriminating sentences."""
     if len(text) <= limit:
@@ -40,11 +49,7 @@ def distinct_evidence(
         known: set[str] = set()
         passages = []
         for passage in record.passages:
-            sentences = {
-                " ".join(sentence.split())
-                for sentence in re.split(r"(?<=[.!?])\s+|\n+", passage.text)
-                if sentence.strip()
-            }
+            sentences = exact_sentence_units(passage.text)
             if sentences and sentences <= known:
                 removed += 1
                 continue

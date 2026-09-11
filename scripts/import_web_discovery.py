@@ -7,7 +7,7 @@ import json
 import re
 import sys
 from collections import defaultdict
-from contextlib import closing, suppress
+from contextlib import closing
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -23,6 +23,8 @@ from app.services.bibliographic_metadata_enrichment import (
     normalized_title,
     title_similarity,
 )
+from app.updates.checkpoints import append_jsonl_object as _append_jsonl
+from app.updates.checkpoints import read_jsonl_objects as _jsonl
 from app.updates.crossref import CrossrefClient
 from app.updates.harvest import BibliographicHarvestStore
 from app.updates.models import BibliographicRecord, normalize_doi
@@ -364,23 +366,6 @@ def _load_candidates(run_dirs: list[Path]) -> list[dict[str, Any]]:
 def _clean_web_title(value: str) -> str:
     cleaned = " ".join(value.split())
     return _SEARCH_ENGINE_TITLE_SUFFIX.sub("", cleaned).strip() or cleaned
-
-
-def _jsonl(path: Path) -> list[dict[str, Any]]:
-    if not path.is_file():
-        return []
-    rows: list[dict[str, Any]] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        with suppress(json.JSONDecodeError):
-            value = json.loads(line)
-            if isinstance(value, dict):
-                rows.append(value)
-    return rows
-
-
-def _append_jsonl(path: Path, payload: dict[str, Any]) -> None:
-    with path.open("a", encoding="utf-8", newline="\n") as stream:
-        stream.write(json.dumps(payload, ensure_ascii=False) + "\n")
 
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:

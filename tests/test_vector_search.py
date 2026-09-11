@@ -11,6 +11,7 @@ from app.retrieval.vector_search import (
     QdrantLocalIndex,
     VectorIndexConfigurationError,
     VectorSearchService,
+    _query_model_identity,
     clear_query_vector_cache,
 )
 
@@ -334,6 +335,20 @@ def test_vector_search_reuses_query_vector_and_respects_backend_ownership(settin
 
     service.close()
     assert backend.closed is False
+
+
+def test_query_vector_cache_identity_changes_with_backend_manifest(settings, tmp_path) -> None:
+    backend = FakeBackend()
+    backend.path = tmp_path / "candidate-model"
+    backend.path.mkdir()
+    manifest = backend.path / "ciderscholar-model-manifest.json"
+    manifest.write_text('{"revision": 1}', encoding="utf-8")
+    index = QdrantLocalIndex(settings, model_name=backend.model_name)
+
+    first = _query_model_identity(backend, index)
+    manifest.write_text('{"revision": 2}', encoding="utf-8")
+
+    assert _query_model_identity(backend, index) != first
 
 
 def test_vector_search_many_matches_sequential_searches_and_batches_uncached_queries(

@@ -18,8 +18,9 @@ ARGO sans modifier de fichier est défini dans [`docs/ARGO_KEY_SETUP.md`](docs/A
 
 ## Fonctionnalités
 
-- chatbot scientifique principal en langage naturel, avec historique conversationnel borné, RAG
-  local, génération ARGO et citations consultables ;
+- chatbot scientifique principal en langage naturel, avec un [wiki de raisonnement](wiki/README.md),
+  un historique conversationnel borné, un RAG local, une génération ARGO et des citations
+  consultables ;
 - tableau de bord de la base documentaire unifiée et de son indexation ;
 - import de PDF, import récursif d’un dossier, ingestion, réindexation et suppression confirmée ;
 - base filtrable réunissant articles complets et abstracts associés à un DOI vérifié ;
@@ -123,16 +124,18 @@ ARGO ne reçoit que la question et les passages bornés nécessaires à la gén�
 
 La page d’accueil est l’interface conversationnelle principale. Pour chaque message, CiderScholar :
 
-1. complète la requête de recherche avec les deux dernières questions utilisateur lorsque la
+1. charge le cœur du wiki et jusqu'à deux pages thématiques pour cadrer les distinctions et les
+   compromis, sans les traiter comme des preuves scientifiques ;
+2. complète la requête de recherche avec les deux dernières questions utilisateur lorsque la
    conversation contient une relance ;
-2. recherche dans les chunks des articles complets avec FTS5, agrège les résultats par article et
+3. recherche dans les chunks des articles complets avec FTS5, agrège les résultats par article et
    sélectionne des passages pertinents avec leurs pages ;
-3. complète ces preuves par les abstracts qualifiés uniquement lorsque le texte intégral manque ;
-4. transmet à ARGO un ensemble borné de passages full-text et d’abstracts de repli, avec un historique
+4. complète ces preuves par les abstracts qualifiés uniquement lorsque le texte intégral manque ;
+5. transmet à ARGO un ensemble borné de passages full-text et d’abstracts de repli, avec un historique
    conversationnel limité ;
-5. rejette toute réponse qui cite une preuve absente, invente une valeur numérique ou transforme un
+6. rejette toute réponse qui cite une preuve absente, invente une valeur numérique ou transforme un
    résultat expérimental en recommandation non étayée ;
-6. affiche le niveau de preuve, les pages, DOI, fournisseurs et limites avec la réponse.
+7. affiche le niveau de preuve, les pages, DOI, fournisseurs et limites avec la réponse.
 
 La réponse est rédigée en prose par défaut. Pour obtenir des puces, demandez explicitement une
 liste, une checklist ou des étapes ; une consigne comme « sans puces » reste prioritaire. Les

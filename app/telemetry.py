@@ -18,6 +18,19 @@ def timing_scope(sink: Callable[[str, float], None]) -> Iterator[None]:
         _sink.reset(token)
 
 
+@contextmanager
+def measured_scope(stage: str) -> Iterator[None]:
+    """Measure one dynamically named stage inside the active request scope."""
+
+    start = perf_counter()
+    try:
+        yield
+    finally:
+        sink = _sink.get()
+        if sink is not None:
+            sink(stage, perf_counter() - start)
+
+
 def measured[**P, R](stage: str) -> Callable[[Callable[P, R]], Callable[P, R]]:
     def decorate(function: Callable[P, R]) -> Callable[P, R]:
         @wraps(function)

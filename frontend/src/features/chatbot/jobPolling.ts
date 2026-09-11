@@ -23,15 +23,15 @@ function waitForDelay(milliseconds: number, signal?: AbortSignal): Promise<void>
       reject(signal.reason);
       return;
     }
-    const timeoutId = globalThis.setTimeout(resolve, milliseconds);
-    signal?.addEventListener(
-      "abort",
-      () => {
-        globalThis.clearTimeout(timeoutId);
-        reject(signal.reason);
-      },
-      { once: true },
-    );
+    const onAbort = () => {
+      globalThis.clearTimeout(timeoutId);
+      reject(signal?.reason);
+    };
+    const timeoutId = globalThis.setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, milliseconds);
+    signal?.addEventListener("abort", onAbort, { once: true });
   });
 }
 

@@ -7,7 +7,6 @@ import json
 import sqlite3
 import sys
 from collections import defaultdict
-from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -16,6 +15,8 @@ from app.admin.secrets import AdminBibliographicKeyVault
 from app.config import load_settings
 from app.corpora import CorpusScope, LocalProfile, load_local_profile, settings_for_corpus
 from app.updates.base import BibliographicApiDeferred
+from app.updates.checkpoints import append_jsonl_object as _append_jsonl
+from app.updates.checkpoints import read_jsonl_objects as _jsonl
 from app.updates.harvest import assess_cider_relevance_across_themes
 from app.updates.models import normalize_doi
 from app.updates.opencitations import OpenCitationRelation, OpenCitationsClient
@@ -443,18 +444,6 @@ def _failed_job(
     }
 
 
-def _jsonl(path: Path) -> list[dict[str, Any]]:
-    if not path.is_file():
-        return []
-    rows: list[dict[str, Any]] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        with suppress(json.JSONDecodeError):
-            value = json.loads(line)
-            if isinstance(value, dict):
-                rows.append(value)
-    return rows
-
-
 def _load_checkpoint(path: Path) -> dict[str, Any]:
     if not path.is_file():
         return {"version": 1}
@@ -484,11 +473,6 @@ def _deadline(
     if not reset and checkpoint.get("deadline"):
         return _parse_deadline(str(checkpoint["deadline"]))
     return now + timedelta(hours=timeout_hours)
-
-
-def _append_jsonl(path: Path, payload: dict[str, Any]) -> None:
-    with path.open("a", encoding="utf-8", newline="\n") as stream:
-        stream.write(json.dumps(payload, ensure_ascii=False) + "\n")
 
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:

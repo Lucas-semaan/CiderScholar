@@ -20,7 +20,6 @@ from app.llm.argo_client import (
     ArgoAuthenticationError,
     ArgoAuthorizationError,
     ArgoLocalQuotaError,
-    ArgoProtocolError,
     ArgoQuotaError,
     ArgoScientificValidationError,
     ArgoUnavailableError,
@@ -270,7 +269,7 @@ class DurableJobWorker:
                     "remote LLM quota deferral could not be persisted"
                 ) from None
             return self._logged_result(deferred, cycle_started_monotonic)
-        except (MandatoryVerificationError, ArgoProtocolError) as error:
+        except MandatoryVerificationError as error:
             cause = error.__cause__ or error
             kind = JobErrorKind.VALIDATION
             code = "semantic_invalid_schema"
