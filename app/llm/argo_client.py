@@ -41,7 +41,15 @@ class ArgoError(RuntimeError):
 
 
 class ArgoUnavailableError(ArgoError):
-    """ARGO could not be reached in time."""
+    """Base error for retryable provider availability failures."""
+
+
+class ArgoRequestTimeoutError(ArgoUnavailableError):
+    """The provider request exceeded its configured timeout."""
+
+
+class ArgoTransportError(ArgoUnavailableError):
+    """The provider request failed before a usable HTTP response was received."""
 
 
 class ArgoAuthenticationError(ArgoError):
@@ -81,6 +89,7 @@ class ScientificValidationReason(StrEnum):
     UNSUPPORTED_NORMATIVE_CLAIM = "unsupported_normative_claim"
     INVALID_EVIDENCE_REFERENCE = "invalid_evidence_reference"
     MISSING_REQUIRED_EVIDENCE = "missing_required_evidence"
+    UNJUSTIFIED_ABSTENTION = "unjustified_abstention"
     MISSING_CONTEXTUAL_INTRODUCTION = "missing_contextual_introduction"
     PARAGRAPH_TOO_SHORT = "paragraph_too_short"
     SYNTHESIS_TOO_SHORT = "synthesis_too_short"
@@ -115,6 +124,7 @@ def classify_scientific_validation_failure(message: str) -> ScientificValidation
         ("unsupported norm", ScientificValidationReason.UNSUPPORTED_NORMATIVE_CLAIM),
         ("outside the supplied", ScientificValidationReason.INVALID_EVIDENCE_REFERENCE),
         ("omitted one or more", ScientificValidationReason.MISSING_REQUIRED_EVIDENCE),
+        ("abstained despite", ScientificValidationReason.UNJUSTIFIED_ABSTENTION),
         ("contextual introduction", ScientificValidationReason.MISSING_CONTEXTUAL_INTRODUCTION),
         ("paragraph that is too short", ScientificValidationReason.PARAGRAPH_TOO_SHORT),
         ("synthesis is too short", ScientificValidationReason.SYNTHESIS_TOO_SHORT),
@@ -316,9 +326,9 @@ class OpenAICompatibleClient:
         try:
             response = self._http.request(method, path, json=json_body)
         except httpx.TimeoutException as exc:
-            raise ArgoUnavailableError(f"{self.provider_label} request timed out") from exc
+            raise ArgoRequestTimeoutError(f"{self.provider_label} request timed out") from exc
         except httpx.HTTPError as exc:
-            raise ArgoUnavailableError(f"{self.provider_label} service is unavailable") from exc
+            raise ArgoTransportError(f"{self.provider_label} service is unavailable") from exc
         if response.is_redirect:
             raise ArgoProtocolError(f"{self.provider_label} redirects are forbidden")
         try:
@@ -480,6 +490,7 @@ class OpenAICompatibleClient:
             }
 
         with self._generation_lock:
+            self.memory.check(f"{self.provider_label} request")
             if selected_model not in self._verified_models:
                 self.ensure_model(selected_model)
             started = perf_counter()
@@ -507,7 +518,6 @@ class OpenAICompatibleClient:
                 raise ArgoProtocolError(
                     f"{self.provider_label} returned no answer content (finish_reason={reason})"
                 )
-            self.memory.check(f"{self.provider_label} response")
             return GenerationResponse(
                 model=raw.model,
                 content=content,
@@ -542,6 +552,8 @@ ArgoClient = OpenAICompatibleClient
 LlmHealth = ArgoHealth
 LlmError = ArgoError
 LlmUnavailableError = ArgoUnavailableError
+LlmRequestTimeoutError = ArgoRequestTimeoutError
+LlmTransportError = ArgoTransportError
 LlmAuthenticationError = ArgoAuthenticationError
 LlmAuthorizationError = ArgoAuthorizationError
 LlmQuotaError = ArgoQuotaError

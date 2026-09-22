@@ -1,3 +1,11 @@
+# CiderScholar 0.2.11
+
+- Réunit les articles complets (`Full article`) et les abstracts vérifiés (`Abstract only`) dans
+  la vue unique « Base documentaire », avec déduplication par DOI et recherche dans les abstracts
+  et fragments persistés.
+- Conserve les opérations d’importation et d’indexation dans une vue d’administration distincte,
+  sans exposer les séparations techniques de stockage dans la navigation utilisateur.
+
 # CiderScholar 0.2.9
 
 - Réduit la mémoire de construction, de signature et de publication en traitant les archives de

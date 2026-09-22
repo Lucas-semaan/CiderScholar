@@ -28,6 +28,7 @@ def test_memory_guard_warns_without_stopping(monkeypatch, caplog) -> None:
 
     assert result == snapshot
     assert "synthetic operation" in caplog.text
+    assert "system_available_gb=2.00" in caplog.text
     assert "system_used_gb=13.10" in caplog.text
 
 

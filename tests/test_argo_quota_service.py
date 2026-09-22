@@ -41,3 +41,18 @@ def test_argo_quota_reservation_records_endpoint_without_content(settings) -> No
             "SELECT windows_user, endpoint, requested_at FROM argo_request_events"
         ).fetchone()
     assert tuple(row) == ("test-user", "models", now.isoformat())
+
+
+def test_argo_quota_capacity_check_is_non_consuming_and_respects_batch_size(settings) -> None:
+    database = Database(settings.paths.database_path)
+    policy = ArgoQuotaPolicy((QuotaWindow(2, timedelta(minutes=1)),))
+    service = ArgoQuotaService(database, policy=policy, windows_user="capacity-test-user")
+    now = datetime(2026, 7, 22, 12, tzinfo=UTC)
+
+    assert service.has_capacity(2, now=now)
+    assert service.reserve("chat/completions", now=now).allowed
+    assert service.has_capacity(1, now=now)
+    assert not service.has_capacity(2, now=now)
+
+    with closing(database.connect()) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM argo_request_events").fetchone()[0] == 1

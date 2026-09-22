@@ -74,6 +74,7 @@ export interface ChatbotSource {
   article_id: string | null;
   chunk_ids: number[];
   page_ranges: string[];
+  structural_ranges?: string[];
   figure_refs?: string[];
   title: string;
   authors: string[];

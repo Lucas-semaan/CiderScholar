@@ -131,8 +131,14 @@ class LexicalSearchResult(BaseModel):
     article_title: str
     publication_year: int | None
     section: str | None
-    page_start: int = Field(ge=1)
-    page_end: int = Field(ge=1)
+    page_start: int | None = Field(default=None, ge=1)
+    page_end: int | None = Field(default=None, ge=1)
+    locator_kind: Literal["page", "structural"] | None = None
+    section_path: str | None = None
+    paragraph_start: int | None = Field(default=None, ge=0)
+    paragraph_end: int | None = Field(default=None, ge=0)
+    xml_id_start: str | None = None
+    xml_id_end: str | None = None
     text: str
     bm25_score: float
     relevance_score: float = Field(ge=0.0)
@@ -339,9 +345,21 @@ class LexicalSearchService:
                     int(row["publication_year"]) if row["publication_year"] is not None else None
                 ),
                 section=row["section"],
-                page_start=int(row["page_start"]),
-                page_end=int(row["page_end"]),
-                text=str(row["text"]),
+                page_start=(
+                    int(row["locator_page_start"])
+                    if row["locator_page_start"] is not None
+                    else None
+                ),
+                page_end=(
+                    int(row["locator_page_end"]) if row["locator_page_end"] is not None else None
+                ),
+                locator_kind=row["locator_kind"],
+                section_path=row["section_path"],
+                paragraph_start=row["paragraph_start"],
+                paragraph_end=row["paragraph_end"],
+                xml_id_start=row["xml_id_start"],
+                xml_id_end=row["xml_id_end"],
+                text=str(row["effective_text"] if "effective_text" in row else row["text"]),
                 bm25_score=float(row["lexical_score"]),
                 relevance_score=max(0.0, -float(row["lexical_score"])),
             )

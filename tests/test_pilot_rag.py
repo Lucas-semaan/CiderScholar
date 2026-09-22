@@ -29,6 +29,7 @@ from app.updates.pilot_rag import (
     _renderable_doi,
     _salvage_grounded_evidence_answer,
     _validate_evidence_grounding,
+    _validation_correction_message,
 )
 from app.updates.vector_index import BibliographicHybridResult
 
@@ -325,6 +326,187 @@ def test_evidence_rag_uses_all_presented_evidence_and_argo_selected_typology() -
     assert result.generation_traces[0].cited_evidence_count == 10
 
 
+def test_evidence_rag_requires_one_representative_passage_per_article() -> None:
+    records = [
+        ChatEvidenceRecord(
+            record_id=f"common:article-{index}",
+            origin="local_rag",
+            evidence_level="full_text",
+            scope="common",
+            article_id=f"article-{index}",
+            title=f"Article {index}",
+            evidence_grade="A",
+            passages=[
+                ChatEvidencePassage(
+                    evidence_id=f"common:article-{index}:chunk:{passage}",
+                    chunk_id=passage,
+                    page_start=passage,
+                    page_end=passage,
+                    text=(
+                        f"L'article {index} documente un résultat pertinent dans la matrice "
+                        "et décrit précisément les conditions expérimentales étudiées. "
+                    )
+                    * 6,
+                )
+                for passage in (1, 2)
+            ],
+        )
+        for index in (1, 2)
+    ]
+    required_ids = [f"common:article-{index}:chunk:1" for index in (1, 2)]
+
+    class FakeClient:
+        def chat(self, messages, **_options):
+            payload = json.loads(messages[1]["content"])
+            assert len(payload["evidence"]) == 4
+            assert payload["required_evidence_ids"] == required_ids
+            answer = {
+                "status": "answerable",
+                "response_format": "prose",
+                "definition": (
+                    "Les deux articles examinent des observations documentées dans la matrice. "
+                    "La synthèse rapproche leurs conditions expérimentales."
+                ),
+                "statements": [
+                    {
+                        "statement": (
+                            "Les deux articles décrivent des résultats pertinents dans la matrice "
+                            "et précisent les conditions expérimentales propres à leurs essais."
+                        ),
+                        "evidence_ids": required_ids,
+                        "section": "synthetic_answer",
+                        "mechanism": None,
+                    }
+                ],
+                "limitations": [],
+                "insufficiency_message": None,
+            }
+            return _response(f"<think>validated</think>\n```json\n{json.dumps(answer)}\n```")
+
+    result = CiderEvidenceRagService(FakeClient(), answer_effort=AnswerEffort.CONCISE).answer(
+        "Que montrent les deux articles dans cette matrice ?",
+        records,
+    )
+
+    assert result.generation_status == "generated"
+    assert result.generation_traces[0].presented_evidence_count == 2
+    assert result.generation_traces[0].cited_evidence_count == 2
+
+
+def test_deep_evidence_rag_reserves_output_room_after_hidden_reasoning() -> None:
+    passage = ChatEvidencePassage(
+        evidence_id="common:deep-budget:abstract",
+        text=(
+            "Les levures non-Saccharomyces contribuent à la formation de composés "
+            "aromatiques dans la matrice fermentée et l'étude décrit les conditions "
+            "expérimentales de cette observation."
+        ),
+    )
+    record = ChatEvidenceRecord(
+        record_id="common:deep-budget",
+        origin="local_rag",
+        evidence_level="abstract",
+        scope="common",
+        title="Non-Saccharomyces aroma formation",
+        evidence_grade="A",
+        passages=[passage],
+    )
+
+    class FakeClient:
+        def chat(self, _messages, *, max_output_tokens, **_options):
+            assert max_output_tokens == 8_192
+            return _response(
+                json.dumps(
+                    {
+                        "status": "answerable",
+                        "response_format": "prose",
+                        "definition": (
+                            "La synthèse porte sur la contribution aromatique documentée "
+                            "pendant la fermentation."
+                        ),
+                        "statements": [
+                            {
+                                "statement": (
+                                    "L'étude relie les levures non-Saccharomyces à la formation "
+                                    "de composés aromatiques dans les conditions fermentaires "
+                                    "qu'elle examine."
+                                ),
+                                "evidence_ids": [passage.evidence_id],
+                                "section": "synthetic_answer",
+                                "mechanism": None,
+                            }
+                        ],
+                        "limitations": [],
+                        "insufficiency_message": None,
+                    },
+                    ensure_ascii=False,
+                )
+            )
+
+    result = CiderEvidenceRagService(
+        FakeClient(),
+        answer_effort=AnswerEffort.DEEP,
+    ).answer("Quel rôle aromatique ces levures jouent-elles ?", [record])
+
+    assert result.generation_status == "generated"
+    assert result.cited_evidence_ids == [passage.evidence_id]
+
+
+def test_evidence_rag_retries_an_ambiguous_wrapped_response() -> None:
+    passage = ChatEvidencePassage(
+        evidence_id="common:ambiguous-output:abstract",
+        text="L'essai documente une contribution aromatique pendant la fermentation.",
+    )
+    record = ChatEvidenceRecord(
+        record_id="common:ambiguous-output",
+        origin="local_rag",
+        evidence_level="abstract",
+        scope="common",
+        title="Contribution aromatique fermentaire",
+        evidence_grade="A",
+        passages=[passage],
+    )
+    answer = {
+        "status": "answerable",
+        "response_format": "prose",
+        "definition": "La synthèse concerne la contribution aromatique fermentaire.",
+        "statements": [
+            {
+                "statement": (
+                    "L'essai relie la fermentation étudiée à une contribution aromatique "
+                    "documentée dans ses conditions expérimentales."
+                ),
+                "evidence_ids": [passage.evidence_id],
+                "section": "synthetic_answer",
+                "mechanism": None,
+            }
+        ],
+        "limitations": [],
+        "insufficiency_message": None,
+    }
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def chat(self, messages, **_options):
+            self.calls += 1
+            if self.calls == 1:
+                alternative = answer | {"definition": "Un second objet concurrent."}
+                return _response(f"{json.dumps(answer)}\n{json.dumps(alternative)}")
+            assert "invalid evidence RAG answer" in messages[-1]["content"]
+            return _response(json.dumps(answer))
+
+    client = FakeClient()
+    result = CiderEvidenceRagService(client).answer(
+        "Quel rôle aromatique est documenté ?",
+        [record],
+    )
+
+    assert client.calls == 2
+    assert result.generation_status == "generated"
+
+
 def test_evidence_rag_regenerates_telegraphic_paragraph_from_rich_evidence() -> None:
     evidence_text = (
         "Les auteurs décrivent les observations dans la matrice étudiée et précisent le cadre "
@@ -491,6 +673,108 @@ def test_evidence_grounding_requires_more_global_text_for_many_rich_citations() 
     )
 
     assert used_ids == evidence_ids
+
+
+def test_evidence_grounding_rejects_a_sentence_truncated_after_scientific_initial() -> None:
+    evidence_id = "common:yeast:abstract"
+    passage = ChatEvidencePassage(
+        evidence_id=evidence_id,
+        text="Hanseniaspora vineae was compared with Saccharomyces cerevisiae in cider.",
+    )
+    record = ChatEvidenceRecord(
+        record_id="common:yeast",
+        origin="local_rag",
+        evidence_level="abstract",
+        scope="common",
+        title="Yeast comparison",
+        evidence_grade="A",
+        passages=[passage],
+    )
+    answer = CiderEvidenceAnswer(
+        status="answerable",
+        response_format="prose",
+        statements=[
+            CitedEvidenceStatement(
+                statement="Hanseniaspora vineae produit des esters absents avec S.",
+                evidence_ids=[evidence_id],
+            )
+        ],
+        limitations=[],
+    )
+
+    with pytest.raises(RuntimeError) as exc_info:
+        _validate_evidence_grounding(
+            answer,
+            {evidence_id: (record, passage)},
+            {evidence_id},
+            None,
+        )
+
+    assert ScientificValidationReason.INVALID_PROSE_STRUCTURE in exc_info.value.reasons
+
+    correction = _validation_correction_message(
+        exc_info.value,
+        output_language_label="français",
+    )
+
+    assert "ne termine jamais une phrase par une initiale isolée" in correction
+
+    connector_answer = answer.model_copy(deep=True)
+    connector_answer.statements[0] = connector_answer.statements[0].model_copy(
+        update={
+            "statement": "De plus, Hanseniaspora vineae a été comparée à Saccharomyces cerevisiae."
+        }
+    )
+    with pytest.raises(RuntimeError) as connector_error:
+        _validate_evidence_grounding(
+            connector_answer,
+            {evidence_id: (record, passage)},
+            {evidence_id},
+            None,
+        )
+
+    assert ScientificValidationReason.INVALID_PROSE_STRUCTURE in connector_error.value.reasons
+
+    orphan_answer = answer.model_copy(deep=True)
+    orphan_answer.statements[0] = orphan_answer.statements[0].model_copy(
+        update={"statement": "marxianus atteint la concentration la plus élevée."}
+    )
+    with pytest.raises(RuntimeError) as orphan_error:
+        _validate_evidence_grounding(
+            orphan_answer,
+            {evidence_id: (record, passage)},
+            {evidence_id},
+            None,
+        )
+
+    assert ScientificValidationReason.INVALID_PROSE_STRUCTURE in orphan_error.value.reasons
+
+    duplicate_answer = answer.model_copy(deep=True)
+    duplicate_answer.statements = [
+        CitedEvidenceStatement(
+            statement=(
+                "Hanseniaspora vineae a été comparée à Saccharomyces cerevisiae dans des "
+                "essais de fermentation du cidre."
+            ),
+            evidence_ids=[evidence_id],
+        ),
+        CitedEvidenceStatement(
+            statement=(
+                "Dans les essais de fermentation du cidre, Hanseniaspora vineae a été comparée "
+                "à Saccharomyces cerevisiae."
+            ),
+            evidence_ids=[evidence_id],
+        ),
+    ]
+    with pytest.raises(RuntimeError) as duplicate_error:
+        _validate_evidence_grounding(
+            duplicate_answer,
+            {evidence_id: (record, passage)},
+            {evidence_id},
+            None,
+        )
+
+    assert ScientificValidationReason.INVALID_PROSE_STRUCTURE in duplicate_error.value.reasons
 
 
 def test_evidence_grounding_reports_all_safe_validation_failures_together() -> None:
@@ -815,7 +1099,7 @@ def test_evidence_rag_uses_only_indirect_evidence_with_explicit_scope() -> None:
     assert "Preuve indirecte" not in result.answer_markdown
     assert "Définition retenue" not in result.answer_markdown
     assert result.answer_markdown.startswith("La question porte sur l'effet du procédé exact")
-    assert "## Limites des preuves" in result.answer_markdown
+    assert "## Limites des preuves" not in result.answer_markdown
     assert "Related downstream process" in result.answer_markdown
     assert "## Références" in result.answer_markdown
 
@@ -877,7 +1161,7 @@ def test_evidence_rag_accepts_study_context_without_indirect_label() -> None:
     assert result.validation_warning_codes == []
 
 
-def test_evidence_rag_retries_a_b_graded_abstention_then_keeps_safe_output() -> None:
+def test_evidence_rag_never_returns_an_abstention_when_a_b_evidence_is_mandatory() -> None:
     passage = ChatEvidencePassage(
         evidence_id="common:adjacent:abstract",
         text=(
@@ -923,7 +1207,9 @@ def test_evidence_rag_retries_a_b_graded_abstention_then_keeps_safe_output() -> 
                         ensure_ascii=False,
                     )
                 )
-            assert "utilise status=insufficient" in messages[-1]["content"]
+            if self.calls == 3:
+                assert '"code": "unjustified_abstention"' in messages[-1]["content"]
+                assert "utilise status=answerable" in messages[-1]["content"]
             return _response(
                 json.dumps(
                     {
@@ -944,36 +1230,35 @@ def test_evidence_rag_retries_a_b_graded_abstention_then_keeps_safe_output() -> 
             )
 
     client = FakeClient()
-    result = CiderEvidenceRagService(client).answer(
-        "Quel agent de clarification est le plus efficace ?",
-        [record],
-    )
+    with pytest.raises(ArgoScientificValidationError) as raised:
+        CiderEvidenceRagService(client).answer(
+            "Quel agent de clarification est le plus efficace ?",
+            [record],
+        )
 
     assert client.calls == 10
-    assert result.answer.status == "insufficient"
-    assert result.generation_status == "abstained"
-    assert result.answer.statements == []
-    assert result.cited_evidence_ids == []
-    assert result.source_record_ids == []
-    assert result.model == "chat-gpt-oss-20b"
-    assert "ne permettent pas de comparer directement" in result.answer_markdown
-    assert "Aucune référence n'est citée." in result.answer_markdown
-    assert "Adjacent clarification process" not in result.answer_markdown
-    assert result.generation_traces[0].model_dump() == {
+    assert set(raised.value.reasons) == {
+        ScientificValidationReason.UNJUSTIFIED_ABSTENTION,
+        ScientificValidationReason.MISSING_REQUIRED_EVIDENCE,
+    }
+    assert raised.value.generation_traces[0].model_dump() == {
         "schema_version": 1,
         "phase": "evidence",
-        "outcome": "abstained",
+        "outcome": "failed",
         "request_count": 10,
         "validation_retries": 9,
         "length_retries": 0,
         "correction_temperature": 0.1,
         "prompt_tokens": 500,
         "completion_tokens": 200,
-        "validation_codes": ["empty_answerable_statements", "missing_required_evidence"],
+        "validation_codes": [
+            "empty_answerable_statements",
+            "unjustified_abstention",
+            "missing_required_evidence",
+        ],
         "presented_evidence_count": 1,
         "cited_evidence_count": 0,
     }
-    assert result.validation_warning_codes == ["missing_required_evidence"]
 
 
 def test_pilot_rag_constrains_ids_and_renders_abstract_citations() -> None:
@@ -1206,7 +1491,7 @@ def test_evidence_rag_uses_full_text_passages_and_renders_exact_pages() -> None:
     assert "mécanismes moléculaires" in result.answer_markdown
 
 
-def test_evidence_rag_exhausted_grounding_retries_raise_worker_safe_error() -> None:
+def test_evidence_rag_stops_after_one_invalid_generation() -> None:
     passage = ChatEvidencePassage(
         evidence_id="common:article-1:chunk:42",
         chunk_id=42,
@@ -1254,7 +1539,7 @@ def test_evidence_rag_exhausted_grounding_retries_raise_worker_safe_error() -> N
     with pytest.raises(ArgoScientificValidationError, match="numeric value 15"):
         CiderEvidenceRagService(client).answer("Quel est l'effet observe ?", [record])
 
-    assert client.calls == 10
+    assert client.calls == 1
 
 
 def test_evidence_rag_returns_best_safe_answer_with_quality_warning_after_ten_requests() -> None:
@@ -1883,19 +2168,19 @@ def test_faceted_evidence_rag_keeps_cited_drafts_and_assembles_them() -> None:
         },
     )
 
-    assert client.calls == 5
+    assert client.calls == 4
     assert result.answer.response_format is ResponseStyle.THEMATIC_SECTIONS
     assert [draft.key for draft in result.facet_drafts] == ["aroma", "structure", "evolution"]
     assert result.facet_drafts[1].cited_evidence_ids == ["common:article-2:chunk:1"]
-    assert result.prompt_tokens == 250
-    assert result.completion_tokens == 100
+    assert result.prompt_tokens == 200
+    assert result.completion_tokens == 80
     assert [trace.phase for trace in result.generation_traces] == [
         "facet_draft",
         "facet_draft",
         "facet_draft",
         "final_assembly",
     ]
-    assert [trace.request_count for trace in result.generation_traces] == [1, 1, 1, 2]
+    assert [trace.request_count for trace in result.generation_traces] == [1, 1, 1, 1]
     assert all(trace.correction_temperature is None for trace in result.generation_traces)
 
 
@@ -1946,7 +2231,7 @@ def test_faceted_final_assembly_failure_returns_cited_partial_drafts() -> None:
         "Quel est l'impact de l'élevage en barrique sur les arômes et la structure ?", records
     )
 
-    assert client.calls == 10
+    assert client.calls == 4
     assert result.generation_status == "partial_generated"
     assert result.cited_evidence_ids == [
         "common:article-1:chunk:1",
@@ -1954,14 +2239,14 @@ def test_faceted_final_assembly_failure_returns_cited_partial_drafts() -> None:
         "common:article-3:chunk:1",
     ]
     assert "ne couvrent qu'une partie" in result.answer_markdown
-    assert result.prompt_tokens == 500
-    assert result.completion_tokens == 200
+    assert result.prompt_tokens == 200
+    assert result.completion_tokens == 80
     failed = result.generation_traces[-1]
     assert failed.phase == "final_assembly"
     assert failed.outcome == "failed"
-    assert failed.request_count == 7
-    assert failed.validation_retries == 6
-    assert failed.correction_temperature == 0.1
+    assert failed.request_count == 1
+    assert failed.validation_retries == 0
+    assert failed.correction_temperature is None
 
 
 def test_first_facet_is_corrected_without_preventing_later_facets() -> None:
@@ -2021,7 +2306,7 @@ def test_first_facet_is_corrected_without_preventing_later_facets() -> None:
         records,
     )
 
-    assert client.calls == 10
+    assert client.calls == 6
     assert result.generation_status == "partial_generated"
     assert [draft.key for draft in result.facet_drafts] == [
         "aroma",
@@ -2035,7 +2320,7 @@ def test_first_facet_is_corrected_without_preventing_later_facets() -> None:
 
 @pytest.mark.parametrize(
     ("effort", "expected_calls"),
-    [(AnswerEffort.DEEP, 10), (AnswerEffort.BALANCED, 10)],
+    [(AnswerEffort.DEEP, 4), (AnswerEffort.BALANCED, 4)],
 )
 def test_faceted_assembly_expands_once_when_effort_claim_threshold_is_validated(
     effort: AnswerEffort, expected_calls: int
@@ -2103,7 +2388,7 @@ def test_faceted_assembly_expands_once_when_effort_claim_threshold_is_validated(
     )
 
     assert client.calls == expected_calls
-    assert result.generation_traces[-1].request_count == 7
+    assert result.generation_traces[-1].request_count == 1
 
 
 @pytest.mark.parametrize("effort", [AnswerEffort.BALANCED, AnswerEffort.DEEP])
@@ -2189,7 +2474,7 @@ def test_faceted_assembly_reexpands_after_salvage_and_preserves_validated_drafts
         },
     )
 
-    assert client.calls == 10
+    assert client.calls == 4
     assert len(result.answer.statements) == 6
     assert result.cited_evidence_ids == [
         "common:article-1:chunk:1",
@@ -2197,7 +2482,7 @@ def test_faceted_assembly_reexpands_after_salvage_and_preserves_validated_drafts
         "common:article-3:chunk:1",
     ]
     assert result.generation_status == "partial_generated"
-    assert result.generation_traces[-1].request_count == 7
+    assert result.generation_traces[-1].request_count == 1
     assert result.generation_traces[-1].outcome == "partial_generated"
 
 

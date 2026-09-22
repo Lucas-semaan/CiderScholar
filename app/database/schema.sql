@@ -46,13 +46,17 @@ CREATE TABLE IF NOT EXISTS chunks (
     article_id TEXT NOT NULL REFERENCES articles(id) ON DELETE CASCADE,
     section TEXT,
     subsection TEXT,
-    page_start INTEGER NOT NULL CHECK(page_start >= 1),
-    page_end INTEGER NOT NULL CHECK(page_end >= page_start),
+    page_start INTEGER,
+    page_end INTEGER,
     chunk_index INTEGER NOT NULL CHECK(chunk_index >= 0),
     text TEXT NOT NULL CHECK(length(trim(text)) > 0),
     token_count INTEGER NOT NULL CHECK(token_count > 0),
     embedding_status TEXT NOT NULL DEFAULT 'pending' CHECK(
         embedding_status IN ('pending', 'processing', 'indexed', 'failed')
+    ),
+    CHECK(
+        (page_start IS NULL AND page_end IS NULL)
+        OR (page_start >= 1 AND page_end >= page_start)
     ),
     UNIQUE(article_id, chunk_index)
 );
@@ -102,9 +106,22 @@ CREATE TABLE IF NOT EXISTS evidence (
     chunk_id INTEGER NOT NULL REFERENCES chunks(id) ON DELETE CASCADE,
     claim TEXT NOT NULL,
     source_excerpt TEXT NOT NULL,
-    page_start INTEGER NOT NULL CHECK(page_start >= 1),
-    page_end INTEGER NOT NULL CHECK(page_end >= page_start),
-    relevance_score REAL NOT NULL CHECK(relevance_score BETWEEN 0.0 AND 1.0)
+    page_start INTEGER,
+    page_end INTEGER,
+    locator_kind TEXT NOT NULL DEFAULT 'page' CHECK(locator_kind IN ('page', 'structural')),
+    section_path TEXT,
+    paragraph_start INTEGER,
+    paragraph_end INTEGER,
+    xml_id_start TEXT,
+    xml_id_end TEXT,
+    relevance_score REAL NOT NULL CHECK(relevance_score BETWEEN 0.0 AND 1.0),
+    CHECK(
+        (locator_kind = 'page' AND page_start >= 1 AND page_end >= page_start
+         AND section_path IS NULL AND paragraph_start IS NULL AND paragraph_end IS NULL)
+        OR (locator_kind = 'structural' AND page_start IS NULL AND page_end IS NULL
+            AND length(trim(section_path)) > 0 AND paragraph_start >= 0
+            AND paragraph_end >= paragraph_start)
+    )
 );
 
 CREATE INDEX IF NOT EXISTS idx_evidence_query ON evidence(query_id);

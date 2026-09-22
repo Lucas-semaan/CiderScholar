@@ -8,6 +8,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.llm.contracts import DictionaryGenerationClient as SemanticVerificationClient
+from app.llm.structured_output import validate_structured_response
 from app.llm.validation_cache import ValidationCache, client_identity, content_key
 from app.telemetry import measured
 
@@ -139,6 +140,7 @@ _SYSTEM_PROMPT = (
     "contradicted s'il la contredit, uncertain s'il ne permet pas de décider, et not_applicable "
     "uniquement si la dimension n'apparaît pas dans l'affirmation. Ne complète rien par "
     "connaissance externe et réponds seulement avec l'objet JSON demandé."
+    " Chaque reason doit être une justification factuelle très brève (au plus douze mots)."
 )
 
 
@@ -180,7 +182,11 @@ class ClaimVerifier:
             else:
                 results[claim["claim_id"]] = cached
         while pending:
-            batch = pending[:10]
+            # Each claim expands into six reasoned checks.  Ten claims can exceed the
+            # provider's JSON completion window even though the input remains small;
+            # two claims keep every mandatory verification complete and independently
+            # cacheable.
+            batch = pending[:2]
 
             def messages(batch=batch):
                 return [
@@ -220,7 +226,7 @@ class ClaimVerifier:
             self.prompt_tokens += getattr(metrics, "prompt_eval_count", 0)
             self.completion_tokens += getattr(metrics, "eval_count", 0)
             try:
-                drafts = _VerificationDrafts.model_validate_json(response.content)
+                drafts = validate_structured_response(response.content, _VerificationDrafts)
                 expected = {item["claim_id"] for item in batch}
                 observed = [item.claim_id for item in drafts.verifications]
                 if len(observed) != len(set(observed)) or set(observed) != expected:

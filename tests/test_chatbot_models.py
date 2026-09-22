@@ -29,6 +29,35 @@ def test_evidence_record_defaults_facet_ranking_metadata() -> None:
     assert record.matrix_tier == "none"
 
 
+def test_full_text_passage_accepts_structural_locator_but_rejects_mixed_coordinates() -> None:
+    passage = ChatEvidencePassage(
+        evidence_id="native:1",
+        chunk_id=1,
+        text="Native XML evidence.",
+        locator_kind="structural",
+        section_path="Results/Fermentation",
+        paragraph_start=2,
+        paragraph_end=3,
+        xml_id_start="p2",
+        xml_id_end="p3",
+    )
+
+    assert passage.page_start is None
+    assert passage.paragraph_end == 3
+    with pytest.raises(ValidationError, match="cannot carry page"):
+        ChatEvidencePassage(
+            evidence_id="invalid-native:1",
+            chunk_id=1,
+            text="Native XML evidence.",
+            locator_kind="structural",
+            section_path="Results",
+            paragraph_start=2,
+            paragraph_end=2,
+            page_start=1,
+            page_end=1,
+        )
+
+
 def test_facet_draft_is_bounded_and_serializable() -> None:
     draft = ChatbotFacetDraft(
         key="aroma",

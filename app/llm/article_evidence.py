@@ -8,7 +8,7 @@ import re
 import unicodedata
 from collections.abc import Mapping, Sequence
 from time import perf_counter
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
@@ -18,6 +18,7 @@ from app.llm.contracts import GenerationClient as EvidenceChatClient
 from app.llm.contracts import (
     GenerationMetrics,
 )
+from app.llm.structured_output import validate_structured_response
 from app.models.evidence import ArticleEvidence
 from app.retrieval.evidence_selection import exact_sentence_units
 from app.retrieval.hierarchical_index import SqliteHierarchicalIndex
@@ -79,8 +80,8 @@ def evidence_json_schema(
     """Build the strict structural schema enforced again by Pydantic after generation."""
 
     chunk_ids = [str(passage.chunk_id) for passage in passages or []]
-    page_starts = sorted({passage.page_start for passage in passages or []})
-    page_ends = sorted({passage.page_end for passage in passages or []})
+    page_starts = sorted({passage.page_start for passage in passages or [] if passage.page_start})
+    page_ends = sorted({passage.page_end for passage in passages or [] if passage.page_end})
     finding = {
         "type": "object",
         "additionalProperties": False,
@@ -90,6 +91,7 @@ def evidence_json_schema(
                 "type": "string",
                 **({"enum": list(allowed_excerpts)} if allowed_excerpts else {}),
             },
+            "locator_kind": {"enum": ["page", "structural"]},
             "page_start": {
                 "type": "integer",
                 **({"enum": page_starts} if page_starts else {}),
@@ -98,6 +100,11 @@ def evidence_json_schema(
                 "type": "integer",
                 **({"enum": page_ends} if page_ends else {}),
             },
+            "section_path": {"type": "string"},
+            "paragraph_start": {"type": "integer"},
+            "paragraph_end": {"type": "integer"},
+            "xml_id_start": {"type": ["string", "null"]},
+            "xml_id_end": {"type": ["string", "null"]},
             "chunk_id": {
                 "type": "string",
                 **({"enum": chunk_ids} if chunk_ids else {}),
@@ -106,9 +113,24 @@ def evidence_json_schema(
         "required": [
             "claim",
             "source_excerpt",
-            "page_start",
-            "page_end",
+            "locator_kind",
             "chunk_id",
+        ],
+        "oneOf": [
+            {
+                "properties": {"locator_kind": {"const": "page"}},
+                "required": ["page_start", "page_end"],
+            },
+            {
+                "properties": {"locator_kind": {"const": "structural"}},
+                "required": [
+                    "section_path",
+                    "paragraph_start",
+                    "paragraph_end",
+                    "xml_id_start",
+                    "xml_id_end",
+                ],
+            },
         ],
     }
     properties: dict[str, Any] = {
@@ -148,8 +170,14 @@ class SelectedPassage(BaseModel):
     chunk_id: int = Field(gt=0)
     article_id: str
     section: str | None
-    page_start: int = Field(ge=1)
-    page_end: int = Field(ge=1)
+    page_start: int | None = Field(default=None, ge=1)
+    page_end: int | None = Field(default=None, ge=1)
+    locator_kind: Literal["page", "structural"] | None = None
+    section_path: str | None = None
+    paragraph_start: int | None = Field(default=None, ge=0)
+    paragraph_end: int | None = Field(default=None, ge=0)
+    xml_id_start: str | None = None
+    xml_id_end: str | None = None
     text: str = Field(min_length=1)
     selection_score: float = Field(ge=0.0, le=1.0)
     selection_reasons: list[str]
@@ -157,7 +185,11 @@ class SelectedPassage(BaseModel):
 
     @model_validator(mode="after")
     def validate_pages(self) -> SelectedPassage:
-        if self.page_end < self.page_start:
+        if (
+            self.page_start is not None
+            and self.page_end is not None
+            and self.page_end < self.page_start
+        ):
             raise ValueError("selected passage page_end cannot precede page_start")
         return self
 
@@ -167,8 +199,14 @@ class PassageReference(BaseModel):
 
     chunk_id: int = Field(gt=0)
     section: str | None
-    page_start: int = Field(ge=1)
-    page_end: int = Field(ge=1)
+    page_start: int | None = Field(default=None, ge=1)
+    page_end: int | None = Field(default=None, ge=1)
+    locator_kind: Literal["page", "structural"] | None = None
+    section_path: str | None = None
+    paragraph_start: int | None = Field(default=None, ge=0)
+    paragraph_end: int | None = Field(default=None, ge=0)
+    xml_id_start: str | None = None
+    xml_id_end: str | None = None
     selection_score: float = Field(ge=0.0, le=1.0)
     selection_reasons: list[str]
 
@@ -268,8 +306,22 @@ class EvidencePassageSelector:
             chunk_id=int(row["id"]),
             article_id=article_id,
             section=section,
-            page_start=int(row["page_start"]),
-            page_end=int(row["page_end"]),
+            page_start=(int(row["page_start"]) if row["page_start"] is not None else None),
+            page_end=(int(row["page_end"]) if row["page_end"] is not None else None),
+            locator_kind=(row["locator_kind"] if "locator_kind" in row else None),  # noqa: SIM401
+            section_path=(row["section_path"] if "section_path" in row else None),  # noqa: SIM401
+            paragraph_start=(
+                int(row["paragraph_start"])
+                if "paragraph_start" in row and row["paragraph_start"] is not None
+                else None
+            ),
+            paragraph_end=(
+                int(row["paragraph_end"])
+                if "paragraph_end" in row and row["paragraph_end"] is not None
+                else None
+            ),
+            xml_id_start=(row["xml_id_start"] if "xml_id_start" in row else None),  # noqa: SIM401
+            xml_id_end=(row["xml_id_end"] if "xml_id_end" in row else None),  # noqa: SIM401
             text=text,
             selection_score=min(max(score, 0.0), 1.0),
             selection_reasons=reasons or ["bounded article candidate"],
@@ -532,8 +584,18 @@ class ArticleEvidenceExtractor:
                 raise EvidenceSourceValidationError(
                     "finding references a chunk that was not supplied"
                 )
+            if finding.locator_kind != (passage.locator_kind or "page"):
+                raise EvidenceSourceValidationError("finding locator kind differs from SQLite")
             if finding.page_start != passage.page_start or finding.page_end != passage.page_end:
                 raise EvidenceSourceValidationError("finding page bounds differ from SQLite")
+            if finding.locator_kind == "structural" and (
+                finding.section_path != passage.section_path
+                or finding.paragraph_start != passage.paragraph_start
+                or finding.paragraph_end != passage.paragraph_end
+                or finding.xml_id_start != passage.xml_id_start
+                or finding.xml_id_end != passage.xml_id_end
+            ):
+                raise EvidenceSourceValidationError("finding structural bounds differ from SQLite")
             if finding.source_excerpt not in passage.text:
                 raise EvidenceSourceValidationError(
                     "finding excerpt is not a verbatim substring of its SQLite chunk"
@@ -551,6 +613,12 @@ class ArticleEvidenceExtractor:
                 section=passage.section,
                 page_start=passage.page_start,
                 page_end=passage.page_end,
+                locator_kind=passage.locator_kind,
+                section_path=passage.section_path,
+                paragraph_start=passage.paragraph_start,
+                paragraph_end=passage.paragraph_end,
+                xml_id_start=passage.xml_id_start,
+                xml_id_end=passage.xml_id_end,
                 selection_score=passage.selection_score,
                 selection_reasons=passage.selection_reasons,
             )
@@ -619,9 +687,9 @@ class ArticleEvidenceExtractor:
                 )
                 metrics.append(response.metrics)
                 try:
-                    evidence = ArticleEvidence.model_validate_json(response.content)
+                    evidence = validate_structured_response(response.content, ArticleEvidence)
                     self._validate_sources(evidence, article_id=article_id, passages=passages)
-                except (ValidationError, EvidenceSourceValidationError) as exc:
+                except (ValidationError, ValueError, EvidenceSourceValidationError) as exc:
                     last_error = exc
                     LOGGER.warning(
                         "Evidence validation failed article_id=%s attempt=%s error_type=%s",

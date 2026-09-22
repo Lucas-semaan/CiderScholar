@@ -294,6 +294,66 @@ def test_vector_search_hydrates_text_only_from_sqlite(settings) -> None:
         index.close()
 
 
+def test_vector_search_indexes_native_chunks_with_structural_locators(settings) -> None:
+    database = Database(settings.paths.database_path)
+    database.initialize()
+    database.save_article_and_chunks(
+        {
+            "id": "native-article",
+            "sha256": "n" * 64,
+            "title": "Native XML article",
+            "pdf_path": "",
+            "validation_status": "validated",
+            "source": "europe_pmc",
+        },
+        [
+            {
+                "section": "Results",
+                "page_start": None,
+                "page_end": None,
+                "chunk_index": 0,
+                "text": "Native structural fermentation result.",
+                "token_count": 5,
+            }
+        ],
+    )
+    asset_id = database.save_article_source_asset(
+        article_id="native-article",
+        kind="jats_xml",
+        file_path="data/common/full-text/native.xml",
+        sha256="e" * 64,
+        media_type="application/xml",
+        byte_count=100,
+        provider="europe_pmc",
+    )
+    chunk_id = int(database.chunks_for_article("native-article", limit=1)[0]["id"])
+    database.save_structural_chunk_locator(
+        chunk_id=chunk_id,
+        asset_id=asset_id,
+        section_path="Results",
+        paragraph_start=1,
+        paragraph_end=1,
+        xml_id_start="result-1",
+        xml_id_end="result-1",
+        span_text="Native structural fermentation result.",
+    )
+    backend = FakeBackend()
+    index = QdrantLocalIndex(settings, model_name=backend.model_name, collection_name="native")
+    try:
+        report = EmbeddingBatchProcessor(settings, database, backend).run(index)
+        results = VectorSearchService(database, FakeBackend(), index).search("fermentation")
+
+        assert report.chunks_indexed == 1
+        assert results[0].chunk_id == chunk_id
+        assert results[0].page_start is None
+        assert results[0].page_end is None
+        assert results[0].locator_kind == "structural"
+        assert results[0].section_path == "Results"
+        assert results[0].xml_id_start == "result-1"
+    finally:
+        index.close()
+
+
 def test_vector_search_rejects_a_backend_with_a_different_model(settings) -> None:
     database = Database(settings.paths.database_path)
     database.initialize()

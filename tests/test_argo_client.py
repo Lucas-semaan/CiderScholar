@@ -15,8 +15,11 @@ from app.llm.argo_client import (
     ArgoClient,
     ArgoGenerationError,
     ArgoQuotaError,
+    ArgoRequestTimeoutError,
+    ArgoTransportError,
     clear_model_validation_cache,
 )
+from app.memory import MemoryLimitError
 from app.services.argo_quota import ArgoQuotaReservation
 
 
@@ -81,6 +84,116 @@ def test_argo_client_can_bound_one_workflow_request_below_global_timeout(setting
         assert client._http.timeout.connect == pytest.approx(10.0)
     finally:
         client.close()
+
+
+def test_argo_client_preserves_request_timeout_cause(settings) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("simulated read timeout", request=request)
+
+    with (
+        ArgoClient(
+            settings,
+            api_key="unit-test-secret",
+            transport=httpx.MockTransport(handler),
+        ) as client,
+        pytest.raises(ArgoRequestTimeoutError) as captured,
+    ):
+        client.list_models()
+
+    assert isinstance(captured.value.__cause__, httpx.ReadTimeout)
+
+
+def test_argo_client_preserves_transport_failure_cause(settings) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("simulated connection failure", request=request)
+
+    with (
+        ArgoClient(
+            settings,
+            api_key="unit-test-secret",
+            transport=httpx.MockTransport(handler),
+        ) as client,
+        pytest.raises(ArgoTransportError) as captured,
+    ):
+        client.list_models()
+
+    assert isinstance(captured.value.__cause__, httpx.ConnectError)
+
+
+def test_argo_client_checks_memory_before_reserving_or_sending_chat(settings) -> None:
+    requests: list[httpx.Request] = []
+    reservations = 0
+
+    class LowMemoryGuard:
+        def check(self, operation: str) -> None:
+            assert operation == "ARGO request"
+            raise MemoryLimitError("simulated memory pressure")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json=_models())
+
+    def on_reserved() -> None:
+        nonlocal reservations
+        reservations += 1
+
+    with ArgoClient(
+        settings,
+        api_key="unit-test-secret",
+        transport=httpx.MockTransport(handler),
+    ) as client:
+        client.memory = LowMemoryGuard()  # type: ignore[assignment]
+        with pytest.raises(MemoryLimitError, match="memory pressure"):
+            client.chat(
+                [{"role": "user", "content": "Question"}],
+                on_request_reserved=on_reserved,
+            )
+
+    assert requests == []
+    assert reservations == 0
+
+
+def test_argo_client_does_not_discard_response_when_memory_drops_during_request(
+    settings,
+) -> None:
+    chat_response_received = False
+
+    class MemoryGuardTrackingRequestBoundary:
+        def check(self, operation: str) -> None:
+            assert operation == "ARGO request"
+            if chat_response_received:
+                raise MemoryLimitError("response must not be discarded")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal chat_response_received
+        if request.url.path.endswith("/models"):
+            return httpx.Response(200, json=_models())
+        chat_response_received = True
+        return httpx.Response(
+            200,
+            json={
+                "model": "chat-gpt-oss-120b",
+                "choices": [
+                    {
+                        "message": {"role": "assistant", "content": "Réponse valide"},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {"prompt_tokens": 2, "completion_tokens": 3},
+            },
+        )
+
+    clear_model_validation_cache()
+    with ArgoClient(
+        settings,
+        api_key="memory-boundary-test-key",
+        transport=httpx.MockTransport(handler),
+    ) as client:
+        client.memory = MemoryGuardTrackingRequestBoundary()  # type: ignore[assignment]
+        response = client.chat([{"role": "user", "content": "Question"}])
+
+    assert chat_response_received is True
+    assert response.content == "Réponse valide"
 
 
 def test_argo_client_uses_personal_dpapi_key_before_environment(settings, monkeypatch) -> None:

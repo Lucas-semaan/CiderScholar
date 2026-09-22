@@ -6,7 +6,7 @@ import pytest
 from tokenizers import Tokenizer, models, pre_tokenizers, processors
 
 from app.ingestion.chunker import ScientificChunker
-from app.ingestion.pdf_extractor import PageText
+from app.ingestion.pdf_extractor import PageText, StructuralTextBlock
 from app.ingestion.token_budget import LocalEmbeddingTokenBudget
 
 
@@ -66,3 +66,35 @@ def test_exact_chunking_keeps_major_sections_as_hard_boundaries(tmp_path: Path) 
     assert {chunk.section for chunk in chunks} == {"Abstract", "Results", "Conclusion"}
     assert all(chunk.page_start == chunk.page_end for chunk in chunks)
     assert all(chunk.token_count == budget.count(chunk.text) <= 12 for chunk in chunks)
+
+
+def test_structural_chunking_preserves_native_blocks_without_pages(tmp_path: Path) -> None:
+    budget = _budget(tmp_path, maximum=10)
+    text = " ".join(f"result{index}" for index in range(18))
+    block = StructuralTextBlock(
+        block_id=StructuralTextBlock.make_block_id(
+            kind="paragraph",
+            section_path="Results / Fermentation",
+            paragraph_number=3,
+            text=text,
+            xml_id="result-3",
+        ),
+        kind="paragraph",
+        section_path="Results / Fermentation",
+        paragraph_number=3,
+        text=text,
+        xml_id="result-3",
+    )
+
+    chunks = ScientificChunker(
+        target_tokens=9,
+        max_tokens=10,
+        overlap_tokens=0,
+        token_budget=budget,
+    ).chunk_structural_blocks([block])
+
+    assert len(chunks) > 1
+    assert all(chunk.section == "Results / Fermentation" for chunk in chunks)
+    assert all(chunk.page_start is None and chunk.page_end is None for chunk in chunks)
+    assert all(chunk.token_count == budget.count(chunk.text) <= 10 for chunk in chunks)
+    assert " ".join(chunk.text for chunk in chunks).split() == text.split()

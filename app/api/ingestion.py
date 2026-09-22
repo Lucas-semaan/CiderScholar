@@ -5,12 +5,17 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
 from fastapi import Path as ApiPath
 from fastapi.responses import FileResponse
 
 from app.api.dependencies import get_common_corpus_database, get_common_corpus_settings
-from app.api.schemas import FolderIngestionRequest, IndexRequest
+from app.api.schemas import (
+    ChunkCorrectionDecisionRequest,
+    ChunkCorrectionRequest,
+    FolderIngestionRequest,
+    IndexRequest,
+)
 from app.api.serialization import corpus_listing, serialize_row
 from app.config import Settings
 from app.database.sqlite import Database
@@ -40,6 +45,108 @@ def article_chunks(
 ) -> dict[str, Any]:
     chunks = [serialize_row(row) for row in database.chunks_for_article(article_id, limit=500)]
     return {"article_id": article_id, "chunks": chunks}
+
+
+@router.get("/{article_id}/native-source")
+def native_source_view(
+    article_id: str,
+    database: Annotated[Database, Depends(get_common_corpus_database)],
+) -> dict[str, Any]:
+    """Return safe, structured native-source passages for the local viewer."""
+
+    source = database.native_source_view(article_id)
+    if source is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Document introuvable dans la base documentaire.",
+        )
+    return {"article_id": article_id, **source}
+
+
+@router.get("/{article_id}/tables")
+def article_tables(
+    article_id: str,
+    database: Annotated[Database, Depends(get_common_corpus_database)],
+) -> dict[str, Any]:
+    """Expose deterministic source-table cells for local inspection only."""
+
+    if database.article_details_by_ids([article_id]).get(article_id) is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document introuvable.")
+    return {
+        "article_id": article_id,
+        "tables": [table.model_dump(mode="json") for table in database.table_evidence(article_id)],
+    }
+
+
+@router.get("/{article_id}/figures")
+def article_figures(
+    article_id: str,
+    database: Annotated[Database, Depends(get_common_corpus_database)],
+) -> dict[str, Any]:
+    """Expose source figure captions for local inspection, never generated analysis."""
+
+    if database.article_details_by_ids([article_id]).get(article_id) is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document introuvable.")
+    return {
+        "article_id": article_id,
+        "figures": [
+            figure.model_dump(mode="json") for figure in database.figure_evidence(article_id)
+        ],
+    }
+
+
+@router.get("/{article_id}/inspection")
+def article_inspection(
+    article_id: str,
+    database: Annotated[Database, Depends(get_common_corpus_database)],
+    limit: Annotated[int, Query(ge=1, le=500)] = 100,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> dict[str, Any]:
+    """Inspect bounded provenance and structure without returning chunk source text."""
+
+    inspection = database.article_inspection(article_id, limit=limit, offset=offset)
+    if inspection is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Document introuvable dans la base documentaire.",
+        )
+    return inspection
+
+
+@router.get("/{article_id}/corrections")
+def article_corrections(
+    article_id: str, database: Annotated[Database, Depends(get_common_corpus_database)]
+) -> dict[str, Any]:
+    if database.article_inspection(article_id, limit=1, offset=0) is None:
+        raise HTTPException(
+            status_code=404, detail="Document introuvable dans la base documentaire."
+        )
+    return {"article_id": article_id, "corrections": database.chunk_corrections(article_id)}
+
+
+@router.post("/{article_id}/corrections", status_code=status.HTTP_201_CREATED)
+def propose_article_correction(
+    article_id: str,
+    payload: ChunkCorrectionRequest,
+    database: Annotated[Database, Depends(get_common_corpus_database)],
+) -> dict[str, str]:
+    if payload.chunk_id not in database.article_chunk_ids(article_id):
+        raise HTTPException(status_code=404, detail="Fragment introuvable pour ce document.")
+    correction_id = database.propose_chunk_correction(**payload.model_dump())
+    return {"id": correction_id, "state": "proposed"}
+
+
+@router.post("/{article_id}/corrections/{correction_id}/decision")
+def decide_article_correction(
+    article_id: str,
+    correction_id: str,
+    payload: ChunkCorrectionDecisionRequest,
+    database: Annotated[Database, Depends(get_common_corpus_database)],
+) -> dict[str, str]:
+    if correction_id not in {item["id"] for item in database.chunk_corrections(article_id)}:
+        raise HTTPException(status_code=404, detail="Correction introuvable pour ce document.")
+    database.decide_chunk_correction(correction_id, approved=payload.decision == "approved")
+    return {"id": correction_id, "state": payload.decision}
 
 
 @router.get("/{article_id:path}/pdf", response_class=FileResponse)

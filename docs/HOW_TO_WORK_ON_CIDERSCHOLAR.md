@@ -523,6 +523,14 @@ La longueur suit la complexité et la couverture documentaire, pas un objectif d
 introduction scientifique utile définit le périmètre et les distinctions nécessaires ; elle ne devient
 pas une généralité encyclopédique non sourcée.
 
+Instruction utilisateur explicite et durable du 21 septembre 2026 : les appels ARGO sont soumis aux
+fenêtres glissantes personnelles suivantes : **20 requêtes par minute**, **120 requêtes par heure** et
+**200 requêtes par période de 180 minutes**. Toute requête, y compris la découverte de modèles, une
+reprise et un appel qui échoue, réserve atomiquement son créneau persistant avant l'envoi ; si un plafond
+est atteint, ne pas émettre d'appel de sondage ni de nouvelle tentative avant l'instant de reprise
+calculé. Les boucles d'évaluation et de correction s'arrêtent alors proprement avec un diagnostic
+reprenable, sans jamais tenter de contourner ces plafonds.
+
 Instruction utilisateur explicite et durable du 31 août 2026 : la réponse conversationnelle d'Argo
 est une synthèse du sujet construite à partir des fragments pertinents, pas une succession de résumés
 de fragments. Elle commence par une mini-introduction utile qui situe la matrice, le procédé, les
@@ -535,14 +543,9 @@ Instruction utilisateur explicite et durable du 1er septembre 2026 : la fenêtre
 conversationnelle ne retranche pas arbitrairement les preuves pertinentes retenues par le RAG. Tous
 les éléments A/B présentés à la génération contribuent à au moins une affirmation citée ; plusieurs fragments
 convergents ou complémentaires peuvent soutenir une même idée synthétique. Une réponse qui en omet un,
-ou qui réduit un ensemble riche à quelques phrases anormalement courtes, est corrigée à partir des mêmes
-preuves dans une enveloppe globale de dix requêtes de génération au plus, réponse initiale comprise. À
-chaque repasse, transmettre à Argo tous les codes encore actifs et une modification concrète attendue pour
-chacun. Le code d'omission énumère les identifiants exacts des preuves A/B encore absentes, afin qu'Argo
-ne doive pas les déduire de nouveau dans une longue fenêtre. Une seule consigne de repasse reste active
-dans le prompt : elle remplace la précédente et tient
-dans la marge d'entrée réservée, afin que dix tentatives ne fassent pas croître cumulativement le contexte.
-Tout dépassement résiduel est traduit en diagnostic scientifique structuré plutôt qu'en erreur interne. Si
+ou qui réduit un ensemble riche à quelques phrases anormalement courtes, est validée dans une enveloppe
+globale d’une requête de génération au plus, réponse initiale comprise. Tout rejet résiduel est traduit en
+diagnostic scientifique structuré plutôt qu'en erreur interne, sans repasse ARGO. Si
 le contexte doit être ajusté à la borne d'entrée du fournisseur, raccourcir le
 texte de chaque passage sans supprimer son identité ni sa provenance ; la sélection RAG en amont reste
 le lieu où sont écartés les doublons ou éléments non pertinents. Cette exigence n'autorise ni citation
@@ -557,7 +560,7 @@ dégradation et laisser la génération ainsi que les validateurs affirmation-pa
 repli n'autorise jamais une preuve externe, une citation inventée ou le contournement des contrôles
 numériques, causaux, normatifs et de sécurité.
 
-Après épuisement des dix requêtes, distinguer les blocages scientifiques des avertissements de qualité.
+Après épuisement de l’unique requête, distinguer les blocages scientifiques des avertissements de qualité.
 Une référence de preuve inexistante, une preuve C/D utilisée comme appui, une affirmation numérique,
 causale, normative, évaluative ou de sécurité non étayée, une fuite d'identifiant ou du processus interne,
 un schéma inutilisable et une question altérée restent bloquants. Une introduction trop courte, une
@@ -565,8 +568,8 @@ synthèse trop brève, une typologie imparfaite, une facette ou une preuve A/B o
 de structure, ainsi que l'absence de libellé explicite sur la portée indirecte d'une preuve B, peuvent
 devenir des avertissements seulement si toutes les affirmations affichées restent scientifiquement sûres.
 Une abstention générée alors que le filtre global a présenté des preuves A/B est elle-même traitée comme
-une omission à corriger : elle ne court-circuite pas les repasses. Si les dix requêtes restent toutes des
-abstentions, la plus précise peut être rendue sans citation plutôt qu'une erreur interne. Dès qu'une
+une omission signalée par le diagnostic. Si l’unique requête reste une abstention, la plus précise peut
+être rendue sans citation plutôt qu'une erreur interne. Dès qu'une
 version answerable sûre existe, le meilleur candidat privilégie d'abord le nombre de preuves A/B réellement
 citées, puis la qualité formelle et la longueur étayée. Cette version est rendue avec
 `partial_generated`, les codes d'avertissement et une limitation lisible ; aucune affirmation bloquée

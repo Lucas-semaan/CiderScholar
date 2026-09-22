@@ -98,7 +98,7 @@ describe("JobStatusCard", () => {
     expect(markup).not.toContain("Quota ARGO temporairement atteint");
   });
 
-  it("explains a scheduled complete scientific regeneration", () => {
+  it("explains a scheduled scientific-validation resume", () => {
     const markup = renderToStaticMarkup(
       createElement(JobStatusCard, {
         job: {
@@ -106,14 +106,18 @@ describe("JobStatusCard", () => {
           state: "queued",
           error: {
             code: "timeout",
-            message: "Une nouvelle génération scientifique complète est planifiée.",
+            message: "La validation scientifique obligatoire n'a pas terminé.",
             retry_at: "2026-07-22T14:30:00Z",
           },
         },
       }),
     );
 
-    expect(markup).toContain("Une nouvelle génération scientifique complète est planifiée.");
+    expect(markup).toContain("Reprise automatique de la validation scientifique");
+    expect(markup).toContain("La validation scientifique obligatoire n&#x27;a pas terminé.");
+    expect(markup).toContain("à partir des preuves locales déjà sélectionnées");
+    expect(markup).toContain('dateTime="2026-07-22T14:30:00Z"');
+    expect(markup).not.toContain("créneaux de traitement occupés");
     expect(markup).not.toContain("sans consommer de requête ARGO");
   });
 

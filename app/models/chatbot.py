@@ -31,6 +31,12 @@ class ChatEvidencePassage(BaseModel):
     ] = "other"
     page_start: int | None = Field(default=None, ge=1)
     page_end: int | None = Field(default=None, ge=1)
+    locator_kind: Literal["page", "structural"] | None = None
+    section_path: str | None = Field(default=None, max_length=2_000)
+    paragraph_start: int | None = Field(default=None, ge=0)
+    paragraph_end: int | None = Field(default=None, ge=0)
+    xml_id_start: str | None = Field(default=None, max_length=255)
+    xml_id_end: str | None = Field(default=None, max_length=255)
     figure_analysis_id: str | None = Field(
         default=None,
         pattern=r"^figure-analysis-[0-9a-f]{24}$",
@@ -46,8 +52,28 @@ class ChatEvidencePassage(BaseModel):
             raise ValueError("evidence pages must be both present or both absent")
         if pages[0] is not None and pages[1] is not None and pages[1] < pages[0]:
             raise ValueError("evidence page_end cannot precede page_start")
-        if self.chunk_id is not None and self.page_start is None:
-            raise ValueError("full-text chunk evidence requires page coordinates")
+        structural = (self.section_path, self.paragraph_start, self.paragraph_end)
+        if any(value is not None for value in structural):
+            if self.locator_kind != "structural" or not all(
+                value is not None for value in structural
+            ):
+                raise ValueError("structural evidence requires path and paragraph bounds")
+            if (
+                self.paragraph_end is not None
+                and self.paragraph_start is not None
+                and self.paragraph_end < self.paragraph_start
+            ):
+                raise ValueError("structural evidence paragraph bounds are invalid")
+            if self.page_start is not None:
+                raise ValueError("structural evidence cannot carry page coordinates")
+        elif self.locator_kind == "structural":
+            raise ValueError("structural evidence requires path and paragraph bounds")
+        if (
+            self.chunk_id is not None
+            and self.page_start is None
+            and self.locator_kind != "structural"
+        ):
+            raise ValueError("full-text chunk evidence requires a typed locator")
         figure_fields = (
             self.figure_analysis_id,
             self.figure_label,
@@ -106,6 +132,7 @@ class ChatbotSource(BaseModel):
     article_id: str | None = None
     chunk_ids: list[int] = Field(default_factory=list, max_length=8)
     page_ranges: list[str] = Field(default_factory=list, max_length=8)
+    structural_ranges: list[str] = Field(default_factory=list, max_length=8)
     figure_refs: list[str] = Field(default_factory=list, max_length=8)
     title: str
     authors: list[str] = Field(default_factory=list)

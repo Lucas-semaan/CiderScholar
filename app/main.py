@@ -27,6 +27,7 @@ from app.api.library import router as library_router
 from app.api.llm_providers import router as llm_providers_router
 from app.api.onboarding import router as onboarding_router
 from app.api.publisher_access import router as publisher_access_router
+from app.api.retrieval_lab import router as retrieval_lab_router
 from app.api.synthesis import router as synthesis_router
 from app.api.system import router as system_router
 from app.config import Settings, configured_secret_names, load_settings
@@ -106,6 +107,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     application.include_router(llm_providers_router)
     application.include_router(onboarding_router)
     application.include_router(publisher_access_router)
+    application.include_router(retrieval_lab_router)
     application.include_router(synthesis_router)
     mount_frontend(application)
     return application

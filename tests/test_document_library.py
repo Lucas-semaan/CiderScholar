@@ -174,6 +174,36 @@ def test_cidre_theme_is_transversal_across_metadata_and_full_text(settings) -> N
     assert all(record["relevance_theme"] == "fermentation" for record in result["records"])
 
 
+def test_native_full_text_is_not_advertised_as_a_pdf(settings) -> None:
+    database = Database(settings.paths.common_database_path)
+    database.initialize()
+    database.save_article_and_chunks(
+        {
+            "id": "native-only",
+            "sha256": "a" * 64,
+            "doi": "10.1000/native-only",
+            "title": "Native-only article",
+            "pdf_path": "",
+            "source": "europe_pmc",
+        },
+        [
+            {
+                "page_start": None,
+                "page_end": None,
+                "chunk_index": 0,
+                "text": "Native structured full text.",
+                "token_count": 4,
+            }
+        ],
+    )
+
+    record = browse_document_library(database, availability="full_text")["records"][0]
+
+    assert record["document_type"] == "full_text"
+    assert record["pdf_available"] is False
+    assert record["pdf_path"] == ""
+
+
 def test_acquisition_queue_keeps_metadata_separate_from_usable_documents(settings) -> None:
     database = _seed_unified_documents(settings)
 

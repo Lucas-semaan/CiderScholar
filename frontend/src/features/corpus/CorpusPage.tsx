@@ -11,13 +11,25 @@ import { JobStatusCard } from "@/features/chatbot/JobStatusCard";
 import { pollDurableJob } from "@/features/chatbot/jobPolling";
 import { CorpusArticlesPanel } from "@/features/corpus/CorpusArticlesPanel";
 import { CorpusImportPanel } from "@/features/corpus/CorpusImportPanel";
+import { CorpusInspectionDialog } from "@/features/corpus/CorpusInspectionDialog";
+import { FigureEvidenceDialog } from "@/features/corpus/FigureEvidenceDialog";
+import { NativeSourceDialog } from "@/features/corpus/NativeSourceDialog";
+import { TableEvidenceDialog } from "@/features/corpus/TableEvidenceDialog";
 import { CorpusActivityPanel, DeleteArticleDialog } from "@/features/corpus/CorpusSupportPanels";
 import { ingestionOutcomeMessage } from "@/features/corpus/ingestionSummary";
 import { useRemoteData } from "@/hooks/useRemoteData";
 import { api } from "@/lib/api";
 import { formatNumber } from "@/lib/cn";
 import { corpusDestinations, corpusTabFromQuery, type CorpusTab } from "@/lib/navigation";
-import type { CorpusArticle, DurableJob, IngestionReport } from "@/types/api";
+import type {
+  CorpusArticle,
+  CorpusInspection,
+  FigureEvidenceView,
+  DurableJob,
+  IngestionReport,
+  NativeSourceView,
+  TableEvidenceView,
+} from "@/types/api";
 
 const corpusTabs: Array<{ id: CorpusTab; label: string }> = [
   { id: "articles", label: "Articles" },
@@ -38,6 +50,76 @@ export function CorpusPage({ embedded = false }: { embedded?: boolean }) {
   const [reports, setReports] = useState<IngestionReport[]>([]);
   const [queuedJob, setQueuedJob] = useState<DurableJob | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<CorpusArticle | null>(null);
+  const [inspectionTarget, setInspectionTarget] = useState<CorpusArticle | null>(null);
+  const [inspection, setInspection] = useState<CorpusInspection | null>(null);
+  const [inspectionError, setInspectionError] = useState<string | null>(null);
+  const [inspectionLoading, setInspectionLoading] = useState(false);
+  const [nativeSourceTarget, setNativeSourceTarget] = useState<CorpusArticle | null>(null);
+  const [nativeSource, setNativeSource] = useState<NativeSourceView | null>(null);
+  const [nativeSourceError, setNativeSourceError] = useState<string | null>(null);
+  const [nativeSourceLoading, setNativeSourceLoading] = useState(false);
+  const [tableTarget, setTableTarget] = useState<CorpusArticle | null>(null);
+  const [tables, setTables] = useState<TableEvidenceView | null>(null);
+  const [tablesError, setTablesError] = useState<string | null>(null);
+  const [tablesLoading, setTablesLoading] = useState(false);
+  const [figureTarget, setFigureTarget] = useState<CorpusArticle | null>(null);
+  const [figures, setFigures] = useState<FigureEvidenceView | null>(null);
+  const [figuresError, setFiguresError] = useState<string | null>(null);
+  const [figuresLoading, setFiguresLoading] = useState(false);
+  const inspect = useCallback(async (article: CorpusArticle) => {
+    setInspectionTarget(article);
+    setInspection(null);
+    setInspectionError(null);
+    setInspectionLoading(true);
+    try {
+      setInspection(await api.corpus.inspection(article.id));
+    } catch (caught) {
+      setInspectionError(caught instanceof Error ? caught.message : "Inspection indisponible.");
+    } finally {
+      setInspectionLoading(false);
+    }
+  }, []);
+  const viewNativeSource = useCallback(async (article: CorpusArticle) => {
+    setNativeSourceTarget(article);
+    setNativeSource(null);
+    setNativeSourceError(null);
+    setNativeSourceLoading(true);
+    try {
+      setNativeSource(await api.corpus.nativeSource(article.id));
+    } catch (caught) {
+      setNativeSourceError(
+        caught instanceof Error ? caught.message : "Source native indisponible.",
+      );
+    } finally {
+      setNativeSourceLoading(false);
+    }
+  }, []);
+  const viewTables = useCallback(async (article: CorpusArticle) => {
+    setTableTarget(article);
+    setTables(null);
+    setTablesError(null);
+    setTablesLoading(true);
+    try {
+      setTables(await api.corpus.tables(article.id));
+    } catch (caught) {
+      setTablesError(caught instanceof Error ? caught.message : "Tableaux source indisponibles.");
+    } finally {
+      setTablesLoading(false);
+    }
+  }, []);
+  const viewFigures = useCallback(async (article: CorpusArticle) => {
+    setFigureTarget(article);
+    setFigures(null);
+    setFiguresError(null);
+    setFiguresLoading(true);
+    try {
+      setFigures(await api.corpus.figures(article.id));
+    } catch (caught) {
+      setFiguresError(caught instanceof Error ? caught.message : "Figures source indisponibles.");
+    } finally {
+      setFiguresLoading(false);
+    }
+  }, []);
   const tab = corpusTabFromQuery(searchParams.get("tab"));
   const attentionOnly = searchParams.get("filter") === "attention";
   const selectTab = (nextTab: CorpusTab) =>
@@ -224,6 +306,10 @@ export function CorpusPage({ embedded = false }: { embedded?: boolean }) {
               "Index vectoriel actualisé.",
             )
           }
+          onInspect={(article) => void inspect(article)}
+          onViewNativeSource={(article) => void viewNativeSource(article)}
+          onViewTables={(article) => void viewTables(article)}
+          onViewFigures={(article) => void viewFigures(article)}
           onReindex={(article) =>
             void runAction(
               `reindex-${article.id}`,
@@ -233,6 +319,30 @@ export function CorpusPage({ embedded = false }: { embedded?: boolean }) {
           }
         />
       )}
+      <NativeSourceDialog
+        article={nativeSourceTarget}
+        data={nativeSource}
+        error={nativeSourceError}
+        loading={nativeSourceLoading}
+        onClose={() => setNativeSourceTarget(null)}
+        retry={() => nativeSourceTarget && void viewNativeSource(nativeSourceTarget)}
+      />
+      <TableEvidenceDialog
+        article={tableTarget}
+        data={tables}
+        error={tablesError}
+        loading={tablesLoading}
+        onClose={() => setTableTarget(null)}
+        retry={() => tableTarget && void viewTables(tableTarget)}
+      />
+      <FigureEvidenceDialog
+        article={figureTarget}
+        data={figures}
+        error={figuresError}
+        loading={figuresLoading}
+        onClose={() => setFigureTarget(null)}
+        retry={() => figureTarget && void viewFigures(figureTarget)}
+      />
       {tab === "import" && (
         <CorpusImportPanel
           busy={busy}
@@ -267,6 +377,16 @@ export function CorpusPage({ embedded = false }: { embedded?: boolean }) {
           ).then(() => setDeleteTarget(null));
         }}
         target={deleteTarget}
+      />
+      <CorpusInspectionDialog
+        article={inspectionTarget}
+        data={inspection}
+        error={inspectionError}
+        loading={inspectionLoading}
+        onClose={() => setInspectionTarget(null)}
+        retry={() => {
+          if (inspectionTarget) void inspect(inspectionTarget);
+        }}
       />
     </div>
   );

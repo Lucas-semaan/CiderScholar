@@ -5,6 +5,10 @@ import type {
   ChatConversationSummary,
   ChatJobSubmitResponse,
   CorpusResponse,
+  CorpusInspection,
+  FigureEvidenceView,
+  NativeSourceView,
+  TableEvidenceView,
   IngestionReport,
   DurableJob,
   LibraryRecordsResponse,
@@ -93,6 +97,14 @@ type CorpusFolderResponse = {
 function createCorpusApi(rootPath: string) {
   return {
     list: () => request<CorpusResponse>(rootPath),
+    inspection: (articleId: string) =>
+      request<CorpusInspection>(`${rootPath}/${encodeURIComponent(articleId)}/inspection`),
+    nativeSource: (articleId: string) =>
+      request<NativeSourceView>(`${rootPath}/${encodeURIComponent(articleId)}/native-source`),
+    tables: (articleId: string) =>
+      request<TableEvidenceView>(`${rootPath}/${encodeURIComponent(articleId)}/tables`),
+    figures: (articleId: string) =>
+      request<FigureEvidenceView>(`${rootPath}/${encodeURIComponent(articleId)}/figures`),
     pdfUrl: (articleId: string) => `${rootPath}/${encodeURIComponent(articleId)}/pdf`,
     upload: async (files: File[]) => {
       const body = new FormData();

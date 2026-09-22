@@ -7,7 +7,7 @@ from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from typing import Protocol
 
-from app.ingestion.pdf_extractor import PageText
+from app.ingestion.pdf_extractor import PageText, StructuralTextBlock
 from app.models.chunk import Chunk
 
 TOKEN_PATTERN = re.compile(r"\w+|[^\w\s]", re.UNICODE)
@@ -214,4 +214,32 @@ class ScientificChunker:
                 flush(keep_overlap=True)
 
         flush(keep_overlap=False)
+        return chunks
+
+    def chunk_structural_blocks(self, blocks: Sequence[StructuralTextBlock]) -> list[Chunk]:
+        """Chunk native blocks without assigning synthetic page numbers.
+
+        A structural block is never merged with another block: every resulting
+        chunk can be mapped back to its exact source section and paragraph.
+        """
+
+        chunks: list[Chunk] = []
+        for block in blocks:
+            for part in self.token_budget.split(block.text, self.max_tokens):
+                text = part.strip()
+                if not text:
+                    continue
+                token_count = self.token_budget.count(text)
+                if token_count > self.max_tokens:
+                    raise ValueError("native chunk exceeds the configured exact token budget")
+                chunks.append(
+                    Chunk(
+                        section=block.section_path,
+                        page_start=None,
+                        page_end=None,
+                        chunk_index=len(chunks),
+                        text=text,
+                        token_count=token_count,
+                    )
+                )
         return chunks

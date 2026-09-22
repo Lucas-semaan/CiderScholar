@@ -2,13 +2,237 @@
 
 from __future__ import annotations
 
+import hashlib
 import sqlite3
 
 from app.database.expert_memory_migration import EXPERT_MEMORY_MIGRATION
 
-CURRENT_SCHEMA_VERSION = 37
+CURRENT_SCHEMA_VERSION = 45
 
 MIGRATIONS: dict[int, str] = {
+    45: """-- Rebuilt by _relax_evidence_locator_constraints.""",
+    44: """-- Rebuilt by _relax_chunk_page_constraints.""",
+    43: """
+        CREATE TABLE IF NOT EXISTS outline_retrieval_nodes (
+            id TEXT PRIMARY KEY CHECK(length(trim(id)) BETWEEN 1 AND 128),
+            outline_node_id TEXT NOT NULL REFERENCES document_outline_nodes(id) ON DELETE CASCADE,
+            article_id TEXT NOT NULL REFERENCES articles(id) ON DELETE CASCADE,
+            asset_id TEXT NOT NULL REFERENCES article_source_assets(id) ON DELETE RESTRICT,
+            kind TEXT NOT NULL CHECK(kind IN ('title_path')),
+            text TEXT NOT NULL CHECK(length(trim(text)) > 0),
+            source_sha256 TEXT NOT NULL CHECK(length(source_sha256) = 64),
+            citable INTEGER NOT NULL DEFAULT 0 CHECK(citable = 0),
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(outline_node_id, kind)
+        );
+        CREATE INDEX IF NOT EXISTS idx_outline_retrieval_nodes_article
+            ON outline_retrieval_nodes(article_id, asset_id);
+    """,
+    42: """
+        CREATE TABLE IF NOT EXISTS chunk_corrections (
+            id TEXT PRIMARY KEY CHECK(length(trim(id)) BETWEEN 1 AND 128),
+            chunk_id INTEGER NOT NULL REFERENCES chunks(id) ON DELETE CASCADE,
+            original_text_sha256 TEXT NOT NULL CHECK(length(original_text_sha256) = 64),
+            corrected_text TEXT NOT NULL CHECK(length(trim(corrected_text)) > 0),
+            reason TEXT NOT NULL CHECK(length(trim(reason)) BETWEEN 1 AND 1000),
+            reviewer TEXT NOT NULL CHECK(length(trim(reviewer)) BETWEEN 1 AND 200),
+            state TEXT NOT NULL CHECK(state IN ('proposed', 'approved', 'rejected', 'superseded')),
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            reviewed_at TEXT,
+            UNIQUE(chunk_id, original_text_sha256, corrected_text)
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_chunk_corrections_approved
+            ON chunk_corrections(chunk_id) WHERE state = 'approved';
+        CREATE INDEX IF NOT EXISTS idx_chunk_corrections_chunk
+            ON chunk_corrections(chunk_id, state);
+    """,
+    41: """
+        CREATE TABLE IF NOT EXISTS document_outline_nodes (
+            id TEXT PRIMARY KEY CHECK(length(trim(id)) BETWEEN 1 AND 128),
+            article_id TEXT NOT NULL REFERENCES articles(id) ON DELETE CASCADE,
+            asset_id TEXT NOT NULL REFERENCES article_source_assets(id) ON DELETE RESTRICT,
+            extraction_run_id TEXT REFERENCES extraction_runs(id) ON DELETE SET NULL,
+            local_node_id TEXT NOT NULL CHECK(length(trim(local_node_id)) > 0),
+            parent_local_node_id TEXT,
+            level INTEGER NOT NULL CHECK(level >= 1 AND level <= 32),
+            kind TEXT NOT NULL CHECK(kind IN (
+                'section', 'heading', 'abstract', 'references', 'appendix', 'other'
+            )),
+            title TEXT NOT NULL CHECK(length(trim(title)) > 0),
+            ordinal INTEGER NOT NULL CHECK(ordinal >= 0),
+            source_locator TEXT NOT NULL CHECK(length(trim(source_locator)) > 0),
+            structure_sha256 TEXT NOT NULL CHECK(
+                length(structure_sha256) = 64 AND structure_sha256 NOT GLOB '*[^0-9a-f]*'
+            ),
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(article_id, asset_id, local_node_id),
+            UNIQUE(article_id, asset_id, ordinal)
+        );
+        CREATE INDEX IF NOT EXISTS idx_document_outline_nodes_article
+            ON document_outline_nodes(article_id, asset_id, ordinal);
+        CREATE INDEX IF NOT EXISTS idx_document_outline_nodes_parent
+            ON document_outline_nodes(article_id, asset_id, parent_local_node_id);
+
+        CREATE TABLE IF NOT EXISTS chunk_outline_nodes (
+            chunk_id INTEGER PRIMARY KEY REFERENCES chunks(id) ON DELETE CASCADE,
+            outline_node_id TEXT NOT NULL REFERENCES document_outline_nodes(id) ON DELETE RESTRICT
+        );
+        CREATE INDEX IF NOT EXISTS idx_chunk_outline_nodes_outline
+            ON chunk_outline_nodes(outline_node_id);
+    """,
+    40: """
+        CREATE TABLE IF NOT EXISTS chunk_locators (
+            chunk_id INTEGER PRIMARY KEY REFERENCES chunks(id) ON DELETE CASCADE,
+            asset_id TEXT NOT NULL REFERENCES article_source_assets(id) ON DELETE RESTRICT,
+            locator_kind TEXT NOT NULL CHECK(locator_kind IN ('page', 'structural')),
+            page_start INTEGER,
+            page_end INTEGER,
+            section_path TEXT,
+            paragraph_start INTEGER,
+            paragraph_end INTEGER,
+            xml_id_start TEXT,
+            xml_id_end TEXT,
+            span_sha256 TEXT NOT NULL CHECK(
+                length(span_sha256) = 64 AND span_sha256 NOT GLOB '*[^0-9a-f]*'
+            ),
+            CHECK(
+                (locator_kind = 'page'
+                    AND page_start >= 1 AND page_end >= page_start
+                    AND section_path IS NULL AND paragraph_start IS NULL AND paragraph_end IS NULL
+                    AND xml_id_start IS NULL AND xml_id_end IS NULL)
+                OR
+                (locator_kind = 'structural'
+                    AND page_start IS NULL AND page_end IS NULL
+                    AND length(trim(section_path)) > 0
+                    AND paragraph_start >= 0 AND paragraph_end >= paragraph_start)
+            )
+        );
+        CREATE INDEX IF NOT EXISTS idx_chunk_locators_asset ON chunk_locators(asset_id);
+    """,
+    39: """
+        CREATE TABLE IF NOT EXISTS article_source_assets (
+            id TEXT PRIMARY KEY CHECK(length(trim(id)) BETWEEN 1 AND 128),
+            article_id TEXT NOT NULL REFERENCES articles(id) ON DELETE CASCADE,
+            kind TEXT NOT NULL CHECK(kind IN (
+                'pdf', 'jats_xml', 'tei_xml', 'structured_xml', 'cleaned_text', 'plain_text'
+            )),
+            file_path TEXT NOT NULL CHECK(length(trim(file_path)) > 0),
+            sha256 TEXT NOT NULL CHECK(
+                length(sha256) = 64 AND sha256 NOT GLOB '*[^0-9a-f]*'
+            ),
+            media_type TEXT NOT NULL CHECK(length(trim(media_type)) > 0),
+            byte_count INTEGER NOT NULL CHECK(byte_count > 0),
+            provider TEXT,
+            source_url TEXT,
+            license TEXT,
+            state TEXT NOT NULL CHECK(state IN ('admitted', 'superseded', 'failed')),
+            is_primary INTEGER NOT NULL DEFAULT 0 CHECK(is_primary IN (0, 1)),
+            native_asset_id TEXT REFERENCES native_full_text_assets(id) ON DELETE SET NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(article_id, sha256)
+        );
+
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_article_source_assets_primary
+            ON article_source_assets(article_id) WHERE is_primary = 1;
+        CREATE INDEX IF NOT EXISTS idx_article_source_assets_article
+            ON article_source_assets(article_id, kind, state);
+        CREATE INDEX IF NOT EXISTS idx_article_source_assets_native
+            ON article_source_assets(native_asset_id) WHERE native_asset_id IS NOT NULL;
+
+    """,
+    38: """
+        CREATE TABLE IF NOT EXISTS extraction_runs (
+            id TEXT PRIMARY KEY CHECK(
+                length(trim(id)) BETWEEN 1 AND 128
+                AND length(id) = length(trim(id))
+            ),
+            file_sha256 TEXT NOT NULL CHECK(
+                length(file_sha256) = 64
+                AND file_sha256 NOT GLOB '*[^0-9a-f]*'
+            ),
+            article_id TEXT REFERENCES articles(id) ON DELETE SET NULL,
+            parser_id TEXT NOT NULL CHECK(
+                length(trim(parser_id)) BETWEEN 1 AND 64
+                AND length(parser_id) = length(trim(parser_id))
+            ),
+            parser_version TEXT NOT NULL CHECK(
+                length(trim(parser_version)) BETWEEN 1 AND 128
+                AND length(parser_version) = length(trim(parser_version))
+            ),
+            contract_version TEXT NOT NULL CHECK(
+                length(trim(contract_version)) BETWEEN 1 AND 64
+                AND length(contract_version) = length(trim(contract_version))
+            ),
+            config_sha256 TEXT NOT NULL CHECK(
+                length(config_sha256) = 64
+                AND config_sha256 NOT GLOB '*[^0-9a-f]*'
+            ),
+            model_name TEXT CHECK(
+                model_name IS NULL OR (
+                    length(trim(model_name)) BETWEEN 1 AND 256
+                    AND length(model_name) = length(trim(model_name))
+                )
+            ),
+            model_sha256 TEXT CHECK(
+                model_sha256 IS NULL OR (
+                    length(model_sha256) = 64
+                    AND model_sha256 NOT GLOB '*[^0-9a-f]*'
+                )
+            ),
+            state TEXT NOT NULL CHECK(
+                state IN ('started', 'completed', 'review_required', 'failed')
+            ),
+            page_count INTEGER NOT NULL DEFAULT 0 CHECK(page_count >= 0),
+            element_count INTEGER NOT NULL DEFAULT 0 CHECK(element_count >= 0),
+            warning_count INTEGER NOT NULL DEFAULT 0 CHECK(warning_count >= 0),
+            normalized_text_sha256 TEXT CHECK(
+                normalized_text_sha256 IS NULL OR (
+                    length(normalized_text_sha256) = 64
+                    AND normalized_text_sha256 NOT GLOB '*[^0-9a-f]*'
+                )
+            ),
+            duration_seconds REAL CHECK(
+                duration_seconds IS NULL
+                OR (duration_seconds >= 0 AND duration_seconds <= 86400)
+            ),
+            error_type TEXT CHECK(
+                error_type IS NULL OR (
+                    length(trim(error_type)) BETWEEN 1 AND 64
+                    AND length(error_type) = length(trim(error_type))
+                )
+            ),
+            error_message TEXT CHECK(
+                error_message IS NULL OR (
+                    length(trim(error_message)) BETWEEN 1 AND 240
+                    AND length(error_message) = length(trim(error_message))
+                    AND instr(error_message, char(10)) = 0
+                    AND instr(error_message, char(13)) = 0
+                )
+            ),
+            started_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            completed_at TEXT,
+            CHECK((model_name IS NULL) = (model_sha256 IS NULL)),
+            CHECK(
+                (state = 'started' AND completed_at IS NULL)
+                OR (state != 'started' AND completed_at IS NOT NULL)
+            ),
+            CHECK(
+                (state = 'failed' AND error_type IS NOT NULL AND error_message IS NOT NULL)
+                OR (state != 'failed' AND error_type IS NULL AND error_message IS NULL)
+            )
+        );
+
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_extraction_runs_identity
+            ON extraction_runs(
+                file_sha256, parser_id, parser_version, contract_version, config_sha256,
+                COALESCE(model_name, ''), COALESCE(model_sha256, '')
+            );
+        CREATE INDEX IF NOT EXISTS idx_extraction_runs_article
+            ON extraction_runs(article_id, state);
+    """,
     37: "-- See retrieval_revision_migration.py",
     35: EXPERT_MEMORY_MIGRATION,
     36: "-- See bibliographic_watch_migration.py",
@@ -998,6 +1222,21 @@ def ensure_current(connection: sqlite3.Connection) -> None:
             add_bibliographic_watch(connection)
         elif target_version == 31:
             _ensure_bibliographic_type_columns(connection)
+        elif target_version == 39:
+            connection.executescript(migration)
+            _backfill_article_source_assets(connection)
+        elif target_version == 40:
+            connection.executescript(migration)
+            _backfill_chunk_locators(connection)
+        elif target_version == 44:
+            # Rebuilding a referenced SQLite table requires foreign keys to be
+            # disabled outside a transaction. Earlier version markers may have
+            # opened one, so make the prior migration durable first.
+            connection.commit()
+            _relax_chunk_page_constraints(connection)
+        elif target_version == 45:
+            connection.commit()
+            _relax_evidence_locator_constraints(connection)
         else:
             connection.executescript(migration)
         connection.execute("INSERT INTO schema_version(version) VALUES (?)", (target_version,))
@@ -1011,6 +1250,201 @@ def _ensure_bibliographic_type_columns(connection: sqlite3.Connection) -> None:
         for column in ("work_type", "publisher"):
             if column not in columns:
                 connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} TEXT")
+
+
+def _backfill_article_source_assets(connection: sqlite3.Connection) -> None:
+    """Add reversible legacy PDF references only when their historic columns exist."""
+
+    columns = {str(row[1]) for row in connection.execute("PRAGMA table_info(articles)")}
+    required = {"id", "pdf_path", "sha256", "source"}
+    if not required.issubset(columns):
+        return
+    connection.execute(
+        """
+        INSERT OR IGNORE INTO article_source_assets (
+            id, article_id, kind, file_path, sha256, media_type, byte_count,
+            provider, source_url, license, state, is_primary
+        )
+        SELECT
+            'legacy-pdf:' || id, id, 'pdf', pdf_path, sha256, 'application/pdf', 1,
+            source, NULL, NULL, 'admitted', 1
+        FROM articles
+        WHERE trim(pdf_path) != '' AND length(sha256) = 64
+        """
+    )
+
+
+def _backfill_chunk_locators(connection: sqlite3.Connection) -> None:
+    """Preserve historical PDF locations as typed page locators."""
+
+    tables = {
+        str(row[0])
+        for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+    }
+    if not {"chunks", "article_source_assets"}.issubset(tables):
+        return
+    rows = connection.execute(
+        """
+        SELECT c.id, c.page_start, c.page_end, c.text, a.id AS asset_id
+        FROM chunks AS c
+        JOIN article_source_assets AS a ON a.article_id = c.article_id
+        WHERE a.kind = 'pdf' AND a.is_primary = 1
+        """
+    ).fetchall()
+    connection.executemany(
+        """
+        INSERT OR IGNORE INTO chunk_locators(
+            chunk_id, asset_id, locator_kind, page_start, page_end, span_sha256
+        ) VALUES (?, ?, 'page', ?, ?, ?)
+        """,
+        [
+            (
+                int(row["id"]),
+                str(row["asset_id"]),
+                int(row["page_start"]),
+                int(row["page_end"]),
+                hashlib.sha256(str(row["text"]).encode("utf-8")).hexdigest(),
+            )
+            for row in rows
+        ],
+    )
+
+
+def _relax_chunk_page_constraints(connection: sqlite3.Connection) -> None:
+    """Allow source-native chunks without inventing PDF pages.
+
+    Existing PDF rows retain both page coordinates. New rows must carry either
+    both valid pages or neither; their typed ``chunk_locators`` row is then the
+    sole source of location. IDs are copied unchanged so every dependent table,
+    FTS record and persisted evidence remains referentially stable.
+    """
+
+    tables = {
+        str(row[0])
+        for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+    }
+    # Partial historical fixtures used by repair migrations can legitimately
+    # omit the corpus tables altogether. There is then no page constraint to
+    # relax; a complete schema will create the current shape at first startup.
+    if not {"chunks", "chunks_fts"}.issubset(tables):
+        return
+
+    connection.execute("PRAGMA foreign_keys = OFF")
+    try:
+        connection.executescript(
+            """
+            DROP TRIGGER IF EXISTS chunks_fts_insert;
+            DROP TRIGGER IF EXISTS chunks_fts_delete;
+            DROP TRIGGER IF EXISTS chunks_fts_update;
+
+            CREATE TABLE chunks_v44 (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                article_id TEXT NOT NULL REFERENCES articles(id) ON DELETE CASCADE,
+                section TEXT,
+                subsection TEXT,
+                page_start INTEGER,
+                page_end INTEGER,
+                chunk_index INTEGER NOT NULL CHECK(chunk_index >= 0),
+                text TEXT NOT NULL CHECK(length(trim(text)) > 0),
+                token_count INTEGER NOT NULL CHECK(token_count > 0),
+                embedding_status TEXT NOT NULL DEFAULT 'pending' CHECK(
+                    embedding_status IN ('pending', 'processing', 'indexed', 'failed')
+                ),
+                CHECK(
+                    (page_start IS NULL AND page_end IS NULL)
+                    OR (page_start >= 1 AND page_end >= page_start)
+                ),
+                UNIQUE(article_id, chunk_index)
+            );
+
+            INSERT INTO chunks_v44(
+                id, article_id, section, subsection, page_start, page_end,
+                chunk_index, text, token_count, embedding_status
+            )
+            SELECT id, article_id, section, subsection, page_start, page_end,
+                   chunk_index, text, token_count, embedding_status
+            FROM chunks;
+
+            DROP TABLE chunks;
+            ALTER TABLE chunks_v44 RENAME TO chunks;
+            CREATE INDEX idx_chunks_article ON chunks(article_id);
+            CREATE INDEX idx_chunks_embedding_status ON chunks(embedding_status);
+
+            DELETE FROM chunks_fts;
+            INSERT INTO chunks_fts(rowid, chunk_id, article_id, section, text)
+            SELECT id, CAST(id AS TEXT), article_id, section, text FROM chunks;
+
+            CREATE TRIGGER chunks_fts_insert AFTER INSERT ON chunks BEGIN
+                INSERT INTO chunks_fts(rowid, chunk_id, article_id, section, text)
+                VALUES (new.id, CAST(new.id AS TEXT), new.article_id, new.section, new.text);
+            END;
+
+            CREATE TRIGGER chunks_fts_delete AFTER DELETE ON chunks BEGIN
+                DELETE FROM chunks_fts WHERE rowid = old.id;
+            END;
+
+            CREATE TRIGGER chunks_fts_update AFTER UPDATE ON chunks BEGIN
+                DELETE FROM chunks_fts WHERE rowid = old.id;
+                INSERT INTO chunks_fts(rowid, chunk_id, article_id, section, text)
+                VALUES (new.id, CAST(new.id AS TEXT), new.article_id, new.section, new.text);
+            END;
+            """
+        )
+    finally:
+        connection.execute("PRAGMA foreign_keys = ON")
+    violations = connection.execute("PRAGMA foreign_key_check").fetchone()
+    if violations is not None:
+        raise RuntimeError("chunk page migration produced a foreign-key violation")
+
+
+def _relax_evidence_locator_constraints(connection: sqlite3.Connection) -> None:
+    """Rebuild evidence so structural locators can replace PDF pages."""
+
+    tables = {
+        str(row[0])
+        for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+    }
+    if "evidence" not in tables:
+        return
+    connection.execute("PRAGMA foreign_keys = OFF")
+    try:
+        connection.executescript(
+            """
+            CREATE TABLE evidence_v45 (
+                id TEXT PRIMARY KEY,
+                query_id TEXT NOT NULL REFERENCES queries(id) ON DELETE CASCADE,
+                article_id TEXT NOT NULL REFERENCES articles(id) ON DELETE CASCADE,
+                chunk_id INTEGER NOT NULL REFERENCES chunks(id) ON DELETE CASCADE,
+                claim TEXT NOT NULL, source_excerpt TEXT NOT NULL,
+                page_start INTEGER, page_end INTEGER,
+                locator_kind TEXT NOT NULL DEFAULT 'page'
+                    CHECK(locator_kind IN ('page', 'structural')),
+                section_path TEXT, paragraph_start INTEGER, paragraph_end INTEGER,
+                xml_id_start TEXT, xml_id_end TEXT,
+                relevance_score REAL NOT NULL CHECK(relevance_score BETWEEN 0.0 AND 1.0),
+                CHECK(
+                    (locator_kind = 'page' AND page_start >= 1 AND page_end >= page_start
+                     AND section_path IS NULL AND paragraph_start IS NULL AND paragraph_end IS NULL)
+                    OR (locator_kind = 'structural' AND page_start IS NULL AND page_end IS NULL
+                        AND length(trim(section_path)) > 0 AND paragraph_start >= 0
+                        AND paragraph_end >= paragraph_start)
+                )
+            );
+            INSERT INTO evidence_v45(
+                id, query_id, article_id, chunk_id, claim, source_excerpt,
+                page_start, page_end, relevance_score
+            )
+            SELECT id, query_id, article_id, chunk_id, claim, source_excerpt,
+                   page_start, page_end, relevance_score
+            FROM evidence;
+            DROP TABLE evidence;
+            ALTER TABLE evidence_v45 RENAME TO evidence;
+            CREATE INDEX idx_evidence_query ON evidence(query_id);
+            CREATE INDEX idx_evidence_article ON evidence(article_id);
+            """
+        )
+    finally:
+        connection.execute("PRAGMA foreign_keys = ON")
 
 
 def _assert_unique_dois(connection: sqlite3.Connection) -> None:

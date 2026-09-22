@@ -26,6 +26,7 @@ from app.llm.response_language import (
     question_language,
     validate_output_language,
 )
+from app.llm.structured_output import validate_structured_response
 from app.models.synthesis import (
     BibliographyEntry,
     CitedStatement,
@@ -348,9 +349,9 @@ class HierarchicalSynthesisService:
             )
             metrics.append(response.metrics)
             try:
-                value = response_model.model_validate_json(response.content)
+                value = validate_structured_response(response.content, response_model)
                 validator(value)
-            except (ValidationError, SynthesisSourceValidationError) as exc:
+            except (ValidationError, ValueError, SynthesisSourceValidationError) as exc:
                 last_error = exc
                 LOGGER.warning(
                     "Synthesis validation failed model=%s attempt=%s error_type=%s",

@@ -48,12 +48,20 @@ export function JobStatusCard({ job, onCancel, onRetry }: JobStatusCardProps) {
   };
 
   const durationEnd = terminal ? Date.parse(job.updated_at) : nowMilliseconds;
+  const semanticValidationRetry =
+    job.state === "queued" &&
+    job.error?.code === "timeout" &&
+    job.error.message.includes("validation scientifique obligatoire");
   const displayedStep =
     job.error?.code === "quota"
       ? "Attente du quota ARGO"
-      : job.state === "queued"
-        ? "File d’attente — créneaux de traitement occupés"
-        : jobStepLabels[job.step];
+      : semanticValidationRetry
+        ? "Reprise automatique de la validation scientifique"
+        : job.state === "queued" && job.error?.code === "timeout"
+          ? "Reprise automatique planifiée"
+          : job.state === "queued"
+            ? "File d’attente — créneaux de traitement occupés"
+            : jobStepLabels[job.step];
   const statusIcon =
     job.state === "failed" ? (
       <AlertTriangle aria-hidden="true" className="size-4" />
@@ -95,6 +103,14 @@ export function JobStatusCard({ job, onCancel, onRetry }: JobStatusCardProps) {
         <p className="mt-3 rounded-xl bg-white/70 px-3 py-2 text-xs font-medium text-forest-800">
           {job.error?.message ??
             "Les créneaux de traitement actifs sont occupés. Cette réponse démarrera automatiquement dès qu’un créneau se libère, sans consommer de requête ARGO pendant l’attente."}
+          {semanticValidationRetry && job.error?.retry_at && (
+            <>
+              {" "}
+              Reprise prévue à{" "}
+              <time dateTime={job.error.retry_at}>{formatRetryTime(job.error.retry_at)}</time>, à
+              partir des preuves locales déjà sélectionnées.
+            </>
+          )}
         </p>
       )}
       {(job.state === "queued" || job.state === "running") && onCancel && (

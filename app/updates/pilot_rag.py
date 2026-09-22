@@ -33,6 +33,7 @@ from app.llm.response_style import (
     ResponseStyle,
     requested_response_style,
 )
+from app.llm.structured_output import validate_structured_response
 from app.models.chatbot import (
     ChatbotFacetDraft,
     ChatEvidencePassage,
@@ -62,7 +63,9 @@ class AbstractChatClient(Protocol):
 
 CORRECTION_TEMPERATURE_DEFAULT = 0.1
 CORRECTION_TEMPERATURE_MAX = 0.2
-MAX_SCIENTIFIC_GENERATION_REQUESTS = 10
+# One ARGO request covers each scientific generation phase. Invalid output is
+# surfaced safely rather than spending the interactive quota on corrections.
+MAX_SCIENTIFIC_GENERATION_REQUESTS = 1
 PROMPT_RETRY_HEADROOM_CHARACTERS = 4096
 MAX_RETRY_MESSAGE_CHARACTERS = PROMPT_RETRY_HEADROOM_CHARACTERS - 128
 MIN_PROMPT_EVIDENCE_TEXT_CHARACTERS = 64
@@ -73,6 +76,26 @@ ARGO_SYNTHESIS_STYLES = (
     ResponseStyle.PROCESS,
     ResponseStyle.BULLET_LIST,
 )
+
+
+def _required_synthesis_evidence_ids(evidence: Sequence[Mapping[str, Any]]) -> list[str]:
+    """Choose one auditable passage per semantically admitted A/B article."""
+
+    seen_records: set[str] = set()
+    required: list[str] = []
+    for item in evidence:
+        record_id = str(item.get("record_id") or "")
+        evidence_id = str(item.get("evidence_id") or "")
+        if (
+            item.get("evidence_grade") not in {"A", "B"}
+            or not record_id
+            or not evidence_id
+            or record_id in seen_records
+        ):
+            continue
+        seen_records.add(record_id)
+        required.append(evidence_id)
+    return required
 
 
 def _response_format_schema(
@@ -137,6 +160,10 @@ _CORRECTION_ACTIONS: dict[ScientificValidationReason, str] = {
         "Intègre chaque preuve A ou B encore omise dans une affirmation qu'elle soutient "
         "réellement."
     ),
+    ScientificValidationReason.UNJUSTIFIED_ABSTENTION: (
+        "Des preuves A ou B obligatoires sont présentes : utilise status=answerable et conserve "
+        "au moins une affirmation validée et citée."
+    ),
     ScientificValidationReason.MISSING_CONTEXTUAL_INTRODUCTION: (
         "Supprime le préambule inutile ; utilise definition=null sauf ambiguïté réelle à clarifier."
     ),
@@ -151,7 +178,10 @@ _CORRECTION_ACTIONS: dict[ScientificValidationReason, str] = {
         "Adopte exactement la typologie demandée par l'utilisateur."
     ),
     ScientificValidationReason.INVALID_PROSE_STRUCTURE: (
-        "Transforme les fragments, titres isolés, puces interdites ou emoji en prose scientifique."
+        "Transforme les fragments, titres isolés, puces interdites ou emoji en prose scientifique. "
+        "Toute espèce, souche ou comparaison commencée doit être entièrement nommée : ne termine "
+        "jamais une phrase par une initiale isolée. Ne répète pas une même affirmation pour les "
+        "mêmes preuves ; développe plutôt une condition, une limite ou un résultat distinct."
     ),
     ScientificValidationReason.EVIDENCE_ID_LEAK: (
         "Retire les evidence_ids du texte visible et conserve-les uniquement dans leur champ JSON."
@@ -588,8 +618,8 @@ class CiderAbstractRagService:
             total_prompt_tokens += response.metrics.prompt_eval_count
             total_completion_tokens += response.metrics.eval_count
             try:
-                answer = CiderAbstractAnswer.model_validate_json(response.content)
-            except ValidationError as exc:
+                answer = validate_structured_response(response.content, CiderAbstractAnswer)
+            except (ValidationError, ValueError) as exc:
                 validation_error: RuntimeError = RuntimeError(
                     "ARGO returned an invalid pilot RAG answer"
                 )
@@ -734,7 +764,7 @@ class _GenerationPhaseFailure(Exception):
 
 @dataclass(slots=True)
 class _GenerationRequestBudget:
-    """Share the ten-request ceiling across every phase of one user answer."""
+    """Share the single-request ceiling across every phase of one user answer."""
 
     used: int = 0
     maximum: int = MAX_SCIENTIFIC_GENERATION_REQUESTS
@@ -1073,6 +1103,7 @@ class CiderEvidenceRagService:
         if len(allowed_ids) != len(set(allowed_ids)):
             raise ValueError("evidence ids must be unique")
         allowed_id_set = set(allowed_ids)
+        required_synthesis_id_list = _required_synthesis_evidence_ids(evidence)
         bounded_coverage_notes = [
             " ".join(note.split())[:700] for note in coverage_notes[:4] if note.strip()
         ]
@@ -1192,8 +1223,9 @@ class CiderEvidenceRagService:
                     "lorsque de nombreux passages substantiels sont fournis, produis une synthèse "
                     "globalement développée plutôt qu'un aperçu. N'allonge jamais par répétition, "
                     "paraphrase creuse, détail hors sujet ou connaissance absente des preuves. "
-                    "Tous les éléments evidence A ou B fournis sont les mieux classés retenus "
-                    "pour la synthèse : chacun doit contribuer à au moins un statement cité. "
+                    "Chaque article A ou B fourni doit contribuer à la synthèse via au moins un "
+                    "passage cité. Les passages représentatifs obligatoires sont listés dans "
+                    "required_evidence_ids : chacun doit contribuer à au moins un statement cité. "
                     "Ne les cite pas artificiellement dans une affirmation qu'ils ne soutiennent "
                     "pas. "
                     "Les limitations doivent signaler précisément les points reposant seulement "
@@ -1244,6 +1276,7 @@ class CiderEvidenceRagService:
                         },
                         "conversation_history": list(conversation_history or []),
                         "evidence": evidence,
+                        "required_evidence_ids": required_synthesis_id_list,
                         "documentary_coverage_notes": bounded_coverage_notes,
                         "organizational_reasoning": (
                             self.organizational_reasoning_context[:12_000] or None
@@ -1264,7 +1297,7 @@ class CiderEvidenceRagService:
             fitted_payload = self._fit_prompt_payload(
                 str(messages[0]["content"]),
                 json.loads(str(messages[1]["content"])),
-                essential_evidence_ids=allowed_ids,
+                essential_evidence_ids=required_synthesis_id_list,
             )
         except _PromptBudgetError as exc:
             raise ArgoScientificValidationError(str(exc)) from exc
@@ -1283,9 +1316,9 @@ class CiderEvidenceRagService:
             if passage.evidence_id in allowed_id_set
         }
         required_synthesis_ids = frozenset(
-            evidence_id
-            for evidence_id, (record, _passage) in by_evidence_id.items()
-            if record.evidence_grade in {"A", "B"}
+            str(evidence_id)
+            for evidence_id in fitted_payload.get("required_evidence_ids", [])
+            if str(evidence_id) in allowed_id_set
         )
         total_prompt_tokens = 0
         total_completion_tokens = 0
@@ -1404,7 +1437,7 @@ class CiderEvidenceRagService:
             total_completion_tokens += response.metrics.eval_count
             candidate: CiderEvidenceAnswer | None = None
             try:
-                answer = CiderEvidenceAnswer.model_validate_json(response.content)
+                answer = validate_structured_response(response.content, CiderEvidenceAnswer)
                 if locked_statements and answer.status == "answerable":
                     combined = {
                         item.statement: item for item in [*locked_statements, *answer.statements]
@@ -1416,7 +1449,8 @@ class CiderEvidenceRagService:
                     )
                 if self.semantic_verifier is not None:
                     answer = self.semantic_verifier.admit(cleaned_question, answer, by_evidence_id)
-                    locked_statements = list(answer.statements)
+                    if answer.statements:
+                        locked_statements = list(answer.statements)
                 candidate = answer
                 used_evidence_ids = _answer_evidence_ids(answer)
                 if len(answer.statements) > self.budget.mono_max_statements:
@@ -1428,7 +1462,7 @@ class CiderEvidenceRagService:
                             )
                         ]
                     )
-            except (ValidationError, RuntimeError) as exc:
+            except (ValidationError, ValueError, RuntimeError) as exc:
                 validation_error: RuntimeError = RuntimeError(
                     f"ARGO returned an invalid evidence RAG answer: {exc}"
                 )
@@ -1778,17 +1812,72 @@ class CiderEvidenceRagService:
         intent = analyze_scientific_intent(cleaned_question)
         chosen_facets = list(facets if facets is not None else intent.facets)[:4]
         if len(chosen_facets) < 2:
-            # A single-axis query does not benefit from a second synthesis pass.
-            return self.answer(
-                cleaned_question,
-                records,
+            # For a broad evidence table, the monolithic response schema is needlessly
+            # difficult for the provider to satisfy.  A single compact, grounded draft
+            # asks for the same cited scientific content without imposing a synthetic
+            # assembly across every selected article.
+            requested_style = requested_response_style(cleaned_question)
+            allowed_id_set = {item["evidence_id"] for item in evidence}
+            by_evidence_id = {
+                passage.evidence_id: (record, passage)
+                for record in selected_records
+                for passage in record.passages
+                if passage.evidence_id in allowed_id_set
+            }
+            answer, response, trace = self._generate_evidence_answer(
+                question=cleaned_question,
+                output_language_question=cleaned_question,
+                evidence=evidence,
+                by_evidence_id=by_evidence_id,
+                expected_style=requested_style,
+                max_statements=self.budget.mono_max_statements,
+                max_output_tokens=self.budget.mono_max_output_tokens,
                 conversation_history=conversation_history,
-                coverage_notes=coverage_notes,
                 concept_definition=concept_definition,
                 ambiguities=ambiguities,
                 excluded_concepts=excluded_concepts,
                 on_argo_reserved=on_argo_reserved,
                 on_argo_response=on_argo_response,
+                phase="facet_draft",
+            )
+            if self.semantic_verifier is not None:
+                answer = self.semantic_verifier.admit(cleaned_question, answer, by_evidence_id)
+                verifier = self.semantic_verifier.verifier
+                trace = trace.model_copy(
+                    update={
+                        "prompt_tokens": trace.prompt_tokens + verifier.prompt_tokens,
+                        "completion_tokens": (trace.completion_tokens + verifier.completion_tokens),
+                        "outcome": (
+                            "abstained"
+                            if answer.status == "insufficient"
+                            else "partial_generated"
+                            if self.semantic_verifier.removed_count
+                            else trace.outcome
+                        ),
+                    }
+                )
+            cited_ids = _answer_evidence_ids(answer)
+            return CiderEvidenceRagResult(
+                question=cleaned_question,
+                answer=answer,
+                answer_markdown=_render_evidence_answer(
+                    answer, by_evidence_id, answer.response_format, question=cleaned_question
+                ),
+                source_record_ids=list(
+                    dict.fromkeys(by_evidence_id[item][0].record_id for item in cited_ids)
+                ),
+                cited_evidence_ids=cited_ids,
+                model=response.model,
+                prompt_tokens=trace.prompt_tokens,
+                completion_tokens=trace.completion_tokens,
+                generation_status=(
+                    "abstained"
+                    if answer.status == "insufficient"
+                    else "partial_generated"
+                    if trace.outcome == "partial_generated"
+                    else "generated"
+                ),
+                generation_traces=[trace],
             )
 
         requested_style = requested_response_style(cleaned_question)
@@ -2009,7 +2098,7 @@ class CiderEvidenceRagService:
                 facet_plans,
             )
         if trace.outcome == "partial_generated":
-            # When the ten-request budget ends on a safe but incomplete assembly,
+            # When the single-request budget ends on a safe but incomplete assembly,
             # prefer the union of independently validated facet drafts whenever it
             # preserves more cited evidence. This avoids returning the last model
             # attempt merely because it happened to be produced last.
@@ -2250,8 +2339,9 @@ class CiderEvidenceRagService:
                 "preuves lorsque l'utilisateur n'en impose aucune. Utilise definition=null sauf "
                 "ambiguïté réelle. Commence par les résultats puis développe chaque "
                 "statement comme un paragraphe scientifique substantiel de trois à six phrases "
-                "lorsque la richesse des passages le permet. Chaque preuve A ou B présentée dans "
-                "evidence doit contribuer à au moins un statement cité, sans citation "
+                "lorsque la richesse des passages le permet. Chaque article A ou B présenté doit "
+                "contribuer via au moins un passage cité. Les passages représentatifs obligatoires "
+                "sont listés dans required_evidence_ids et doivent tous contribuer, sans citation "
                 "artificielle. "
                 "La section synthetic_answer contient une à six phrases directement étayées "
                 "qui répondent "
@@ -2292,12 +2382,17 @@ class CiderEvidenceRagService:
             payload["documentary_coverage_notes"] = bounded_coverage_notes
         if phase != "facet_draft":
             system += self._profile_instruction()
+        required_synthesis_id_list = (
+            _required_synthesis_evidence_ids(evidence) if phase == "final_assembly" else []
+        )
+        if required_synthesis_id_list:
+            payload["required_evidence_ids"] = required_synthesis_id_list
         priority_evidence_ids = list(
             dict.fromkeys(
                 evidence_id for draft in facet_drafts for evidence_id in draft.cited_evidence_ids
             )
         )
-        essential_evidence_ids = allowed_ids
+        essential_evidence_ids = required_synthesis_id_list or allowed_ids
         try:
             payload = self._fit_prompt_payload(
                 system,
@@ -2321,9 +2416,9 @@ class CiderEvidenceRagService:
         evidence = list(payload["evidence"])
         allowed_ids = [str(item["evidence_id"]) for item in evidence]
         required_synthesis_ids = frozenset(
-            evidence_id
-            for evidence_id in allowed_ids
-            if by_evidence_id[evidence_id][0].evidence_grade in {"A", "B"}
+            str(evidence_id)
+            for evidence_id in payload.get("required_evidence_ids", [])
+            if str(evidence_id) in set(allowed_ids)
         )
         statement_schema["properties"]["evidence_ids"]["items"] = {
             "type": "string",
@@ -2377,7 +2472,7 @@ class CiderEvidenceRagService:
             if shared_request_budget.exhausted:
                 failure_trace = trace("failed")
                 error = ArgoScientificValidationError(
-                    "ARGO exhausted the ten-request scientific generation budget",
+                    "ARGO exhausted the scientific generation budget",
                     reason=ScientificValidationReason.UNUSABLE_OUTPUT,
                     prompt_tokens=prompt_tokens,
                     completion_tokens=completion_tokens,
@@ -2457,7 +2552,7 @@ class CiderEvidenceRagService:
             completion_tokens += response.metrics.eval_count
             candidate: CiderEvidenceAnswer | None = None
             try:
-                candidate = CiderEvidenceAnswer.model_validate_json(response.content)
+                candidate = validate_structured_response(response.content, CiderEvidenceAnswer)
                 if facet_key is not None:
                     candidate = candidate.model_copy(
                         update={
@@ -2529,7 +2624,7 @@ class CiderEvidenceRagService:
                     )
                     continue
                 answer = candidate
-            except (ValidationError, RuntimeError) as exc:
+            except (ValidationError, ValueError, RuntimeError) as exc:
                 encountered_validation_reasons = list(
                     dict.fromkeys([*encountered_validation_reasons, *_validation_reasons(exc)])
                 )
@@ -2963,9 +3058,15 @@ def _validate_grounding(
             for paragraph in re.split(r"\n\s*\n", block):
                 if paragraph.lstrip().startswith(("-", "*", "\u2022")):
                     raise RuntimeError("ARGO returned a list marker in a prose paragraph")
-    for statement in answer.statements:
+    for statement_index, statement in enumerate(answer.statements):
         text = statement.statement.strip()
         plain_statement = _plain_text(text)
+        if statement_index == 0 and re.match(
+            r"^(?:de plus|en outre|par ailleurs|de même|moreover|furthermore|additionally)\b",
+            plain_statement,
+            re.IGNORECASE,
+        ):
+            raise RuntimeError("ARGO started the answer with a continuation connector")
         if text.endswith(":") or text.startswith(("•", "-", "*")):
             raise RuntimeError("ARGO returned a heading or fragment instead of a statement")
         if any(record_id[:8] in plain_statement for record_id in allowed_ids):
@@ -3018,10 +3119,13 @@ def _validate_evidence_grounding(
             "ARGO cited evidence outside the supplied passages",
         )
     # A/B records have already passed the global semantic gate as direct or
-    # supportive evidence.  A generated abstention therefore remains a
-    # correctable coverage warning instead of bypassing every citation check.
-    # After ten requests it may still be returned as the safest partial output,
-    # but an answerable candidate citing more of the presented evidence wins.
+    # supportive evidence. A generated abstention cannot be presented as a
+    # successful scientific answer while those mandatory records remain.
+    if required_evidence_ids and answer.status == "insufficient":
+        reject(
+            ScientificValidationReason.UNJUSTIFIED_ABSTENTION,
+            "ARGO abstained despite A/B evidence selected for mandatory synthesis",
+        )
     missing_evidence = required_evidence_ids - set(used_ids)
     if missing_evidence:
         missing_labels = ", ".join(sorted(missing_evidence))
@@ -3074,7 +3178,8 @@ def _validate_evidence_grounding(
                         ScientificValidationReason.INVALID_PROSE_STRUCTURE,
                         "ARGO returned a list marker in a prose paragraph",
                     )
-    for statement in answer.statements:
+    prior_statement_tokens: list[tuple[frozenset[str], frozenset[str]]] = []
+    for statement_index, statement in enumerate(answer.statements):
         if allowed_facet_keys is not None and statement.facet_key not in allowed_facet_keys:
             reject(
                 ScientificValidationReason.MISSING_DOCUMENTED_FACET,
@@ -3082,10 +3187,44 @@ def _validate_evidence_grounding(
             )
         text = statement.statement.strip()
         plain_statement = _plain_text(text)
+        visible_statement = unicodedata.normalize("NFKC", text).strip()
+        statement_tokens = frozenset(re.findall(r"[a-zà-öø-ÿ]{3,}", plain_statement.casefold()))
+        evidence_key = frozenset(statement.evidence_ids)
+        if len(statement_tokens) >= 10:
+            for prior_tokens, prior_evidence_key in prior_statement_tokens:
+                overlap = len(statement_tokens & prior_tokens) / min(
+                    len(statement_tokens), len(prior_tokens)
+                )
+                if evidence_key == prior_evidence_key and overlap >= 0.72:
+                    reject(
+                        ScientificValidationReason.INVALID_PROSE_STRUCTURE,
+                        "ARGO repeated a substantially identical statement for the same evidence",
+                    )
+                    break
+        prior_statement_tokens.append((statement_tokens, evidence_key))
+        if statement_index == 0 and re.match(
+            r"^(?:de plus|en outre|par ailleurs|de même|moreover|furthermore|additionally)\b",
+            plain_statement,
+            re.IGNORECASE,
+        ):
+            reject(
+                ScientificValidationReason.INVALID_PROSE_STRUCTURE,
+                "ARGO started the answer with a continuation connector",
+            )
         if text.endswith(":") or text.startswith(("•", "-", "*")):
             reject(
                 ScientificValidationReason.INVALID_PROSE_STRUCTURE,
                 "ARGO returned a heading or fragment instead of a statement",
+            )
+        if re.search(r"\b[A-Z]\.$", visible_statement):
+            reject(
+                ScientificValidationReason.INVALID_PROSE_STRUCTURE,
+                "ARGO returned a sentence truncated after an isolated scientific initial",
+            )
+        if re.match(r"^[a-zà-öø-ÿ]", visible_statement):
+            reject(
+                ScientificValidationReason.INVALID_PROSE_STRUCTURE,
+                "ARGO returned a statement beginning with an orphaned lowercase fragment",
             )
         if any(evidence_id in text for evidence_id in allowed_ids):
             reject(
@@ -3172,7 +3311,7 @@ def _validate_evidence_grounding(
             effort_target = max(260, 55 * min(len(required_evidence_ids), 24))
             minimum_words = min(effort_target, round(required_source_words * 0.5))
         elif len(required_evidence_ids) >= 4 and answer_effort is AnswerEffort.DEEP:
-            effort_target = max(420, 85 * min(len(required_evidence_ids), 28))
+            effort_target = min(1_400, max(420, 65 * min(len(required_evidence_ids), 28)))
             minimum_words = min(effort_target, round(required_source_words * 0.65))
         synthesis_words = _word_count(
             " ".join(statement.statement for statement in answer.statements)
@@ -3552,12 +3691,7 @@ def _render_evidence_answer(
     language = _question_language(question or answer.definition or "")
     headings = (
         {
-            "summary": "Réponse synthétique",
-            "effects": "Effets documentés",
-            "limits": "Limites des preuves",
             "references": "Références",
-            "no_effects": "Aucun autre effet directement documenté n'a été établi.",
-            "no_limits": "Aucune limite documentaire supplémentaire n'est établie.",
             "no_references": "Aucune référence n'est citée.",
             "facet_status": {
                 "documented": "documenté",
@@ -3570,12 +3704,7 @@ def _render_evidence_answer(
         }
         if language == "fr"
         else {
-            "summary": "Summary answer",
-            "effects": "Documented effects",
-            "limits": "Evidence limitations",
             "references": "References",
-            "no_effects": "No other directly documented effect was established.",
-            "no_limits": "No additional evidence limitation was established.",
             "no_references": "No reference is cited.",
             "facet_status": {
                 "documented": "documented",
@@ -3646,9 +3775,11 @@ def _render_evidence_answer(
         blocks.extend(render_statement(statement) for statement in synthetic)
         grouped_effects: dict[str, list[CitedEvidenceStatement]] = {}
         for statement in effects:
-            grouped_effects.setdefault(statement.mechanism or headings["effects"], []).append(
-                statement
-            )
+            grouped_effects.setdefault(
+                statement.mechanism
+                or ("Résultat documenté" if language == "fr" else "Documented finding"),
+                [],
+            ).append(statement)
         if expected_style in {
             ResponseStyle.THEMATIC_SECTIONS,
             ResponseStyle.COMPARISON,
@@ -3682,8 +3813,14 @@ def _render_evidence_answer(
             else item.strip()
         )
     if limitations or answer.status == "insufficient":
-        blocks.append(f"## {headings['limits']}")
-        blocks.extend(limitations or [headings["no_limits"]])
+        blocks.extend(
+            limitations
+            or [
+                "Aucune limite documentaire supplémentaire n'est établie."
+                if language == "fr"
+                else "No additional evidence limitation was established."
+            ]
+        )
     cited_records: dict[str, ChatEvidenceRecord] = {}
     for statement in answer.statements:
         for evidence_id in statement.evidence_ids:

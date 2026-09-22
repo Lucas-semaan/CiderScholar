@@ -4,17 +4,101 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import sqlite3
 import uuid
 from collections.abc import Iterator, Sequence
 from contextlib import closing, contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from app.database.migrations import ensure_current
 from app.models.evidence import ArticleEvidence
 from app.models.synthesis import FinalSynthesis, ThemePlan, ThemeSynthesis
+
+_SHA256_HEX_LENGTH = 64
+_EXTRACTION_RUN_STATES = frozenset({"started", "completed", "review_required", "failed"})
+# A parser is a bounded local operation, not a multi-day background workflow.
+_MAX_EXTRACTION_RUN_DURATION_SECONDS = 24 * 60 * 60
+
+
+def _validate_extraction_run_hash(value: str, *, field_name: str) -> str:
+    if len(value) != _SHA256_HEX_LENGTH or any(
+        character not in "0123456789abcdef" for character in value
+    ):
+        raise ValueError(f"{field_name} must be a lowercase SHA-256")
+    return value
+
+
+def _validate_extraction_run_text(value: str, *, field_name: str, maximum: int) -> str:
+    if not value or value != value.strip() or len(value) > maximum:
+        raise ValueError(f"{field_name} is invalid")
+    if any(ord(character) < 32 or ord(character) == 127 for character in value):
+        raise ValueError(f"{field_name} contains a control character")
+    return value
+
+
+def _validate_extraction_run_diagnostic(error_type: str, error_message: str) -> tuple[str, str]:
+    return (
+        _validate_extraction_run_text(error_type, field_name="error type", maximum=64),
+        _validate_extraction_run_text(error_message, field_name="error message", maximum=240),
+    )
+
+
+def _native_outline_rows(
+    nodes: Sequence[dict[str, Any]],
+) -> list[tuple[str, str, str | None, int, str, str, int, str, str]]:
+    """Validate parser-derived outline nodes before their native admission transaction."""
+
+    local_ids = [str(node.get("node_id", "")) for node in nodes]
+    if len(local_ids) != len(set(local_ids)) or any(not node_id for node_id in local_ids):
+        raise ValueError("native outline node IDs must be non-empty and unique")
+    known_ids = set(local_ids)
+    previous_ordinal = -1
+    rows: list[tuple[str, str, str | None, int, str, str, int, str, str]] = []
+    for node in nodes:
+        local_id = str(node["node_id"])
+        parent = node.get("parent_node_id")
+        if parent is not None and str(parent) not in known_ids:
+            raise ValueError("native outline node parent is missing")
+        ordinal = int(node["ordinal"])
+        if ordinal <= previous_ordinal:
+            raise ValueError("native outline node ordinals must be strictly increasing")
+        previous_ordinal = ordinal
+        parent_id = str(parent) if parent is not None else None
+        level = int(node["level"])
+        kind = str(node["kind"])
+        title = str(node["title"])
+        source_locator = str(node["source_locator"])
+        payload = {
+            "kind": kind,
+            "level": level,
+            "local_node_id": local_id,
+            "ordinal": ordinal,
+            "parent_local_node_id": parent_id,
+            "source_locator": source_locator,
+            "title": title,
+        }
+        structure_sha256 = hashlib.sha256(
+            json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode(
+                "utf-8"
+            )
+        ).hexdigest()
+        rows.append(
+            (
+                local_id,
+                local_id,
+                parent_id,
+                level,
+                kind,
+                title,
+                ordinal,
+                source_locator,
+                structure_sha256,
+            )
+        )
+    return rows
 
 
 def _cited_evidence_ids(document: ThemeSynthesis | FinalSynthesis) -> list[str]:
@@ -168,6 +252,285 @@ class Database:
             raise
         finally:
             connection.close()
+
+    def start_extraction_run(
+        self,
+        *,
+        run_id: str,
+        file_sha256: str,
+        article_id: str | None,
+        parser_id: str,
+        parser_version: str,
+        contract_version: str,
+        config_sha256: str,
+        model_name: str | None = None,
+        model_sha256: str | None = None,
+    ) -> dict[str, Any]:
+        """Persist or resume one parser identity without storing extracted text."""
+
+        _validate_extraction_run_text(run_id, field_name="run ID", maximum=128)
+        _validate_extraction_run_hash(file_sha256, field_name="file SHA-256")
+        _validate_extraction_run_text(parser_id, field_name="parser ID", maximum=64)
+        _validate_extraction_run_text(parser_version, field_name="parser version", maximum=128)
+        _validate_extraction_run_text(
+            contract_version,
+            field_name="contract version",
+            maximum=64,
+        )
+        _validate_extraction_run_hash(config_sha256, field_name="configuration SHA-256")
+        if (model_name is None) != (model_sha256 is None):
+            raise ValueError("model name and SHA-256 must be provided together")
+        if model_name is not None and model_sha256 is not None:
+            _validate_extraction_run_text(model_name, field_name="model name", maximum=256)
+            _validate_extraction_run_hash(model_sha256, field_name="model SHA-256")
+
+        with self.transaction() as connection:
+            existing = connection.execute(
+                """
+                SELECT * FROM extraction_runs
+                WHERE file_sha256 = ?
+                  AND parser_id = ?
+                  AND parser_version = ?
+                  AND contract_version = ?
+                  AND config_sha256 = ?
+                  AND model_name IS ?
+                  AND model_sha256 IS ?
+                """,
+                (
+                    file_sha256,
+                    parser_id,
+                    parser_version,
+                    contract_version,
+                    config_sha256,
+                    model_name,
+                    model_sha256,
+                ),
+            ).fetchone()
+            if existing is not None:
+                existing_article_id = existing["article_id"]
+                if existing_article_id is None and article_id is not None:
+                    connection.execute(
+                        "UPDATE extraction_runs SET article_id = ?, updated_at = CURRENT_TIMESTAMP "
+                        "WHERE id = ? AND article_id IS NULL",
+                        (article_id, existing["id"]),
+                    )
+                    existing = connection.execute(
+                        "SELECT * FROM extraction_runs WHERE id = ?", (existing["id"],)
+                    ).fetchone()
+                    if existing is None:  # pragma: no cover - row cannot disappear in transaction
+                        raise RuntimeError("extraction run disappeared during article attachment")
+                elif existing_article_id != article_id:
+                    raise ValueError("extraction run identity belongs to another article")
+                return dict(existing)
+            existing_id = connection.execute(
+                "SELECT 1 FROM extraction_runs WHERE id = ?", (run_id,)
+            ).fetchone()
+            if existing_id is not None:
+                raise ValueError("extraction run ID belongs to another identity")
+            connection.execute(
+                """
+                INSERT INTO extraction_runs (
+                    id, file_sha256, article_id, parser_id, parser_version,
+                    contract_version, config_sha256, model_name, model_sha256, state
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'started')
+                """,
+                (
+                    run_id,
+                    file_sha256,
+                    article_id,
+                    parser_id,
+                    parser_version,
+                    contract_version,
+                    config_sha256,
+                    model_name,
+                    model_sha256,
+                ),
+            )
+            row = connection.execute(
+                "SELECT * FROM extraction_runs WHERE id = ?", (run_id,)
+            ).fetchone()
+            if row is None:  # pragma: no cover - SQLite INSERT contract
+                raise RuntimeError("extraction run was not persisted")
+            return dict(row)
+
+    def complete_extraction_run(
+        self,
+        *,
+        run_id: str,
+        page_count: int,
+        element_count: int,
+        warning_count: int,
+        normalized_text_sha256: str | None = None,
+        duration_seconds: float | None = None,
+    ) -> None:
+        """Atomically mark a started extraction as complete with bounded metadata."""
+
+        self._finish_extraction_run(
+            run_id=run_id,
+            state="completed",
+            page_count=page_count,
+            element_count=element_count,
+            warning_count=warning_count,
+            normalized_text_sha256=normalized_text_sha256,
+            duration_seconds=duration_seconds,
+        )
+
+    def mark_extraction_run_review_required(
+        self,
+        *,
+        run_id: str,
+        page_count: int,
+        element_count: int,
+        warning_count: int,
+        normalized_text_sha256: str | None = None,
+        duration_seconds: float | None = None,
+    ) -> None:
+        """Atomically stop a started extraction pending explicit human review."""
+
+        self._finish_extraction_run(
+            run_id=run_id,
+            state="review_required",
+            page_count=page_count,
+            element_count=element_count,
+            warning_count=warning_count,
+            normalized_text_sha256=normalized_text_sha256,
+            duration_seconds=duration_seconds,
+        )
+
+    def fail_extraction_run(
+        self,
+        *,
+        run_id: str,
+        error_type: str,
+        error_message: str,
+        duration_seconds: float | None = None,
+    ) -> None:
+        """Atomically record a bounded technical failure for a started extraction."""
+
+        error_type, error_message = _validate_extraction_run_diagnostic(
+            error_type,
+            error_message,
+        )
+        self._finish_extraction_run(
+            run_id=run_id,
+            state="failed",
+            page_count=0,
+            element_count=0,
+            warning_count=0,
+            duration_seconds=duration_seconds,
+            error_type=error_type,
+            error_message=error_message,
+        )
+
+    def extraction_run(self, run_id: str) -> dict[str, Any] | None:
+        with closing(self.connect()) as connection:
+            row = connection.execute(
+                "SELECT * FROM extraction_runs WHERE id = ?", (run_id,)
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    def _finish_extraction_run(
+        self,
+        *,
+        run_id: str,
+        state: str,
+        page_count: int,
+        element_count: int,
+        warning_count: int,
+        normalized_text_sha256: str | None = None,
+        duration_seconds: float | None = None,
+        error_type: str | None = None,
+        error_message: str | None = None,
+    ) -> None:
+        if state not in _EXTRACTION_RUN_STATES - {"started"}:
+            raise ValueError("extraction run terminal state is invalid")
+        _validate_extraction_run_text(run_id, field_name="run ID", maximum=128)
+        for name, value in (
+            ("page count", page_count),
+            ("element count", element_count),
+            ("warning count", warning_count),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(f"{name} must be a non-negative integer")
+        if normalized_text_sha256 is not None:
+            _validate_extraction_run_hash(
+                normalized_text_sha256,
+                field_name="normalized text SHA-256",
+            )
+        if duration_seconds is not None and (
+            isinstance(duration_seconds, bool)
+            or not isinstance(duration_seconds, (int, float))
+            or not math.isfinite(duration_seconds)
+            or not 0 <= duration_seconds <= _MAX_EXTRACTION_RUN_DURATION_SECONDS
+        ):
+            raise ValueError(
+                "duration seconds must be finite and between 0 and "
+                f"{_MAX_EXTRACTION_RUN_DURATION_SECONDS}"
+            )
+        if state == "failed":
+            if error_type is None or error_message is None:
+                raise ValueError("failed extraction run needs a technical diagnostic")
+        elif error_type is not None or error_message is not None:
+            raise ValueError("only failed extraction runs may store a diagnostic")
+
+        with self.transaction() as connection:
+            existing = connection.execute(
+                """
+                SELECT state, page_count, element_count, warning_count,
+                       normalized_text_sha256, duration_seconds, error_type, error_message
+                FROM extraction_runs WHERE id = ?
+                """,
+                (run_id,),
+            ).fetchone()
+            if existing is None:
+                raise ValueError("extraction run is unavailable")
+            if existing["state"] != "started":
+                expected = (
+                    state,
+                    page_count,
+                    element_count,
+                    warning_count,
+                    normalized_text_sha256,
+                    duration_seconds,
+                    error_type,
+                    error_message,
+                )
+                persisted = (
+                    existing["state"],
+                    existing["page_count"],
+                    existing["element_count"],
+                    existing["warning_count"],
+                    existing["normalized_text_sha256"],
+                    existing["duration_seconds"],
+                    existing["error_type"],
+                    existing["error_message"],
+                )
+                if persisted == expected:
+                    return
+                raise ValueError("extraction run is already terminal with a different payload")
+            cursor = connection.execute(
+                """
+                UPDATE extraction_runs
+                SET state = ?, page_count = ?, element_count = ?, warning_count = ?,
+                    normalized_text_sha256 = ?, duration_seconds = ?,
+                    error_type = ?, error_message = ?, updated_at = CURRENT_TIMESTAMP,
+                    completed_at = CURRENT_TIMESTAMP
+                WHERE id = ? AND state = 'started'
+                """,
+                (
+                    state,
+                    page_count,
+                    element_count,
+                    warning_count,
+                    normalized_text_sha256,
+                    duration_seconds,
+                    error_type,
+                    error_message,
+                    run_id,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError("started extraction run could not be finalized")
 
     def purge_argo_request_events(self, *, before: datetime) -> int:
         if before.tzinfo is None or before.utcoffset() is None:
@@ -721,6 +1084,220 @@ class Database:
                         ),
                     )
 
+    def admit_native_asset_and_chunks(
+        self,
+        *,
+        article: dict[str, Any],
+        asset: dict[str, Any],
+        chunks: Sequence[dict[str, Any]],
+        outline_nodes: Sequence[dict[str, Any]] = (),
+    ) -> tuple[str, list[int], bool]:
+        """Atomically admit one verified native source and structural chunks.
+
+        The native asset is idempotent per article/SHA.  A pre-existing PDF
+        article remains the article authority and keeps its PDF asset primary;
+        a native-only article deliberately has an empty legacy ``pdf_path`` so
+        no consumer can mistake XML for a paginated PDF.
+        """
+
+        if not chunks:
+            raise ValueError("native admission requires at least one chunk")
+        doi = str(article["doi"]).strip().lower()
+        if not doi:
+            raise ValueError("native admission requires a normalized DOI")
+        asset_sha256 = str(asset["sha256"])
+        _validate_extraction_run_hash(asset_sha256, field_name="native asset SHA-256")
+        if article.get("sha256") != asset_sha256:
+            raise ValueError("native article and asset SHA-256 must match")
+        asset_kind = str(asset["kind"])
+        if asset_kind not in {
+            "jats_xml",
+            "tei_xml",
+            "structured_xml",
+            "cleaned_text",
+            "plain_text",
+        }:
+            raise ValueError("native admission requires a native source asset")
+        outline_rows = _native_outline_rows(outline_nodes)
+
+        with self.transaction() as connection:
+            existing = connection.execute(
+                "SELECT id FROM articles WHERE lower(doi) = ?", (doi,)
+            ).fetchone()
+            if existing is None:
+                article_id = str(article["id"])
+                connection.execute(
+                    """
+                    INSERT INTO articles (
+                        id, sha256, doi, title, abstract, authors, journal,
+                        work_type, publisher, publication_year, language, pdf_path,
+                        validation_status, source
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', 'validated', ?)
+                    """,
+                    (
+                        article_id,
+                        asset_sha256,
+                        doi,
+                        article["title"],
+                        article.get("abstract"),
+                        json.dumps(article.get("authors", []), ensure_ascii=False),
+                        article.get("journal"),
+                        article.get("work_type"),
+                        article.get("publisher"),
+                        article.get("publication_year"),
+                        article.get("language"),
+                        article.get("source", "local"),
+                    ),
+                )
+                has_pdf = False
+            else:
+                article_id = str(existing["id"])
+                has_pdf = (
+                    connection.execute(
+                        "SELECT EXISTS(SELECT 1 FROM article_source_assets "
+                        "WHERE article_id = ? AND kind = 'pdf' AND state = 'admitted')",
+                        (article_id,),
+                    ).fetchone()[0]
+                    == 1
+                )
+
+            existing_asset = connection.execute(
+                "SELECT id FROM article_source_assets WHERE article_id = ? AND sha256 = ?",
+                (article_id, asset_sha256),
+            ).fetchone()
+            if existing_asset is not None:
+                return article_id, [], True
+
+            asset_id = str(uuid.uuid4())
+            connection.execute(
+                """
+                INSERT INTO article_source_assets(
+                    id, article_id, kind, file_path, sha256, media_type, byte_count,
+                    provider, source_url, license, state, is_primary, native_asset_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'admitted', ?, ?)
+                """,
+                (
+                    asset_id,
+                    article_id,
+                    asset_kind,
+                    asset["file_path"],
+                    asset_sha256,
+                    asset["media_type"],
+                    asset["byte_count"],
+                    asset.get("provider"),
+                    asset.get("source_url"),
+                    asset.get("license"),
+                    0 if has_pdf else 1,
+                    asset.get("native_asset_id"),
+                ),
+            )
+            next_index = int(
+                connection.execute(
+                    "SELECT COALESCE(MAX(chunk_index), -1) + 1 FROM chunks WHERE article_id = ?",
+                    (article_id,),
+                ).fetchone()[0]
+            )
+            chunk_ids: list[int] = []
+            for offset, chunk in enumerate(chunks):
+                text = str(chunk["text"])
+                cursor = connection.execute(
+                    """
+                    INSERT INTO chunks(
+                        article_id, section, subsection, page_start, page_end,
+                        chunk_index, text, token_count, embedding_status
+                    ) VALUES (?, ?, ?, NULL, NULL, ?, ?, ?, 'pending')
+                    """,
+                    (
+                        article_id,
+                        chunk.get("section"),
+                        chunk.get("subsection"),
+                        next_index + offset,
+                        text,
+                        chunk["token_count"],
+                    ),
+                )
+                chunk_id = int(cursor.lastrowid)
+                chunk_ids.append(chunk_id)
+                connection.execute(
+                    """
+                    INSERT INTO chunk_locators(
+                        chunk_id, asset_id, locator_kind, section_path, paragraph_start,
+                        paragraph_end, xml_id_start, xml_id_end, span_sha256
+                    ) VALUES (?, ?, 'structural', ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        chunk_id,
+                        asset_id,
+                        chunk["section_path"],
+                        chunk["paragraph_start"],
+                        chunk["paragraph_end"],
+                        chunk.get("xml_id_start"),
+                        chunk.get("xml_id_end"),
+                        hashlib.sha256(text.encode("utf-8")).hexdigest(),
+                    ),
+                )
+            if outline_rows:
+                durable_outline_rows = [
+                    (
+                        str(
+                            uuid.uuid5(
+                                uuid.NAMESPACE_URL,
+                                f"ciderscholar:outline:{article_id}:{asset_id}:{local_node_id}",
+                            )
+                        ),
+                        *row[1:],
+                    )
+                    for row in outline_rows
+                    for local_node_id in (row[1],)
+                ]
+                connection.executemany(
+                    """
+                    INSERT INTO document_outline_nodes(
+                        id, article_id, asset_id, extraction_run_id, local_node_id,
+                        parent_local_node_id, level, kind, title, ordinal, source_locator,
+                        structure_sha256
+                    ) VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    [
+                        (
+                            durable_id,
+                            article_id,
+                            asset_id,
+                            local_node_id,
+                            parent_local_node_id,
+                            level,
+                            kind,
+                            title,
+                            ordinal,
+                            source_locator,
+                            structure_sha256,
+                        )
+                        for (
+                            durable_id,
+                            local_node_id,
+                            parent_local_node_id,
+                            level,
+                            kind,
+                            title,
+                            ordinal,
+                            source_locator,
+                            structure_sha256,
+                        ) in durable_outline_rows
+                    ],
+                )
+                node_by_locator = {row[7]: row[0] for row in durable_outline_rows}
+                links = [
+                    (chunk_id, node_by_locator.get(f"§ {str(chunk['section_path'])}"))
+                    for chunk_id, chunk in zip(chunk_ids, chunks, strict=True)
+                ]
+                if any(node_id is None for _chunk_id, node_id in links):
+                    raise ValueError("native chunk section has no matching outline node")
+                connection.executemany(
+                    "INSERT INTO chunk_outline_nodes(chunk_id, outline_node_id) VALUES (?, ?)",
+                    links,
+                )
+        return article_id, chunk_ids, False
+
     def document_element_count(self, article_id: str) -> int:
         with closing(self.connect()) as connection:
             row = connection.execute(
@@ -728,6 +1305,731 @@ class Database:
                 (article_id,),
             ).fetchone()
         return int(row[0])
+
+    def save_article_source_asset(
+        self,
+        *,
+        article_id: str,
+        kind: Literal["pdf", "jats_xml", "tei_xml", "structured_xml", "cleaned_text", "plain_text"],
+        file_path: str,
+        sha256: str,
+        media_type: str,
+        byte_count: int,
+        provider: str | None = None,
+        source_url: str | None = None,
+        license: str | None = None,
+        state: Literal["admitted", "superseded", "failed"] = "admitted",
+        is_primary: bool = False,
+        native_asset_id: str | None = None,
+    ) -> str:
+        """Persist one verified source asset without replacing the legacy PDF pointer.
+
+        The caller owns path confinement and file hashing. This layer enforces only
+        stable scalar bounds and makes selecting a new primary asset atomic.
+        """
+
+        _validate_extraction_run_text(article_id, field_name="article ID", maximum=128)
+        _validate_extraction_run_text(file_path, field_name="asset file path", maximum=4_000)
+        _validate_extraction_run_hash(sha256, field_name="asset SHA-256")
+        _validate_extraction_run_text(media_type, field_name="asset media type", maximum=255)
+        if byte_count <= 0:
+            raise ValueError("asset byte count must be positive")
+        for value, field_name, maximum in (
+            (provider, "asset provider", 200),
+            (source_url, "asset source URL", 2_000),
+            (license, "asset license", 1_000),
+            (native_asset_id, "native asset ID", 128),
+        ):
+            if value is not None:
+                _validate_extraction_run_text(value, field_name=field_name, maximum=maximum)
+
+        asset_id = str(uuid.uuid4())
+        with self.transaction() as connection:
+            if is_primary:
+                connection.execute(
+                    "UPDATE article_source_assets SET is_primary = 0, "
+                    "updated_at = CURRENT_TIMESTAMP "
+                    "WHERE article_id = ? AND is_primary = 1",
+                    (article_id,),
+                )
+            connection.execute(
+                """
+                INSERT INTO article_source_assets (
+                    id, article_id, kind, file_path, sha256, media_type, byte_count,
+                    provider, source_url, license, state, is_primary, native_asset_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(article_id, sha256) DO UPDATE SET
+                    kind = excluded.kind,
+                    file_path = excluded.file_path,
+                    media_type = excluded.media_type,
+                    byte_count = excluded.byte_count,
+                    provider = excluded.provider,
+                    source_url = excluded.source_url,
+                    license = excluded.license,
+                    state = excluded.state,
+                    is_primary = excluded.is_primary,
+                    native_asset_id = excluded.native_asset_id,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (
+                    asset_id,
+                    article_id,
+                    kind,
+                    file_path,
+                    sha256,
+                    media_type,
+                    byte_count,
+                    provider,
+                    source_url,
+                    license,
+                    state,
+                    int(is_primary),
+                    native_asset_id,
+                ),
+            )
+            row = connection.execute(
+                "SELECT id FROM article_source_assets WHERE article_id = ? AND sha256 = ?",
+                (article_id, sha256),
+            ).fetchone()
+        if row is None:  # pragma: no cover - SQLite INSERT contract
+            raise RuntimeError("article source asset was not persisted")
+        return str(row["id"])
+
+    def article_source_assets(self, article_id: str) -> list[dict[str, Any]]:
+        """Return source-asset provenance in preference order, without reading content."""
+
+        with closing(self.connect()) as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM article_source_assets
+                WHERE article_id = ?
+                ORDER BY is_primary DESC, created_at, id
+                """,
+                (article_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def save_document_outline(
+        self,
+        *,
+        article_id: str,
+        asset_id: str,
+        nodes: Sequence[dict[str, Any]],
+        extraction_run_id: str | None = None,
+    ) -> dict[str, str]:
+        """Persist one source-derived outline and return local-to-durable node IDs.
+
+        Nodes are replaced only for the named asset, in one transaction.  This
+        deliberately leaves outlines from other source assets untouched.
+        """
+
+        _validate_extraction_run_text(article_id, field_name="article ID", maximum=128)
+        _validate_extraction_run_text(asset_id, field_name="asset ID", maximum=128)
+        if extraction_run_id is not None:
+            _validate_extraction_run_text(
+                extraction_run_id, field_name="extraction run ID", maximum=128
+            )
+        local_ids = [str(node.get("node_id", "")) for node in nodes]
+        if len(local_ids) != len(set(local_ids)) or any(not value for value in local_ids):
+            raise ValueError("outline node IDs must be non-empty and unique")
+        known_ids = set(local_ids)
+        previous_ordinal = -1
+        rows: list[tuple[Any, ...]] = []
+        for node in nodes:
+            local_id = str(node["node_id"])
+            parent = node.get("parent_node_id")
+            if parent is not None and str(parent) not in known_ids:
+                raise ValueError("outline node parent is missing")
+            ordinal = int(node["ordinal"])
+            if ordinal <= previous_ordinal:
+                raise ValueError("outline node ordinals must be strictly increasing")
+            previous_ordinal = ordinal
+            payload = {
+                "kind": str(node["kind"]),
+                "level": int(node["level"]),
+                "local_node_id": local_id,
+                "ordinal": ordinal,
+                "parent_local_node_id": str(parent) if parent is not None else None,
+                "source_locator": str(node["source_locator"]),
+                "title": str(node["title"]),
+            }
+            structure_sha256 = hashlib.sha256(
+                json.dumps(
+                    payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+                ).encode("utf-8")
+            ).hexdigest()
+            durable_id = str(
+                uuid.uuid5(
+                    uuid.NAMESPACE_URL, f"ciderscholar:outline:{article_id}:{asset_id}:{local_id}"
+                )
+            )
+            rows.append(
+                (
+                    durable_id,
+                    article_id,
+                    asset_id,
+                    extraction_run_id,
+                    local_id,
+                    payload["parent_local_node_id"],
+                    payload["level"],
+                    payload["kind"],
+                    payload["title"],
+                    ordinal,
+                    payload["source_locator"],
+                    structure_sha256,
+                )
+            )
+        with self.transaction() as connection:
+            asset = connection.execute(
+                "SELECT article_id FROM article_source_assets WHERE id = ?", (asset_id,)
+            ).fetchone()
+            if asset is None or str(asset["article_id"]) != article_id:
+                raise ValueError("outline asset must belong to the article")
+            if extraction_run_id is not None:
+                run = connection.execute(
+                    "SELECT article_id FROM extraction_runs WHERE id = ?", (extraction_run_id,)
+                ).fetchone()
+                if run is None or (
+                    run["article_id"] is not None and run["article_id"] != article_id
+                ):
+                    raise ValueError("outline extraction run must belong to the article")
+            connection.execute(
+                "DELETE FROM chunk_outline_nodes WHERE outline_node_id IN "
+                "(SELECT id FROM document_outline_nodes WHERE article_id = ? AND asset_id = ?)",
+                (article_id, asset_id),
+            )
+            connection.execute(
+                "DELETE FROM document_outline_nodes WHERE article_id = ? AND asset_id = ?",
+                (article_id, asset_id),
+            )
+            connection.executemany(
+                """
+                INSERT INTO document_outline_nodes(
+                    id, article_id, asset_id, extraction_run_id, local_node_id,
+                    parent_local_node_id, level, kind, title, ordinal, source_locator,
+                    structure_sha256
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                rows,
+            )
+        return {str(row[4]): str(row[0]) for row in rows}
+
+    def save_chunk_outline_links(
+        self,
+        *,
+        article_id: str,
+        local_to_durable_node_ids: dict[str, str],
+        chunk_to_local_node_ids: dict[int, str],
+    ) -> None:
+        """Link chunks to nodes of their own article, refusing cross-asset links."""
+
+        _validate_extraction_run_text(article_id, field_name="article ID", maximum=128)
+        if not chunk_to_local_node_ids:
+            return
+        rows = [
+            (chunk_id, local_to_durable_node_ids.get(local_node_id))
+            for chunk_id, local_node_id in chunk_to_local_node_ids.items()
+        ]
+        if any(chunk_id <= 0 or node_id is None for chunk_id, node_id in rows):
+            raise ValueError("chunk outline links are invalid")
+        with self.transaction() as connection:
+            for chunk_id, node_id in rows:
+                ownership = connection.execute(
+                    """
+                    SELECT c.article_id AS chunk_article_id, n.article_id AS node_article_id
+                    FROM chunks AS c JOIN document_outline_nodes AS n ON n.id = ?
+                    WHERE c.id = ?
+                    """,
+                    (node_id, chunk_id),
+                ).fetchone()
+                if (
+                    ownership is None
+                    or str(ownership["chunk_article_id"]) != article_id
+                    or str(ownership["node_article_id"]) != article_id
+                ):
+                    raise ValueError("chunk outline node must belong to the same article")
+            connection.executemany(
+                """
+                INSERT INTO chunk_outline_nodes(chunk_id, outline_node_id) VALUES (?, ?)
+                ON CONFLICT(chunk_id) DO UPDATE SET outline_node_id = excluded.outline_node_id
+                """,
+                rows,
+            )
+
+    def document_outline(self, article_id: str) -> list[dict[str, Any]]:
+        """Return persisted source-derived outline metadata without source contents."""
+
+        with closing(self.connect()) as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM document_outline_nodes
+                WHERE article_id = ? ORDER BY asset_id, ordinal, id
+                """,
+                (article_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def rebuild_outline_retrieval_nodes(self, article_id: str) -> int:
+        """Derive non-citable title/path navigation nodes from persisted source outline."""
+
+        with self.transaction() as connection:
+            rows = connection.execute(
+                """SELECT id, asset_id, title, source_locator, structure_sha256
+                   FROM document_outline_nodes WHERE article_id = ? ORDER BY asset_id, ordinal""",
+                (article_id,),
+            ).fetchall()
+            connection.execute(
+                "DELETE FROM outline_retrieval_nodes WHERE article_id = ?", (article_id,)
+            )
+            connection.executemany(
+                """INSERT INTO outline_retrieval_nodes(
+                    id, outline_node_id, article_id, asset_id, kind, text, source_sha256, citable
+                ) VALUES (?, ?, ?, ?, 'title_path', ?, ?, 0)""",
+                [
+                    (
+                        str(
+                            uuid.uuid5(
+                                uuid.NAMESPACE_URL, f"ciderscholar:outline-retrieval:{row['id']}"
+                            )
+                        ),
+                        str(row["id"]),
+                        article_id,
+                        str(row["asset_id"]),
+                        f"{row['title']}\n{row['source_locator']}",
+                        str(row["structure_sha256"]),
+                    )
+                    for row in rows
+                ],
+            )
+        return len(rows)
+
+    def chunks_for_outline_retrieval_node(
+        self, retrieval_node_id: str, *, limit: int = 6
+    ) -> list[sqlite3.Row]:
+        """Expand a non-citable navigation hit into the article's citable chunks."""
+
+        if not 1 <= limit <= 20:
+            raise ValueError("outline expansion limit must be between 1 and 20")
+        with closing(self.connect()) as connection:
+            return list(
+                connection.execute(
+                    """SELECT chunk.* FROM outline_retrieval_nodes AS node
+                       JOIN chunk_outline_nodes AS link
+                         ON link.outline_node_id = node.outline_node_id
+                       JOIN chunks AS chunk ON chunk.id = link.chunk_id
+                       JOIN articles AS article ON article.id = chunk.article_id
+                       WHERE node.id = ? AND article.validation_status IN ('validated', 'indexed')
+                       ORDER BY chunk.chunk_index, chunk.id LIMIT ?""",
+                    (retrieval_node_id, limit),
+                )
+            )
+
+    def article_inspection(
+        self,
+        article_id: str,
+        *,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> dict[str, Any] | None:
+        """Return a bounded, source-text-free inspection page for one article."""
+
+        if not 1 <= limit <= 500:
+            raise ValueError("inspection limit must be between 1 and 500")
+        if offset < 0:
+            raise ValueError("inspection offset cannot be negative")
+        with closing(self.connect()) as connection:
+            article = connection.execute(
+                "SELECT id FROM articles WHERE id = ?", (article_id,)
+            ).fetchone()
+            if article is None:
+                return None
+            assets = connection.execute(
+                """
+                SELECT id, kind, sha256, media_type, byte_count, provider, source_url,
+                       license, state, is_primary, native_asset_id, created_at, updated_at
+                FROM article_source_assets WHERE article_id = ?
+                ORDER BY is_primary DESC, created_at, id LIMIT ? OFFSET ?
+                """,
+                (article_id, limit, offset),
+            ).fetchall()
+            outline = connection.execute(
+                """
+                SELECT id, asset_id, extraction_run_id, local_node_id, parent_local_node_id,
+                       level, kind, title, ordinal, source_locator, structure_sha256
+                FROM document_outline_nodes WHERE article_id = ?
+                ORDER BY asset_id, ordinal, id LIMIT ? OFFSET ?
+                """,
+                (article_id, limit, offset),
+            ).fetchall()
+            elements = connection.execute(
+                """
+                SELECT id, local_element_id, kind, page_number, bbox_json, source_kind,
+                       source_locator, length(original_caption) AS original_caption_length,
+                       synthetic_caption IS NOT NULL AS has_synthetic_caption
+                FROM document_elements WHERE article_id = ?
+                ORDER BY page_number, id LIMIT ? OFFSET ?
+                """,
+                (article_id, limit, offset),
+            ).fetchall()
+            chunks = connection.execute(
+                """
+                SELECT c.id, c.section, c.subsection, c.page_start, c.page_end,
+                       c.chunk_index, c.token_count, c.embedding_status,
+                       l.asset_id, l.locator_kind, l.section_path, l.paragraph_start,
+                       l.paragraph_end, l.xml_id_start, l.xml_id_end, l.span_sha256,
+                       o.outline_node_id
+                FROM chunks AS c
+                LEFT JOIN chunk_locators AS l ON l.chunk_id = c.id
+                LEFT JOIN chunk_outline_nodes AS o ON o.chunk_id = c.id
+                WHERE c.article_id = ? ORDER BY c.chunk_index, c.id LIMIT ? OFFSET ?
+                """,
+                (article_id, limit, offset),
+            ).fetchall()
+            runs = connection.execute(
+                """
+                SELECT id, file_sha256, parser_id, parser_version, contract_version,
+                       config_sha256, model_name, model_sha256, state, page_count,
+                       element_count, warning_count, normalized_text_sha256,
+                       duration_seconds, started_at, updated_at, completed_at
+                FROM extraction_runs WHERE article_id = ?
+                ORDER BY started_at DESC, id LIMIT ? OFFSET ?
+                """,
+                (article_id, limit, offset),
+            ).fetchall()
+            totals = connection.execute(
+                """
+                SELECT
+                    (SELECT COUNT(*) FROM article_source_assets WHERE article_id = ?) AS assets,
+                    (SELECT COUNT(*) FROM document_outline_nodes WHERE article_id = ?) AS outline,
+                    (SELECT COUNT(*) FROM document_elements WHERE article_id = ?) AS elements,
+                    (SELECT COUNT(*) FROM chunks WHERE article_id = ?) AS chunks,
+                    (SELECT COUNT(*) FROM extraction_runs WHERE article_id = ?) AS extraction_runs
+                """,
+                (article_id, article_id, article_id, article_id, article_id),
+            ).fetchone()
+        return {
+            "article_id": article_id,
+            "limit": limit,
+            "offset": offset,
+            "totals": dict(totals),
+            "assets": [dict(row) for row in assets],
+            "outline": [dict(row) for row in outline],
+            "elements": [dict(row) for row in elements],
+            "chunks": [dict(row) for row in chunks],
+            "extraction_runs": [dict(row) for row in runs],
+        }
+
+    def propose_chunk_correction(
+        self, *, chunk_id: int, corrected_text: str, reason: str, reviewer: str
+    ) -> str:
+        """Store a curator proposal while retaining the immutable source chunk."""
+
+        if chunk_id <= 0:
+            raise ValueError("chunk correction needs a positive chunk ID")
+        for value, name, maximum in (
+            (corrected_text, "corrected text", 100_000),
+            (reason, "reason", 1_000),
+            (reviewer, "reviewer", 200),
+        ):
+            _validate_extraction_run_text(value, field_name=name, maximum=maximum)
+        with self.transaction() as connection:
+            chunk = connection.execute(
+                "SELECT text FROM chunks WHERE id = ?", (chunk_id,)
+            ).fetchone()
+            if chunk is None:
+                raise ValueError("chunk correction target is unavailable")
+            original_hash = hashlib.sha256(str(chunk["text"]).encode("utf-8")).hexdigest()
+            correction_id = str(uuid.uuid4())
+            connection.execute(
+                """INSERT INTO chunk_corrections(
+                    id, chunk_id, original_text_sha256, corrected_text, reason, reviewer, state
+                ) VALUES (?, ?, ?, ?, ?, ?, 'proposed')
+                ON CONFLICT(chunk_id, original_text_sha256, corrected_text) DO UPDATE SET
+                    reason = excluded.reason, reviewer = excluded.reviewer
+                """,
+                (correction_id, chunk_id, original_hash, corrected_text, reason, reviewer),
+            )
+            row = connection.execute(
+                """SELECT id FROM chunk_corrections WHERE chunk_id = ?
+                   AND original_text_sha256 = ? AND corrected_text = ?""",
+                (chunk_id, original_hash, corrected_text),
+            ).fetchone()
+        return str(row["id"])
+
+    def decide_chunk_correction(self, correction_id: str, *, approved: bool) -> None:
+        """Approve one current proposal and invalidate only its derived embedding."""
+
+        with self.transaction() as connection:
+            correction = connection.execute(
+                "SELECT chunk_id, state FROM chunk_corrections WHERE id = ?", (correction_id,)
+            ).fetchone()
+            if correction is None or correction["state"] != "proposed":
+                raise ValueError("chunk correction is not awaiting review")
+            if approved:
+                connection.execute(
+                    """UPDATE chunk_corrections
+                       SET state = 'superseded', reviewed_at = CURRENT_TIMESTAMP
+                       WHERE chunk_id = ? AND state = 'approved'""",
+                    (correction["chunk_id"],),
+                )
+                connection.execute(
+                    """UPDATE chunk_corrections
+                       SET state = 'approved', reviewed_at = CURRENT_TIMESTAMP WHERE id = ?""",
+                    (correction_id,),
+                )
+
+                connection.execute(
+                    "UPDATE chunks SET embedding_status = 'pending' WHERE id = ?",
+                    (correction["chunk_id"],),
+                )
+                connection.execute(
+                    "DELETE FROM chunks_fts WHERE rowid = ?",
+                    (correction["chunk_id"],),
+                )
+                connection.execute(
+                    """INSERT INTO chunks_fts(rowid, chunk_id, article_id, section, text)
+                       SELECT c.id, CAST(c.id AS TEXT), c.article_id, c.section,
+                              correction.corrected_text
+                       FROM chunks AS c JOIN chunk_corrections AS correction
+                         ON correction.id = ?
+                       WHERE c.id = correction.chunk_id""",
+                    (correction_id,),
+                )
+            else:
+                connection.execute(
+                    """UPDATE chunk_corrections
+                       SET state = 'rejected', reviewed_at = CURRENT_TIMESTAMP WHERE id = ?""",
+                    (correction_id,),
+                )
+
+    def chunk_corrections(self, article_id: str) -> list[dict[str, Any]]:
+        """Return the auditable correction history without exposing original chunk text."""
+
+        with closing(self.connect()) as connection:
+            rows = connection.execute(
+                """SELECT correction.id, correction.chunk_id, correction.original_text_sha256,
+                          correction.corrected_text, correction.reason, correction.reviewer,
+                          correction.state, correction.created_at, correction.reviewed_at
+                   FROM chunk_corrections AS correction JOIN chunks AS chunk
+                     ON chunk.id = correction.chunk_id
+                   WHERE chunk.article_id = ? ORDER BY correction.created_at DESC, correction.id""",
+                (article_id,),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def outline_expanded_chunk_ids(
+        self,
+        seed_chunk_ids: Sequence[int],
+        *,
+        candidate_limit: int,
+        passages_per_article: int,
+    ) -> list[int]:
+        """Return bounded sibling chunks sharing an authoritative outline node."""
+
+        if not seed_chunk_ids or candidate_limit <= 0 or passages_per_article <= 0:
+            return []
+        placeholders = ",".join("?" for _ in seed_chunk_ids)
+        with closing(self.connect()) as connection:
+            rows = connection.execute(
+                f"""
+                SELECT sibling.id, sibling.article_id, sibling.chunk_index,
+                       seed.chunk_id AS seed_chunk_id
+                FROM chunk_outline_nodes AS seed
+                JOIN chunk_outline_nodes AS sibling_link
+                  ON sibling_link.outline_node_id = seed.outline_node_id
+                JOIN chunks AS sibling ON sibling.id = sibling_link.chunk_id
+                JOIN articles AS article ON article.id = sibling.article_id
+                WHERE seed.chunk_id IN ({placeholders})
+                  AND article.validation_status IN ('validated', 'indexed')
+                ORDER BY sibling.article_id, sibling.chunk_index, sibling.id
+                """,
+                tuple(seed_chunk_ids),
+            ).fetchall()
+        seed_order = {chunk_id: position for position, chunk_id in enumerate(seed_chunk_ids)}
+        ordered = sorted(
+            rows,
+            key=lambda row: (
+                seed_order.get(int(row["seed_chunk_id"]), len(seed_order)),
+                str(row["article_id"]),
+                int(row["chunk_index"]),
+                int(row["id"]),
+            ),
+        )
+        selected: list[int] = []
+        per_article: dict[str, int] = {}
+        seen: set[int] = set(seed_chunk_ids)
+        for row in ordered:
+            chunk_id = int(row["id"])
+            article_id = str(row["article_id"])
+            if chunk_id in seen or per_article.get(article_id, 0) >= passages_per_article:
+                continue
+            selected.append(chunk_id)
+            seen.add(chunk_id)
+            per_article[article_id] = per_article.get(article_id, 0) + 1
+            if len(selected) >= candidate_limit:
+                break
+        return selected
+
+    def save_page_chunk_locators(self, *, article_id: str, asset_id: str) -> None:
+        """Attach deterministic page locators to every persisted PDF chunk of one article."""
+
+        _validate_extraction_run_text(article_id, field_name="article ID", maximum=128)
+        _validate_extraction_run_text(asset_id, field_name="asset ID", maximum=128)
+        with self.transaction() as connection:
+            asset = connection.execute(
+                "SELECT article_id, kind FROM article_source_assets WHERE id = ?",
+                (asset_id,),
+            ).fetchone()
+            if asset is None or str(asset["article_id"]) != article_id or asset["kind"] != "pdf":
+                raise ValueError("page locators require a PDF asset from the same article")
+            rows = connection.execute(
+                "SELECT id, page_start, page_end, text FROM chunks WHERE article_id = ?",
+                (article_id,),
+            ).fetchall()
+            connection.executemany(
+                """
+                INSERT INTO chunk_locators(
+                    chunk_id, asset_id, locator_kind, page_start, page_end, span_sha256
+                ) VALUES (?, ?, 'page', ?, ?, ?)
+                ON CONFLICT(chunk_id) DO UPDATE SET
+                    asset_id = excluded.asset_id,
+                    locator_kind = excluded.locator_kind,
+                    page_start = excluded.page_start,
+                    page_end = excluded.page_end,
+                    section_path = NULL,
+                    paragraph_start = NULL,
+                    paragraph_end = NULL,
+                    xml_id_start = NULL,
+                    xml_id_end = NULL,
+                    span_sha256 = excluded.span_sha256
+                """,
+                [
+                    (
+                        int(row["id"]),
+                        asset_id,
+                        int(row["page_start"]),
+                        int(row["page_end"]),
+                        hashlib.sha256(str(row["text"]).encode("utf-8")).hexdigest(),
+                    )
+                    for row in rows
+                ],
+            )
+
+    def chunk_locator(self, chunk_id: int) -> dict[str, Any] | None:
+        with closing(self.connect()) as connection:
+            row = connection.execute(
+                "SELECT * FROM chunk_locators WHERE chunk_id = ?", (chunk_id,)
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    def native_source_view(self, article_id: str) -> dict[str, list[dict[str, Any]]] | None:
+        """Expose approved native source passages as data, never executable XML/HTML."""
+
+        with closing(self.connect()) as connection:
+            article = connection.execute(
+                "SELECT 1 FROM articles WHERE id = ?", (article_id,)
+            ).fetchone()
+            if article is None:
+                return None
+            assets = connection.execute(
+                """
+                SELECT id, kind, sha256, media_type, byte_count, provider, source_url, license
+                FROM article_source_assets
+                WHERE article_id = ? AND kind IN ('jats_xml', 'tei_xml') AND state = 'admitted'
+                ORDER BY created_at, id
+                """,
+                (article_id,),
+            ).fetchall()
+            passages = connection.execute(
+                """
+                SELECT c.id AS chunk_id, c.section, c.chunk_index,
+                       COALESCE(correction.corrected_text, c.text) AS text,
+                       l.asset_id, l.section_path, l.paragraph_start, l.paragraph_end,
+                       l.xml_id_start, l.xml_id_end, l.span_sha256
+                FROM chunks AS c
+                JOIN chunk_locators AS l ON l.chunk_id = c.id
+                JOIN article_source_assets AS asset ON asset.id = l.asset_id
+                LEFT JOIN chunk_corrections AS correction
+                  ON correction.chunk_id = c.id AND correction.state = 'approved'
+                WHERE c.article_id = ?
+                  AND asset.kind IN ('jats_xml', 'tei_xml')
+                  AND asset.state = 'admitted'
+                  AND l.locator_kind = 'structural'
+                ORDER BY l.asset_id, c.chunk_index, c.id
+                """,
+                (article_id,),
+            ).fetchall()
+        return {
+            "assets": [dict(asset) for asset in assets],
+            "passages": [dict(passage) for passage in passages],
+        }
+
+    def save_structural_chunk_locator(
+        self,
+        *,
+        chunk_id: int,
+        asset_id: str,
+        section_path: str,
+        paragraph_start: int,
+        paragraph_end: int,
+        span_text: str,
+        xml_id_start: str | None = None,
+        xml_id_end: str | None = None,
+    ) -> None:
+        """Persist a source-native XML/text locator while forbidding fake pages."""
+
+        if chunk_id <= 0 or paragraph_start < 0 or paragraph_end < paragraph_start:
+            raise ValueError("structural locator bounds are invalid")
+        _validate_extraction_run_text(asset_id, field_name="asset ID", maximum=128)
+        _validate_extraction_run_text(section_path, field_name="section path", maximum=2_000)
+        if not span_text:
+            raise ValueError("structural locator span cannot be empty")
+        for value, field_name in ((xml_id_start, "start XML ID"), (xml_id_end, "end XML ID")):
+            if value is not None:
+                _validate_extraction_run_text(value, field_name=field_name, maximum=255)
+        with self.transaction() as connection:
+            row = connection.execute(
+                """
+                SELECT c.article_id, a.article_id AS asset_article_id, a.kind
+                FROM chunks AS c
+                JOIN article_source_assets AS a ON a.id = ?
+                WHERE c.id = ?
+                """,
+                (asset_id, chunk_id),
+            ).fetchone()
+            if row is None or row["article_id"] != row["asset_article_id"]:
+                raise ValueError("structural locator asset must belong to the chunk article")
+            if row["kind"] == "pdf":
+                raise ValueError("structural locator cannot target a PDF asset")
+            connection.execute(
+                """
+                INSERT INTO chunk_locators(
+                    chunk_id, asset_id, locator_kind, section_path, paragraph_start,
+                    paragraph_end, xml_id_start, xml_id_end, span_sha256
+                ) VALUES (?, ?, 'structural', ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(chunk_id) DO UPDATE SET
+                    asset_id = excluded.asset_id,
+                    locator_kind = excluded.locator_kind,
+                    page_start = NULL,
+                    page_end = NULL,
+                    section_path = excluded.section_path,
+                    paragraph_start = excluded.paragraph_start,
+                    paragraph_end = excluded.paragraph_end,
+                    xml_id_start = excluded.xml_id_start,
+                    xml_id_end = excluded.xml_id_end,
+                    span_sha256 = excluded.span_sha256
+                """,
+                (
+                    chunk_id,
+                    asset_id,
+                    section_path,
+                    paragraph_start,
+                    paragraph_end,
+                    xml_id_start,
+                    xml_id_end,
+                    hashlib.sha256(span_text.encode("utf-8")).hexdigest(),
+                ),
+            )
 
     def document_elements(self, article_id: str) -> list[dict[str, Any]]:
         """Load source elements with cells and text relations kept structurally separate."""
@@ -769,6 +2071,28 @@ class Database:
                 payload["text_relations"] = [dict(row) for row in relations]
                 result.append(payload)
         return result
+
+    def table_evidence(self, article_id: str) -> list[object]:
+        """Project persisted source tables into deterministic evidence objects."""
+
+        from app.models.table_evidence import table_evidence_from_element
+
+        return [
+            table_evidence_from_element(element)
+            for element in self.document_elements(article_id)
+            if element["kind"] == "table"
+        ]
+
+    def figure_evidence(self, article_id: str) -> list[object]:
+        """Project only citable source captions and surrounding source text links."""
+
+        from app.models.figure_evidence import figure_evidence_from_element
+
+        return [
+            figure_evidence_from_element(element)
+            for element in self.document_elements(article_id)
+            if element["kind"] == "figure"
+        ]
 
     def set_synthetic_document_caption(
         self,
@@ -1095,12 +2419,23 @@ class Database:
         sql = f"""
             SELECT
                 c.*,
+                COALESCE(correction.corrected_text, c.text) AS effective_text,
+                l.locator_kind,
+                CASE WHEN l.locator_kind = 'structural' THEN NULL
+                     ELSE COALESCE(l.page_start, c.page_start) END AS locator_page_start,
+                CASE WHEN l.locator_kind = 'structural' THEN NULL
+                     ELSE COALESCE(l.page_end, c.page_end) END AS locator_page_end,
+                l.section_path, l.paragraph_start, l.paragraph_end,
+                l.xml_id_start, l.xml_id_end,
                 a.title AS article_title,
                 a.publication_year,
                 bm25(chunks_fts, 0.0, 0.0, ?, ?) AS lexical_score
             FROM chunks_fts
             JOIN chunks AS c ON c.id = CAST(chunks_fts.chunk_id AS INTEGER)
             JOIN articles AS a ON a.id = c.article_id
+            LEFT JOIN chunk_locators AS l ON l.chunk_id = c.id
+            LEFT JOIN chunk_corrections AS correction
+              ON correction.chunk_id = c.id AND correction.state = 'approved'
             WHERE {" AND ".join(predicates)}
             ORDER BY lexical_score, c.id
             LIMIT ?
@@ -1130,6 +2465,13 @@ class Database:
                 caption_sql = f"""
                     SELECT
                         c.*,
+                        l.locator_kind,
+                        CASE WHEN l.locator_kind = 'structural' THEN NULL
+                             ELSE COALESCE(l.page_start, c.page_start) END AS locator_page_start,
+                        CASE WHEN l.locator_kind = 'structural' THEN NULL
+                             ELSE COALESCE(l.page_end, c.page_end) END AS locator_page_end,
+                        l.section_path, l.paragraph_start, l.paragraph_end,
+                        l.xml_id_start, l.xml_id_end,
                         a.title AS article_title,
                         a.publication_year,
                         bm25(document_element_captions_fts) + 0.25 AS lexical_score
@@ -1139,6 +2481,7 @@ class Database:
                     JOIN document_element_relations AS r ON r.element_id = d.id
                     JOIN chunks AS c ON c.id = r.related_chunk_id
                     JOIN articles AS a ON a.id = c.article_id
+                    LEFT JOIN chunk_locators AS l ON l.chunk_id = c.id
                     WHERE {" AND ".join(caption_predicates)}
                     ORDER BY lexical_score, c.id
                     LIMIT ?
@@ -1178,9 +2521,12 @@ class Database:
             article_predicate = f" AND c.article_id IN ({article_placeholders})"
             article_parameters = unique_articles
         sql = f"""
-            SELECT c.id, c.article_id, c.section, c.page_start, c.page_end, c.text
+            SELECT c.id, c.article_id, c.section, c.page_start, c.page_end,
+                   COALESCE(correction.corrected_text, c.text) AS text
             FROM chunks AS c
             JOIN articles AS a ON a.id = c.article_id
+            LEFT JOIN chunk_corrections AS correction
+              ON correction.chunk_id = c.id AND correction.state = 'approved'
             WHERE c.id > ? AND c.embedding_status IN ({placeholders})
               AND a.validation_status IN ('validated', 'indexed')
               {article_predicate}
@@ -1484,11 +2830,22 @@ class Database:
                 f"""
                 SELECT
                     c.*,
+                    COALESCE(correction.corrected_text, c.text) AS effective_text,
+                    l.locator_kind,
+                    CASE WHEN l.locator_kind = 'structural' THEN NULL
+                         ELSE COALESCE(l.page_start, c.page_start) END AS locator_page_start,
+                    CASE WHEN l.locator_kind = 'structural' THEN NULL
+                         ELSE COALESCE(l.page_end, c.page_end) END AS locator_page_end,
+                    l.section_path, l.paragraph_start, l.paragraph_end,
+                    l.xml_id_start, l.xml_id_end,
                     a.title AS article_title,
                     a.publication_year,
                     a.language AS article_language
                 FROM chunks AS c
                 JOIN articles AS a ON a.id = c.article_id
+                LEFT JOIN chunk_locators AS l ON l.chunk_id = c.id
+                LEFT JOIN chunk_corrections AS correction
+                  ON correction.chunk_id = c.id AND correction.state = 'approved'
                 WHERE c.id IN ({placeholders})
                   AND a.validation_status IN ('validated', 'indexed')
                 """,
@@ -1629,8 +2986,10 @@ class Database:
                 anchor_rows = list(
                     connection.execute(
                         f"""
-                        SELECT c.*
+                        SELECT c.*, l.locator_kind, l.section_path, l.paragraph_start,
+                               l.paragraph_end, l.xml_id_start, l.xml_id_end
                         FROM chunks AS c
+                        LEFT JOIN chunk_locators AS l ON l.chunk_id = c.id
                         WHERE c.article_id = ? AND c.id IN ({placeholders})
                         """,
                         (article_id, *anchors),
@@ -1662,8 +3021,10 @@ class Database:
                 neighbour_rows = list(
                     connection.execute(
                         f"""
-                        SELECT c.*
+                        SELECT c.*, l.locator_kind, l.section_path, l.paragraph_start,
+                               l.paragraph_end, l.xml_id_start, l.xml_id_end
                         FROM chunks AS c
+                        LEFT JOIN chunk_locators AS l ON l.chunk_id = c.id
                         WHERE c.article_id = ? AND ({predicates})
                         ORDER BY c.chunk_index
                         """,
@@ -1697,8 +3058,10 @@ class Database:
                 section_rows = list(
                     connection.execute(
                         f"""
-                        SELECT c.*
+                        SELECT c.*, l.locator_kind, l.section_path, l.paragraph_start,
+                               l.paragraph_end, l.xml_id_start, l.xml_id_end
                         FROM chunks AS c
+                        LEFT JOIN chunk_locators AS l ON l.chunk_id = c.id
                         WHERE c.article_id = ?
                           AND lower(COALESCE(c.section, '')) IN ({placeholders})
                         ORDER BY
@@ -1726,8 +3089,10 @@ class Database:
                 fallback_rows = list(
                     connection.execute(
                         """
-                        SELECT c.*
+                        SELECT c.*, l.locator_kind, l.section_path, l.paragraph_start,
+                               l.paragraph_end, l.xml_id_start, l.xml_id_end
                         FROM chunks AS c
+                        LEFT JOIN chunk_locators AS l ON l.chunk_id = c.id
                         WHERE c.article_id = ?
                         ORDER BY
                             CASE lower(COALESCE(c.section, ''))
@@ -1834,7 +3199,12 @@ class Database:
         with self.transaction() as connection:
             rows = (
                 connection.execute(
-                    f"SELECT * FROM chunks WHERE id IN ({','.join('?' for _ in allowed_ids)})",
+                    f"""
+                    SELECT c.*, l.locator_kind, l.section_path, l.paragraph_start,
+                           l.paragraph_end, l.xml_id_start, l.xml_id_end
+                    FROM chunks AS c LEFT JOIN chunk_locators AS l ON l.chunk_id = c.id
+                    WHERE c.id IN ({",".join("?" for _ in allowed_ids)})
+                    """,
                     tuple(sorted(allowed_ids)),
                 )
                 if allowed_ids
@@ -1851,11 +3221,21 @@ class Database:
                 row = chunks.get(chunk_id)
                 if row is None:
                     raise ValueError("finding references a non-selected chunk")
-                if (
-                    int(row["page_start"]) != finding.page_start
-                    or int(row["page_end"]) != finding.page_end
+                locator_kind = str(row["locator_kind"] or "page")
+                if finding.locator_kind != locator_kind:
+                    raise ValueError("finding locator kind differs from SQLite")
+                if locator_kind == "page" and (
+                    row["page_start"] != finding.page_start or row["page_end"] != finding.page_end
                 ):
                     raise ValueError("finding pages differ from SQLite")
+                if locator_kind == "structural" and (
+                    row["section_path"] != finding.section_path
+                    or row["paragraph_start"] != finding.paragraph_start
+                    or row["paragraph_end"] != finding.paragraph_end
+                    or row["xml_id_start"] != finding.xml_id_start
+                    or row["xml_id_end"] != finding.xml_id_end
+                ):
+                    raise ValueError("finding structural locator differs from SQLite")
                 if finding.source_excerpt not in str(row["text"]):
                     raise ValueError("finding excerpt is not verbatim SQLite text")
 
@@ -1867,8 +3247,9 @@ class Database:
                 """
                 INSERT INTO evidence (
                     id, query_id, article_id, chunk_id, claim, source_excerpt,
-                    page_start, page_end, relevance_score
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    page_start, page_end, locator_kind, section_path, paragraph_start,
+                    paragraph_end, xml_id_start, xml_id_end, relevance_score
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     (
@@ -1880,6 +3261,12 @@ class Database:
                         finding.source_excerpt,
                         finding.page_start,
                         finding.page_end,
+                        finding.locator_kind,
+                        finding.section_path,
+                        finding.paragraph_start,
+                        finding.paragraph_end,
+                        finding.xml_id_start,
+                        finding.xml_id_end,
                         evidence.relevance_score,
                     )
                     for finding in evidence.findings
@@ -1947,7 +3334,9 @@ class Database:
             findings = list(
                 connection.execute(
                     """
-                    SELECT claim, source_excerpt, page_start, page_end, chunk_id
+                    SELECT claim, source_excerpt, page_start, page_end, locator_kind,
+                           section_path, paragraph_start, paragraph_end,
+                           xml_id_start, xml_id_end, chunk_id
                     FROM evidence
                     WHERE query_id = ? AND article_id = ?
                     ORDER BY rowid
@@ -1966,6 +3355,12 @@ class Database:
                         "source_excerpt": row["source_excerpt"],
                         "page_start": row["page_start"],
                         "page_end": row["page_end"],
+                        "locator_kind": row["locator_kind"],
+                        "section_path": row["section_path"],
+                        "paragraph_start": row["paragraph_start"],
+                        "paragraph_end": row["paragraph_end"],
+                        "xml_id_start": row["xml_id_start"],
+                        "xml_id_end": row["xml_id_end"],
                         "chunk_id": str(row["chunk_id"]),
                     }
                     for row in findings

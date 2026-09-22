@@ -14,12 +14,14 @@ from app.llm.article_evidence import (
     EvidenceExtractionError,
     EvidencePassageSelector,
     EvidenceSourceValidationError,
+    SelectedPassage,
+    evidence_json_schema,
 )
 from app.llm.contracts import (
     GenerationMetrics,
     GenerationResponse,
 )
-from app.models.evidence import ArticleEvidence
+from app.models.evidence import ArticleEvidence, Finding
 
 
 def _seed_article(database: Database, article_id: str = "article-1") -> list[int]:
@@ -364,6 +366,105 @@ def test_tampered_pages_retry_once_then_accept_exact_sources(settings) -> None:
     assert len(llm.calls) == 2
     assert "CORRECTION_REQUIRED" in llm.calls[1][0][1]["content"]
     assert result.evidence.findings[0].page_start == source.page_start
+
+
+def test_structural_locator_must_match_selected_sqlite_passage(settings) -> None:
+    passage = SelectedPassage(
+        chunk_id=42,
+        article_id="native-article",
+        section="Results",
+        page_start=None,
+        page_end=None,
+        locator_kind="structural",
+        section_path="Results > Aroma",
+        paragraph_start=3,
+        paragraph_end=4,
+        xml_id_start="p3",
+        xml_id_end="p4",
+        text="The native source records a measurable aroma difference.",
+        selection_score=0.9,
+        selection_reasons=["ranked chunk"],
+    )
+    evidence = ArticleEvidence(
+        article_id="native-article",
+        relevance_score=0.9,
+        question_addressed="Does the source report an aroma difference?",
+        findings=[
+            Finding(
+                claim="The source reports an aroma difference.",
+                source_excerpt=passage.text,
+                locator_kind="structural",
+                section_path="Results > Altered path",
+                paragraph_start=3,
+                paragraph_end=4,
+                xml_id_start="p3",
+                xml_id_end="p4",
+                chunk_id="42",
+            )
+        ],
+        topics=[],
+        contradictions=[],
+        missing_information=[],
+    )
+
+    with pytest.raises(EvidenceSourceValidationError, match="structural bounds"):
+        ArticleEvidenceExtractor(
+            settings, Database(settings.paths.database_path), SequenceChatClient([])
+        )._validate_sources(
+            evidence,
+            article_id="native-article",
+            passages=[passage],
+        )
+
+
+def test_evidence_schema_allows_page_and_structural_locator_forms_together() -> None:
+    page_passage = SelectedPassage(
+        chunk_id=1,
+        article_id="mixed-article",
+        section="Results",
+        page_start=2,
+        page_end=2,
+        locator_kind="page",
+        text="A paged source passage.",
+        selection_score=0.9,
+        selection_reasons=["ranked chunk"],
+    )
+    structural_passage = SelectedPassage(
+        chunk_id=2,
+        article_id="mixed-article",
+        section="Results",
+        locator_kind="structural",
+        section_path="Results > Aroma",
+        paragraph_start=1,
+        paragraph_end=1,
+        xml_id_start="p1",
+        xml_id_end="p1",
+        text="A structural source passage.",
+        selection_score=0.8,
+        selection_reasons=["ranked chunk"],
+    )
+
+    finding = evidence_json_schema(passages=[page_passage, structural_passage])["properties"][
+        "findings"
+    ]["items"]
+
+    assert finding["properties"]["locator_kind"] == {"enum": ["page", "structural"]}
+    assert finding["oneOf"] == [
+        {
+            "properties": {"locator_kind": {"const": "page"}},
+            "required": ["page_start", "page_end"],
+        },
+        {
+            "properties": {"locator_kind": {"const": "structural"}},
+            "required": [
+                "section_path",
+                "paragraph_start",
+                "paragraph_end",
+                "xml_id_start",
+                "xml_id_end",
+            ],
+        },
+    ]
 
 
 def test_invented_doi_and_excerpt_are_never_persisted(settings, caplog) -> None:

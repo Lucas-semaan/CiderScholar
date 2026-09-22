@@ -336,6 +336,7 @@ function EvidenceRun({ run }: { run: Record<string, unknown> }) {
             return (
               <li className="text-sm leading-6 text-slate-600" key={index}>
                 {String(item.claim ?? "Constat scientifique")}
+                <p className="mt-1 text-xs text-slate-400">{findingLocator(item)}</p>
               </li>
             );
           })}
@@ -343,6 +344,18 @@ function EvidenceRun({ run }: { run: Record<string, unknown> }) {
       )}
     </details>
   );
+}
+
+function findingLocator(finding: Record<string, unknown>) {
+  if (finding.locator_kind === "structural") {
+    const section = typeof finding.section_path === "string" ? finding.section_path : "source XML";
+    const start = typeof finding.paragraph_start === "number" ? finding.paragraph_start : "?";
+    const end = typeof finding.paragraph_end === "number" ? finding.paragraph_end : start;
+    return `§ ${section}, par. ${start}${end !== start ? `–${end}` : ""}`;
+  }
+  const start = typeof finding.page_start === "number" ? finding.page_start : "?";
+  const end = typeof finding.page_end === "number" ? finding.page_end : start;
+  return `p. ${start}${end !== start ? `–${end}` : ""}`;
 }
 
 function ThemeSummary({ theme }: { theme: Record<string, unknown> }) {

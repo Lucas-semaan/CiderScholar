@@ -28,6 +28,15 @@ AblationVariant = Literal[
     "citation_traversal",
 ]
 
+FusionAblationVariant = Literal["baseline", "outline", "second_wave", "outline_second_wave"]
+
+FUSION_ABLATION_VARIANTS: tuple[FusionAblationVariant, ...] = (
+    "baseline",
+    "outline",
+    "second_wave",
+    "outline_second_wave",
+)
+
 ABLATION_VARIANTS: tuple[AblationVariant, ...] = (
     "baseline",
     "query_variants",
@@ -86,6 +95,35 @@ def fixed_ablation_configurations() -> list[DRSStageConfiguration]:
             )
         )
     return configurations
+
+
+class FusionStageConfiguration(BaseModel):
+    """Precommitted feature matrix for the RAGFlow Fusion evaluation harness only."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    variant: FusionAblationVariant
+    outline_expansion_enabled: bool = False
+    second_wave_enabled: bool = False
+
+    @property
+    def sha256(self) -> str:
+        return hashlib.sha256(
+            canonical_json(self.model_dump(mode="json")).encode("utf-8")
+        ).hexdigest()
+
+
+def fixed_fusion_ablation_configurations() -> list[FusionStageConfiguration]:
+    return [
+        FusionStageConfiguration(variant="baseline"),
+        FusionStageConfiguration(variant="outline", outline_expansion_enabled=True),
+        FusionStageConfiguration(variant="second_wave", second_wave_enabled=True),
+        FusionStageConfiguration(
+            variant="outline_second_wave",
+            outline_expansion_enabled=True,
+            second_wave_enabled=True,
+        ),
+    ]
 
 
 class CiderQAAblationPlan(BaseModel):

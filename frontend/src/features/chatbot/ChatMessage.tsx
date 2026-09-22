@@ -39,6 +39,7 @@ const timingLabels: Record<string, string> = {
 const diagnosticLabels: Record<string, string> = {
   empty_answerable_statements: "Réponse scientifique vide",
   missing_required_evidence: "Preuves pertinentes non toutes intégrées",
+  unjustified_abstention: "Abstention incohérente avec les preuves retenues",
   missing_contextual_introduction: "Introduction contextuelle manquante",
   paragraph_too_short: "Paragraphes insuffisamment développés",
   synthesis_too_short: "Synthèse insuffisamment développée",
@@ -280,6 +281,11 @@ export function ChatMessage({
                             {source.page_ranges.length === 1 ? "Page" : "Pages"}{" "}
                             {source.page_ranges.join(", ")}
                           </Badge>
+                        )}
+                        {(source.structural_ranges?.length ?? 0) > 0 && (
+                          <span className="text-xs text-slate-600">
+                            {source.structural_ranges?.join(", ")}
+                          </span>
                         )}
                         {(source.figure_refs ?? []).map((figure) => (
                           <Badge key={figure} tone="info">

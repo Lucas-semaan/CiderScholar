@@ -32,9 +32,11 @@ class ChatAnswerVerifier:
     ) -> CiderEvidenceAnswer:
         fields: list[tuple[str, str, list[str]]] = []
         for index, statement in enumerate(answer.statements):
-            fields.append((f"statement:{index}", statement.statement, statement.evidence_ids))
+            fields.append((f"statement:{index}:text", statement.statement, statement.evidence_ids))
             if statement.mechanism:
-                fields.append((f"statement:{index}", statement.mechanism, statement.evidence_ids))
+                fields.append(
+                    (f"statement:{index}:mechanism", statement.mechanism, statement.evidence_ids)
+                )
         if answer.definition:
             fields.append(("definition", answer.definition, answer.definition_evidence_ids))
         for index, limitation in enumerate(answer.limitations):
@@ -49,13 +51,18 @@ class ChatAnswerVerifier:
             fields.append(("insufficiency", answer.insufficiency_message, []))
         claims = []
         owners: dict[str, set[str]] = {}
+        sentences_by_owner: dict[str, list[tuple[str, str]]] = {}
         rejected: set[str] = set()
         for owner, text, ids in fields:
             if not set(ids) <= set(evidence):
                 rejected.add(owner)
                 continue
             for sentence in re.split(r"(?<=[.!?;])\s+", text):
+                sentence = sentence.strip()
+                if not sentence:
+                    continue
                 identifier = "claim-" + content_key([sentence, ids])[:20]
+                sentences_by_owner.setdefault(owner, []).append((identifier, sentence))
                 if identifier in owners:
                     owners[identifier].add(owner)
                     continue
@@ -79,15 +86,30 @@ class ChatAnswerVerifier:
             checks = self.verifier.verify(question, claims)
         except (ArgoError, SemanticVerificationError) as error:
             raise MandatoryVerificationError("mandatory_claim_verification_incomplete") from error
+        supported = {check.claim_id: check.supported for check in checks}
         rejected.update(
             owner for check in checks if not check.supported for owner in owners[check.claim_id]
         )
         self.removed_count += len(rejected)
-        statements = [
-            item
-            for index, item in enumerate(answer.statements)
-            if f"statement:{index}" not in rejected
-        ]
+
+        statements = []
+        for index, item in enumerate(answer.statements):
+            text_owner = f"statement:{index}:text"
+            mechanism_owner = f"statement:{index}:mechanism"
+            supported_sentences = [
+                sentence
+                for claim_id, sentence in sentences_by_owner.get(text_owner, [])
+                if supported.get(claim_id, False)
+            ]
+            if not supported_sentences:
+                continue
+            if item.mechanism and mechanism_owner in rejected:
+                # A mechanism qualifies the whole result and cannot be detached
+                # silently when it fails mandatory verification.
+                continue
+            if text_owner in rejected:
+                item = item.model_copy(update={"statement": " ".join(supported_sentences)})
+            statements.append(item)
         limitations = [
             item
             for index, item in enumerate(answer.limitations)

@@ -17,9 +17,11 @@ from app.deep_research.promotion import (
 from app.evaluation.ciderqa import CiderQAQuestion, CiderQASplitDataset
 from app.evaluation.ciderqa_ablation import (
     ABLATION_VARIANTS,
+    FUSION_ABLATION_VARIANTS,
     build_ablation_plan,
     build_ablation_report,
     fixed_ablation_configurations,
+    fixed_fusion_ablation_configurations,
     verify_ablation_plan,
     verify_ablation_report,
 )
@@ -189,6 +191,19 @@ def test_fixed_matrix_has_one_stage_per_candidate_and_signed_comparison() -> Non
     assert [item.variant for item in report.comparisons] == list(ABLATION_VARIANTS)
     assert report.comparisons[0].delta_from_baseline["exactness"] == 0
     assert report.comparisons[-1].duration_delta_seconds == 5
+
+
+def test_fusion_ablation_matrix_is_fixed_and_keeps_feature_flags_explicit() -> None:
+    configurations = fixed_fusion_ablation_configurations()
+
+    assert [item.variant for item in configurations] == list(FUSION_ABLATION_VARIANTS)
+    assert configurations[0].outline_expansion_enabled is False
+    assert configurations[0].second_wave_enabled is False
+    assert configurations[1].outline_expansion_enabled is True
+    assert configurations[2].second_wave_enabled is True
+    assert configurations[3].outline_expansion_enabled is True
+    assert configurations[3].second_wave_enabled is True
+    assert len({item.sha256 for item in configurations}) == len(configurations)
 
 
 def test_comparison_rejects_incomplete_or_inconsistent_runs() -> None:

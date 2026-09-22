@@ -86,6 +86,15 @@ def test_schema_creates_required_tables_and_fts(settings) -> None:
         } <= bibliographic_columns
         assert {"work_type", "publisher"} <= article_columns
         assert "source_title" in source_columns
+        evidence_columns = {row[1] for row in connection.execute("PRAGMA table_info(evidence)")}
+        assert {
+            "locator_kind",
+            "section_path",
+            "paragraph_start",
+            "paragraph_end",
+            "xml_id_start",
+            "xml_id_end",
+        } <= evidence_columns
         unique_indexes = {
             row[0]
             for row in connection.execute(

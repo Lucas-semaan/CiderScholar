@@ -2,15 +2,127 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import asdict, dataclass, field
+from hashlib import sha256
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class PdfExtractionError(RuntimeError):
     """Raised when a PDF cannot be opened or parsed."""
+
+
+class ParserIdentity(BaseModel):
+    """Versioned identity required to reproduce a parser-derived result."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    parser_id: str = Field(pattern=r"^[a-z][a-z0-9_]{0,63}$")
+    parser_version: str = Field(min_length=1, max_length=128)
+    contract_version: str = Field(pattern=r"^[0-9]+\.[0-9]+\.[0-9]+$")
+    config_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    model_name: str | None = Field(default=None, min_length=1, max_length=256)
+    model_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+
+    @field_validator("parser_version")
+    @classmethod
+    def parser_version_is_not_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("parser version cannot be blank")
+        return value
+
+    @field_validator("model_name")
+    @classmethod
+    def model_name_is_not_blank(cls, value: str | None) -> str | None:
+        if value is not None and not value.strip():
+            raise ValueError("model name cannot be blank")
+        return value
+
+    @model_validator(mode="after")
+    def complete_model_identity(self) -> ParserIdentity:
+        if (self.model_name is None) != (self.model_sha256 is None):
+            raise ValueError("model name and SHA-256 must be provided together")
+        return self
+
+
+class ExtractionWarning(BaseModel):
+    """Bounded, non-scientific diagnostic emitted by a parser."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    code: str = Field(pattern=r"^[a-z][a-z0-9_]{0,63}$")
+    severity: Literal["info", "review", "blocking"]
+    page_number: int | None = Field(default=None, ge=1)
+    element_id: str | None = Field(
+        default=None,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$",
+    )
+
+
+class DocumentOutlineNode(BaseModel):
+    """Source-derived structural node with a deterministic identity."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    node_id: str = Field(pattern=r"^outline-[a-f0-9]{24}$")
+    parent_node_id: str | None = Field(default=None, pattern=r"^outline-[a-f0-9]{24}$")
+    level: int = Field(ge=1, le=32)
+    kind: Literal["section", "heading", "abstract", "references", "appendix", "other"]
+    title: str = Field(min_length=1, max_length=4_000)
+    ordinal: int = Field(ge=0)
+    source_locator: str = Field(min_length=1, max_length=2_000)
+
+    @field_validator("title", "source_locator")
+    @classmethod
+    def source_text_is_not_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("outline source fields cannot be blank")
+        return value
+
+    @classmethod
+    def make_node_id(
+        cls,
+        *,
+        parent_node_id: str | None,
+        level: int,
+        kind: str,
+        title: str,
+        ordinal: int,
+        source_locator: str,
+    ) -> str:
+        """Build an ID from only persisted, source-derived node fields."""
+
+        payload = {
+            "kind": kind,
+            "level": level,
+            "ordinal": ordinal,
+            "parent_node_id": parent_node_id,
+            "source_locator": source_locator,
+            "title": title,
+        }
+        digest = sha256(
+            json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode(
+                "utf-8"
+            )
+        ).hexdigest()
+        return f"outline-{digest[:24]}"
+
+    @model_validator(mode="after")
+    def deterministic_identity(self) -> DocumentOutlineNode:
+        expected = self.make_node_id(
+            parent_node_id=self.parent_node_id,
+            level=self.level,
+            kind=self.kind,
+            title=self.title,
+            ordinal=self.ordinal,
+            source_locator=self.source_locator,
+        )
+        if self.node_id != expected:
+            raise ValueError("outline node ID does not match its source-derived fields")
+        return self
 
 
 @dataclass(slots=True)
@@ -92,6 +204,59 @@ class ScientificDocumentElement(BaseModel):
         return self
 
 
+class StructuralTextBlock(BaseModel):
+    """A source-native XML span with a structural, never paginated, locator."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    block_id: str = Field(pattern=r"^struct-[a-f0-9]{24}$")
+    kind: Literal["abstract", "paragraph", "table", "figure", "caption"]
+    section_path: str = Field(min_length=1, max_length=2_000)
+    paragraph_number: int = Field(ge=1)
+    text: str = Field(min_length=1, max_length=1_000_000)
+    xml_id: str | None = Field(
+        default=None,
+        pattern=r"^[A-Za-z_][A-Za-z0-9._:-]{0,255}$",
+    )
+
+    @classmethod
+    def make_block_id(
+        cls,
+        *,
+        kind: str,
+        section_path: str,
+        paragraph_number: int,
+        text: str,
+        xml_id: str | None,
+    ) -> str:
+        payload = {
+            "kind": kind,
+            "paragraph_number": paragraph_number,
+            "section_path": section_path,
+            "text": text,
+            "xml_id": xml_id,
+        }
+        digest = sha256(
+            json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode(
+                "utf-8"
+            )
+        ).hexdigest()
+        return f"struct-{digest[:24]}"
+
+    @model_validator(mode="after")
+    def deterministic_identity(self) -> StructuralTextBlock:
+        expected = self.make_block_id(
+            kind=self.kind,
+            section_path=self.section_path,
+            paragraph_number=self.paragraph_number,
+            text=self.text,
+            xml_id=self.xml_id,
+        )
+        if self.block_id != expected:
+            raise ValueError("structural block ID does not match its source-derived fields")
+        return self
+
+
 @dataclass(slots=True)
 class ExtractedDocument:
     pdf_path: str
@@ -103,6 +268,63 @@ class ExtractedDocument:
     requires_ocr: bool
     elements: list[ScientificDocumentElement] = field(default_factory=list)
     ocr_pages: list[OcrPageTrace] = field(default_factory=list)
+    source_format: Literal[
+        "pdf",
+        "jats_xml",
+        "tei_xml",
+        "structured_xml",
+        "cleaned_text",
+        "plain_text",
+    ] = "pdf"
+    parser_identity: ParserIdentity | None = None
+    outline_nodes: list[DocumentOutlineNode] = field(default_factory=list)
+    warnings: list[ExtractionWarning] = field(default_factory=list)
+    structural_blocks: list[StructuralTextBlock] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        if self.source_format not in {
+            "pdf",
+            "jats_xml",
+            "tei_xml",
+            "structured_xml",
+            "cleaned_text",
+            "plain_text",
+        }:
+            raise ValueError("source format is unsupported")
+        self._validate_outline_nodes()
+        block_ids = {block.block_id for block in self.structural_blocks}
+        if len(block_ids) != len(self.structural_blocks):
+            raise ValueError("structural block IDs cannot be duplicated")
+
+    def _validate_outline_nodes(self) -> None:
+        nodes_by_id = {node.node_id: node for node in self.outline_nodes}
+        if len(nodes_by_id) != len(self.outline_nodes):
+            raise ValueError("outline node IDs cannot be duplicated")
+        for node in self.outline_nodes:
+            if node.parent_node_id is not None and node.parent_node_id not in nodes_by_id:
+                raise ValueError("outline node parent is missing")
+        for node in self.outline_nodes:
+            visited: set[str] = set()
+            current = node
+            while current.parent_node_id is not None:
+                if current.node_id in visited:
+                    raise ValueError("outline nodes cannot contain a cycle")
+                visited.add(current.node_id)
+                current = nodes_by_id[current.parent_node_id]
+        ordinals = [node.ordinal for node in self.outline_nodes]
+        if any(later <= earlier for earlier, later in zip(ordinals, ordinals[1:], strict=False)):
+            raise ValueError("outline ordinals must be unique and strictly increasing")
+        positions = {node.node_id: index for index, node in enumerate(self.outline_nodes)}
+        for node in self.outline_nodes:
+            if node.parent_node_id is None:
+                if node.level != 1:
+                    raise ValueError("outline root node must have level one")
+                continue
+            parent = nodes_by_id[node.parent_node_id]
+            if positions[parent.node_id] >= positions[node.node_id]:
+                raise ValueError("outline parent must precede its child")
+            if node.level <= parent.level:
+                raise ValueError("outline child level must exceed its parent level")
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -115,6 +337,17 @@ class ExtractedDocument:
             "requires_ocr": self.requires_ocr,
             "elements": [element.model_dump(mode="json") for element in self.elements],
             "ocr_pages": [trace.model_dump(mode="json") for trace in self.ocr_pages],
+            "source_format": self.source_format,
+            "parser_identity": (
+                self.parser_identity.model_dump(mode="json")
+                if self.parser_identity is not None
+                else None
+            ),
+            "outline_nodes": [node.model_dump(mode="json") for node in self.outline_nodes],
+            "warnings": [warning.model_dump(mode="json") for warning in self.warnings],
+            "structural_blocks": [
+                block.model_dump(mode="json") for block in self.structural_blocks
+            ],
         }
 
     @classmethod
@@ -132,6 +365,22 @@ class ExtractedDocument:
                 for element in value.get("elements", [])
             ],
             ocr_pages=[OcrPageTrace.model_validate(trace) for trace in value.get("ocr_pages", [])],
+            source_format=str(value.get("source_format", "pdf")),
+            parser_identity=(
+                ParserIdentity.model_validate(value["parser_identity"])
+                if value.get("parser_identity") is not None
+                else None
+            ),
+            outline_nodes=[
+                DocumentOutlineNode.model_validate(node) for node in value.get("outline_nodes", [])
+            ],
+            warnings=[
+                ExtractionWarning.model_validate(warning) for warning in value.get("warnings", [])
+            ],
+            structural_blocks=[
+                StructuralTextBlock.model_validate(block)
+                for block in value.get("structural_blocks", [])
+            ],
         )
 
 
@@ -153,6 +402,18 @@ def sorted_page_text(page: Any) -> str:
         .replace("\x00", "")
         .strip()
     )
+
+
+def pymupdf_config_sha256(*, min_page_text_characters: int, min_text_page_ratio: float) -> str:
+    """Hash every PyMuPDF extraction setting that can change source-derived text."""
+
+    payload = {
+        "min_page_text_characters": min_page_text_characters,
+        "min_text_page_ratio": min_text_page_ratio,
+    }
+    return sha256(
+        json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    ).hexdigest()
 
 
 class PyMuPdfExtractor:
@@ -220,6 +481,18 @@ class PyMuPdfExtractor:
             text_page_count=text_page_count,
             requires_ocr=requires_ocr,
             elements=elements,
+            source_format="pdf",
+            parser_identity=ParserIdentity(
+                parser_id="pymupdf",
+                parser_version=str(fitz.VersionBind),
+                contract_version="1.0.0",
+                config_sha256=pymupdf_config_sha256(
+                    min_page_text_characters=self.min_page_text_characters,
+                    min_text_page_ratio=self.min_text_page_ratio,
+                ),
+            ),
+            outline_nodes=[],
+            warnings=[],
         )
 
     @staticmethod

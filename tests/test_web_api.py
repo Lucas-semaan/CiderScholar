@@ -156,6 +156,176 @@ def test_article_pdf_opens_only_the_pdf_linked_to_its_article_id(settings, tmp_p
     assert str(legacy_pdf) not in missing.text
 
 
+def test_native_source_view_returns_structural_passages_not_raw_xml_paths(settings) -> None:
+    database = Database(settings.paths.common_database_path)
+    database.initialize()
+    database.save_article_and_chunks(
+        {
+            "id": "native-source",
+            "sha256": "a" * 64,
+            "title": "Article JATS local",
+            "pdf_path": "",
+            "validation_status": "validated",
+            "source": "europe_pmc",
+        },
+        [
+            {
+                "section": "Results",
+                "page_start": None,
+                "page_end": None,
+                "chunk_index": 0,
+                "text": "Résultat source natif.",
+                "token_count": 4,
+            }
+        ],
+    )
+    asset_id = database.save_article_source_asset(
+        article_id="native-source",
+        kind="jats_xml",
+        file_path="C:/secret/source.xml",
+        sha256="b" * 64,
+        media_type="application/xml",
+        byte_count=42,
+        provider="europe_pmc",
+        source_url="https://example.test/article.xml",
+    )
+    chunk_id = int(database.chunks_for_article("native-source", limit=1)[0]["id"])
+    database.save_structural_chunk_locator(
+        chunk_id=chunk_id,
+        asset_id=asset_id,
+        section_path="Results",
+        paragraph_start=2,
+        paragraph_end=2,
+        xml_id_start="result-2",
+        xml_id_end="result-2",
+        span_text="Résultat source natif.",
+    )
+
+    with TestClient(create_app(settings)) as client:
+        response = client.get("/api/corpus/native-source/native-source")
+        missing = client.get("/api/corpus/missing/native-source")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["assets"][0]["kind"] == "jats_xml"
+    assert "file_path" not in payload["assets"][0]
+    assert payload["passages"] == [
+        {
+            "chunk_id": chunk_id,
+            "section": "Results",
+            "chunk_index": 0,
+            "text": "Résultat source natif.",
+            "asset_id": asset_id,
+            "section_path": "Results",
+            "paragraph_start": 2,
+            "paragraph_end": 2,
+            "xml_id_start": "result-2",
+            "xml_id_end": "result-2",
+            "span_sha256": payload["passages"][0]["span_sha256"],
+        }
+    ]
+    assert missing.status_code == 404
+
+
+def test_tables_endpoint_is_empty_for_an_article_without_source_tables(settings) -> None:
+    database = Database(settings.paths.common_database_path)
+    database.initialize()
+    database.save_article_and_chunks(
+        {"id": "no-tables", "sha256": "c" * 64, "title": "No tables", "pdf_path": "x.pdf"},
+        [],
+    )
+    with TestClient(create_app(settings)) as client:
+        response = client.get("/api/corpus/no-tables/tables")
+        missing = client.get("/api/corpus/missing/tables")
+    assert response.json() == {"article_id": "no-tables", "tables": []}
+    assert missing.status_code == 404
+
+
+def test_figures_endpoint_is_empty_for_an_article_without_source_figures(settings) -> None:
+    database = Database(settings.paths.common_database_path)
+    database.initialize()
+    database.save_article_and_chunks(
+        {"id": "no-figures", "sha256": "d" * 64, "title": "No figures", "pdf_path": "x.pdf"},
+        [],
+    )
+    with TestClient(create_app(settings)) as client:
+        response = client.get("/api/corpus/no-figures/figures")
+        missing = client.get("/api/corpus/missing/figures")
+    assert response.json() == {"article_id": "no-figures", "figures": []}
+    assert missing.status_code == 404
+
+
+def test_article_inspection_is_paginated_and_does_not_return_chunk_text(settings) -> None:
+    database = Database(settings.paths.common_database_path)
+    database.initialize()
+    database.save_article_and_chunks(
+        {
+            "id": "inspection-article",
+            "sha256": "e" * 64,
+            "title": "Inspection article",
+            "authors": [],
+            "pdf_path": str(settings.paths.common_pdf_dir / "inspection.pdf"),
+        },
+        [
+            {
+                "page_start": 1,
+                "page_end": 1,
+                "chunk_index": 0,
+                "text": "This source text must not be in inspection output.",
+                "token_count": 9,
+            },
+            {
+                "page_start": 2,
+                "page_end": 2,
+                "chunk_index": 1,
+                "text": "Second source text must also remain private.",
+                "token_count": 8,
+            },
+        ],
+    )
+
+    with TestClient(create_app(settings)) as client:
+        response = client.get("/api/corpus/inspection-article/inspection?limit=1&offset=1")
+        missing = client.get("/api/corpus/missing/inspection")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["totals"]["chunks"] == 2
+    assert len(payload["chunks"]) == 1
+    assert payload["chunks"][0]["chunk_index"] == 1
+    assert "text" not in payload["chunks"][0]
+    assert "source text" not in response.text
+    assert missing.status_code == 404
+
+
+def test_chunk_correction_api_requires_an_explicit_article_and_decision(settings) -> None:
+    database = Database(settings.paths.common_database_path)
+    database.initialize()
+    database.save_article_and_chunks(
+        {"id": "corrected", "sha256": "c" * 64, "title": "Corrected", "pdf_path": "c.pdf"},
+        [{"page_start": 1, "page_end": 1, "chunk_index": 0, "text": "Original.", "token_count": 1}],
+    )
+    chunk_id = database.chunks_for_article("corrected", limit=1)[0]["id"]
+    with TestClient(create_app(settings)) as client:
+        created = client.post(
+            "/api/corpus/corrected/corrections",
+            json={
+                "chunk_id": chunk_id,
+                "corrected_text": "Approved.",
+                "reason": "Typo",
+                "reviewer": "expert",
+            },
+        )
+        decision = client.post(
+            f"/api/corpus/corrected/corrections/{created.json()['id']}/decision",
+            json={"decision": "approved"},
+        )
+        history = client.get("/api/corpus/corrected/corrections")
+    assert created.status_code == 201
+    assert decision.json()["state"] == "approved"
+    assert history.json()["corrections"][0]["state"] == "approved"
+
+
 def test_review_notice_can_be_admitted_and_manual_decision_is_preserved(settings) -> None:
     database = _insert_review_record(settings, REVIEW_ACCEPTED_ID)
     registry = DoiExclusionRegistry.for_database(database.path)

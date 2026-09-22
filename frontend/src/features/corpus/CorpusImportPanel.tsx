@@ -24,6 +24,7 @@ const reportLabels: Record<IngestionReport["status"], string> = {
   chunks_ready: "Ajouté",
   duplicate: "Déjà présent",
   ocr_required: "OCR requis",
+  review_required: "Revue requise",
   failed: "Échec",
 };
 

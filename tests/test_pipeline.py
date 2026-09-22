@@ -12,8 +12,10 @@ from app.ingestion.pdf_extractor import (
     ExtractedDocument,
     OcrPageTrace,
     PageText,
+    ParserIdentity,
     ScientificDocumentElement,
     TableCell,
+    pymupdf_config_sha256,
 )
 from app.ingestion.pipeline import IngestionPipeline, PdfCatalogMetadata
 
@@ -38,6 +40,7 @@ class FakeExtractor:
         result_marker: str = "PAGE_MARKER",
         elements: list[ScientificDocumentElement] | None = None,
         ocr_pages: list[OcrPageTrace] | None = None,
+        parser_identity: ParserIdentity | None = None,
     ) -> None:
         self.requires_ocr = requires_ocr
         self.doi = doi
@@ -45,6 +48,7 @@ class FakeExtractor:
         self.result_marker = result_marker
         self.elements = elements or []
         self.ocr_pages = ocr_pages or []
+        self.parser_identity = parser_identity
         self.calls = 0
 
     def extract(self, pdf_path: Path) -> ExtractedDocument:
@@ -69,6 +73,7 @@ class FakeExtractor:
             requires_ocr=self.requires_ocr,
             elements=self.elements,
             ocr_pages=self.ocr_pages,
+            parser_identity=self.parser_identity,
         )
 
 
@@ -96,6 +101,12 @@ def test_pipeline_persists_chunks_and_detects_duplicate(settings, tmp_path: Path
     assert extractor.calls == 1
     assert database.lexical_search("PAGE_MARKER")[0]["article_id"] == first.article_id
     assert database.list_ingestion_jobs(limit=1)[0]["article_id"] == first.article_id
+    chunk = database.chunks_for_article(first.article_id, limit=1)[0]
+    locator = database.chunk_locator(int(chunk["id"]))
+    assert locator is not None
+    assert locator["locator_kind"] == "page"
+    assert locator["page_start"] == 1
+    assert locator["asset_id"] == database.article_source_assets(first.article_id)[0]["id"]
 
 
 def test_pipeline_accepts_a_precomputed_sha_without_hashing_again(settings, tmp_path: Path) -> None:
@@ -340,3 +351,181 @@ def test_pipeline_resumes_from_page_cache_after_database_error(settings, tmp_pat
     assert resumed.status == "chunks_ready"
     assert resumed.resumed_from_cache is True
     assert extractor.calls == 1
+
+
+def test_pipeline_does_not_reuse_an_identity_cache_after_parser_configuration_changes(
+    settings,
+    tmp_path: Path,
+) -> None:
+    database = Database(settings.paths.database_path)
+    database.initialize()
+    pdf = _pdf(tmp_path)
+    initial_identity = ParserIdentity(
+        parser_id="pymupdf",
+        parser_version="test-1",
+        contract_version="1.0.0",
+        config_sha256=pymupdf_config_sha256(
+            min_page_text_characters=settings.ingestion.min_page_text_characters,
+            min_text_page_ratio=settings.ingestion.min_text_page_ratio,
+        ),
+    )
+    first_extractor = FakeExtractor(parser_identity=initial_identity)
+    original_save = database.save_article_and_chunks
+
+    def fail_save(*_args, **_kwargs):
+        raise RuntimeError("synthetic persistence interruption")
+
+    database.save_article_and_chunks = fail_save  # type: ignore[method-assign]
+    first = IngestionPipeline(settings, database, extractor=first_extractor).ingest_file(pdf)
+    database.save_article_and_chunks = original_save  # type: ignore[method-assign]
+
+    changed_settings = settings.model_copy(
+        update={"ingestion": settings.ingestion.model_copy(update={"min_page_text_characters": 26})}
+    )
+    changed_identity = initial_identity.model_copy(
+        update={
+            "config_sha256": pymupdf_config_sha256(
+                min_page_text_characters=26,
+                min_text_page_ratio=settings.ingestion.min_text_page_ratio,
+            )
+        }
+    )
+    second_extractor = FakeExtractor(parser_identity=changed_identity)
+    second = IngestionPipeline(changed_settings, database, extractor=second_extractor).ingest_file(
+        pdf
+    )
+
+    assert first.status == "failed"
+    assert second.status == "chunks_ready"
+    assert second_extractor.calls == 1
+
+
+def test_pipeline_persists_and_completes_an_identity_extraction_run(
+    settings, tmp_path: Path
+) -> None:
+    database = Database(settings.paths.database_path)
+    database.initialize()
+    identity = ParserIdentity(
+        parser_id="pymupdf",
+        parser_version="test-1",
+        contract_version="1.0.0",
+        config_sha256=pymupdf_config_sha256(
+            min_page_text_characters=settings.ingestion.min_page_text_characters,
+            min_text_page_ratio=settings.ingestion.min_text_page_ratio,
+        ),
+    )
+
+    report = IngestionPipeline(
+        settings, database, extractor=FakeExtractor(parser_identity=identity)
+    ).ingest_file(_pdf(tmp_path))
+
+    assert report.status == "chunks_ready"
+    assert report.extraction_run_id is not None
+    assert report.requested_parser_id == "pymupdf"
+    assert report.actual_parser_id == "pymupdf"
+    run = database.extraction_run(report.extraction_run_id)
+    assert run is not None
+    assert run["state"] == "completed"
+    assert run["article_id"] == report.article_id
+    assert run["normalized_text_sha256"] is not None
+
+
+def test_pipeline_records_a_bounded_failure_on_an_identity_extraction_run(
+    settings, tmp_path: Path
+) -> None:
+    database = Database(settings.paths.database_path)
+    database.initialize()
+    identity = ParserIdentity(
+        parser_id="pymupdf",
+        parser_version="test-1",
+        contract_version="1.0.0",
+        config_sha256=pymupdf_config_sha256(
+            min_page_text_characters=settings.ingestion.min_page_text_characters,
+            min_text_page_ratio=settings.ingestion.min_text_page_ratio,
+        ),
+    )
+    original_save = database.save_article_and_chunks
+
+    def fail_save(*_args, **_kwargs):
+        raise RuntimeError("synthetic persistence interruption")
+
+    database.save_article_and_chunks = fail_save  # type: ignore[method-assign]
+    report = IngestionPipeline(
+        settings, database, extractor=FakeExtractor(parser_identity=identity)
+    ).ingest_file(_pdf(tmp_path))
+    database.save_article_and_chunks = original_save  # type: ignore[method-assign]
+
+    assert report.status == "failed"
+    assert report.extraction_run_id is not None
+    run = database.extraction_run(report.extraction_run_id)
+    assert run is not None
+    assert run["state"] == "failed"
+    assert run["error_type"] == "RuntimeError"
+    assert "synthetic persistence interruption" in run["error_message"]
+
+
+def test_pipeline_marks_an_ocr_extraction_run_as_review_required(settings, tmp_path: Path) -> None:
+    database = Database(settings.paths.database_path)
+    database.initialize()
+    identity = ParserIdentity(
+        parser_id="pymupdf",
+        parser_version="test-1",
+        contract_version="1.0.0",
+        config_sha256=pymupdf_config_sha256(
+            min_page_text_characters=settings.ingestion.min_page_text_characters,
+            min_text_page_ratio=settings.ingestion.min_text_page_ratio,
+        ),
+    )
+
+    report = IngestionPipeline(
+        settings,
+        database,
+        extractor=FakeExtractor(requires_ocr=True, parser_identity=identity),
+    ).ingest_file(_pdf(tmp_path))
+
+    assert report.status == "ocr_required"
+    assert report.extraction_run_id is not None
+    assert report.actual_parser_id == "pymupdf"
+    run = database.extraction_run(report.extraction_run_id)
+    assert run is not None
+    assert run["state"] == "review_required"
+    assert run["article_id"] is None
+
+
+def test_pipeline_completes_an_identity_run_for_a_doi_duplicate(settings, tmp_path: Path) -> None:
+    database = Database(settings.paths.database_path)
+    database.initialize()
+    existing = {
+        "id": "existing-doi",
+        "sha256": "a" * 64,
+        "title": "Existing document",
+        "doi": "10.1000/existing",
+        "pdf_path": str(tmp_path / "existing.pdf"),
+    }
+    database.save_article_and_chunks(
+        existing,
+        [{"page_start": 1, "page_end": 1, "chunk_index": 0, "text": "Existing.", "token_count": 1}],
+    )
+    identity = ParserIdentity(
+        parser_id="pymupdf",
+        parser_version="test-1",
+        contract_version="1.0.0",
+        config_sha256=pymupdf_config_sha256(
+            min_page_text_characters=settings.ingestion.min_page_text_characters,
+            min_text_page_ratio=settings.ingestion.min_text_page_ratio,
+        ),
+    )
+
+    report = IngestionPipeline(
+        settings,
+        database,
+        extractor=FakeExtractor(doi="10.1000/existing", parser_identity=identity),
+    ).ingest_file(_pdf(tmp_path))
+
+    assert report.status == "duplicate"
+    assert report.duplicate_reason == "doi"
+    assert report.extraction_run_id is not None
+    run = database.extraction_run(report.extraction_run_id)
+    assert run is not None
+    assert run["state"] == "completed"
+    assert run["article_id"] == "existing-doi"

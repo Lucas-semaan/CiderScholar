@@ -61,11 +61,11 @@ from app.llm.final_synthesis import (
     HierarchicalSynthesisService,
     SynthesisExecutionResult,
 )
-from app.llm.providers import active_llm_model
+from app.llm.providers import LlmProviderStore, active_llm_model
 from app.llm.response_language import question_language
 from app.llm.response_style import ResponseStyle, detect_response_style
 from app.llm.validation_cache import ValidationCache, client_identity, content_key
-from app.memory import MemoryGuard, MemorySnapshot
+from app.memory import MemoryGuard, MemoryLimitError, MemorySnapshot
 from app.models.chatbot import (
     ChatbotResult,
     ChatbotRetrievalTrace,
@@ -86,6 +86,7 @@ from app.retrieval.axis_coverage import (
     merge_axis_rankings,
     select_with_axis_coverage,
 )
+from app.retrieval.chat_checkpoint import ChatRetrievalCheckpoint
 from app.retrieval.evidence_selection import distinct_evidence
 from app.retrieval.global_semantic_filter import (
     ArgoGlobalSemanticEvidenceFilter,
@@ -124,6 +125,7 @@ from app.retrieval.scientific_intent import (
     score_scientific_text,
 )
 from app.retrieval.vector_search import QdrantLocalIndex, VectorSearchService
+from app.services.argo_quota import ArgoQuotaService
 from app.services.chatbot import (
     chatbot_sources_from_evidence,
     contextualize_retrieval_query,
@@ -161,10 +163,28 @@ ChatbotProgressStage = Literal[
     "generation",
 ]
 ChatbotProgressCallback = Callable[[ChatbotProgressStage], None]
+ChatbotRetrievalCheckpointCallback = Callable[[ChatRetrievalCheckpoint], None]
 SAFE_FILE_NAME = re.compile(r"[^A-Za-z0-9._ -]+")
 BIBTEX_KEY = re.compile(r"[^A-Za-z0-9_:-]+")
 _LOCAL_CHAT_RETRIEVAL_LOCK = threading.Lock()
 LOGGER = logging.getLogger("ciderscholar.services.workflows")
+# Loading the local encoder and opening the embedded Qdrant collection needs a
+# material margin, but must remain usable with the 8 GB desktop profile.  The
+# process-level guard still runs around the actual vector operations.
+_DENSE_CHAT_MINIMUM_AVAILABLE_GB = 4.0
+
+
+def _dense_chat_retrieval_is_safe(settings: Settings) -> bool:
+    """Keep a local semantic search from exhausting an interactive desktop.
+
+    E5 plus the embedded Qdrant generation can temporarily require substantially
+    more memory than either component's on-disk size.  Lexical retrieval remains
+    SQLite-authoritative and is a valid explicit fallback; it is preferable to
+    letting the process starve the desktop before it can return a cited answer.
+    """
+
+    snapshot = MemoryGuard(settings.memory).snapshot()
+    return snapshot is None or snapshot.system_available_gb >= _DENSE_CHAT_MINIMUM_AVAILABLE_GB
 
 
 class _ChatTimingCollector:
@@ -211,6 +231,39 @@ class _ChatTimingCollector:
             return
         value["prompt_tokens"] += max(0, prompt_tokens)
         value["completion_tokens"] += max(0, completion_tokens)
+
+    def restore(self, models: Sequence[ChatbotTiming]) -> None:
+        """Restore a completed pre-semantic attempt without re-running its work."""
+
+        for model in models:
+            self._values[model.stage] = {
+                "duration_seconds": model.duration_seconds,
+                "count": model.count,
+                "prompt_tokens": model.prompt_tokens,
+                "completion_tokens": model.completion_tokens,
+                "before": (
+                    MemorySnapshot(
+                        process_rss_gb=model.process_rss_before_gb,
+                        system_used_gb=model.system_used_before_gb,
+                        system_available_gb=model.system_available_before_gb,
+                    )
+                    if model.process_rss_before_gb is not None
+                    and model.system_used_before_gb is not None
+                    and model.system_available_before_gb is not None
+                    else None
+                ),
+                "after": (
+                    MemorySnapshot(
+                        process_rss_gb=model.process_rss_after_gb,
+                        system_used_gb=model.system_used_after_gb,
+                        system_available_gb=model.system_available_after_gb,
+                    )
+                    if model.process_rss_after_gb is not None
+                    and model.system_used_after_gb is not None
+                    and model.system_available_after_gb is not None
+                    else None
+                ),
+            }
 
     def models(self) -> list[ChatbotTiming]:
         models: list[ChatbotTiming] = []
@@ -286,6 +339,11 @@ class _ChatRetrievalTraceCollector:
 
     def models(self) -> list[ChatbotRetrievalTrace]:
         return list(self._values.values())
+
+    def restore(self, models: Sequence[ChatbotRetrievalTrace]) -> None:
+        """Restore completed retrieval traces exactly once for a resumed attempt."""
+
+        self._values = {model.stage: model for model in models}
 
 
 @measured("corpus_revision_read")
@@ -448,6 +506,14 @@ def _chat_llm_client(settings: Settings, request_timeout_seconds: float) -> Argo
         {"request_timeout_seconds": max(1.0, request_timeout_seconds)} if supports_timeout else {}
     )
     return ArgoClient(settings, **options)
+
+
+def _argo_generation_slot_available(settings: Settings) -> bool:
+    """Avoid expensive retrieval when ARGO cannot accept even one generation request."""
+
+    if LlmProviderStore(settings).active_provider() != "argo":
+        return True
+    return ArgoQuotaService(Database(settings.paths.database_path)).has_capacity()
 
 
 @contextmanager
@@ -2017,7 +2083,10 @@ def abstract_candidates_to_chat_evidence(
 
     converted: list[ChatEvidenceRecord] = []
     for record in records:
-        text = record.abstract.strip()
+        # Bibliographic providers occasionally return a full document in the
+        # abstract field.  Evidence passages are deliberately bounded, so a
+        # malformed or unusually long record must not abort the whole answer.
+        text = record.abstract.strip()[:12_000]
         if not text:
             continue
         origin = "external_api" if record.record_id.startswith("external:") else "local_rag"
@@ -2445,12 +2514,6 @@ def _fallback_chatbot_result(
             else "Aucune affirmation n'est présentée, car elle ne pourrait pas être reliée à une "
             "preuve validée. Une nouvelle recherche ou une relance peut être nécessaire."
         )
-        headings = (
-            "Réponse synthétique",
-            "Effets documentés",
-            "Limites des preuves",
-            "Références",
-        )
         no_effect = "Aucun effet directement documenté ne peut être affirmé."
         no_reference = "Aucune référence n'est citée."
         retrieved_not_cited = (
@@ -2475,7 +2538,6 @@ def _fallback_chatbot_result(
             else "No claim is presented because it could not be linked to validated evidence. "
             "A new search or retry may be required."
         )
-        headings = ("Summary answer", "Documented effects", "Evidence limitations", "References")
         no_effect = "No directly documented effect can be stated."
         no_reference = "No reference is cited."
         retrieved_not_cited = (
@@ -2487,24 +2549,10 @@ def _fallback_chatbot_result(
             else ""
         )
     rendered_direct = f"- {direct}" if expected_style is ResponseStyle.BULLET_LIST else direct
-    lines = [
-        f"## {headings[0]}",
-        "",
-        rendered_direct,
-        "",
-        f"## {headings[1]}",
-        "",
-        no_effect,
-        "",
-        f"## {headings[2]}",
-        "",
-        limitation,
-        *(["", retrieved_not_cited] if retrieved_not_cited else []),
-        "",
-        f"## {headings[3]}",
-        "",
-        no_reference,
-    ]
+    lines = [rendered_direct, no_effect, limitation]
+    if retrieved_not_cited:
+        lines.append(retrieved_not_cited)
+    lines.extend(["Références :" if is_french else "References:", no_reference])
     sources: list[ChatbotSource] = []
     model = "deterministic-structured-fallback"
     return ChatbotResult(
@@ -2512,7 +2560,9 @@ def _fallback_chatbot_result(
         retrieval_query=retrieval_query,
         answer_markdown="\n".join(lines),
         sources=sources,
-        warnings=[*warnings, limitation],
+        # ``limitation`` is already rendered in the answer body. Repeating it
+        # in ``warnings`` produces a second, misleading bullet below the answer.
+        warnings=list(warnings),
         model=model,
         local_result_count=sum(record.origin == "local_rag" for record in selected),
         external_result_count=external_result_count,
@@ -2556,8 +2606,6 @@ def _out_of_scope_chatbot_result(
         "and technical questions about cider, apples, cider-derived products, and processes "
         "transferable to that field."
     )
-    heading = "Réponse synthétique" if is_french else "Summary answer"
-    limitation_heading = "Limite" if is_french else "Limitation"
     limitation = (
         "Aucune recherche dans le corpus n'a été exécutée."
         if is_french
@@ -2566,7 +2614,7 @@ def _out_of_scope_chatbot_result(
     return ChatbotResult(
         message=" ".join(message.split()),
         retrieval_query=retrieval_query,
-        answer_markdown=(f"## {heading}\n\n{answer}\n\n## {limitation_heading}\n\n{limitation}"),
+        answer_markdown=f"{answer}\n\n{limitation}",
         sources=[],
         warnings=[answer],
         model="deterministic-scope-guard",
@@ -2598,6 +2646,8 @@ def answer_chatbot(
     on_argo_reserved: Callable[[], None] | None = None,
     on_argo_response: Callable[[], None] | None = None,
     on_progress: ChatbotProgressCallback | None = None,
+    retrieval_checkpoint: ChatRetrievalCheckpoint | None = None,
+    on_retrieval_checkpoint: ChatbotRetrievalCheckpointCallback | None = None,
     experimental_profile: Literal["p0", "p1", "p2"] | None = None,
     answer_effort: AnswerEffort = AnswerEffort.BALANCED,
 ) -> ChatbotResult:
@@ -2621,6 +2671,8 @@ def answer_chatbot(
                 on_argo_reserved=on_argo_reserved,
                 on_argo_response=on_argo_response,
                 on_progress=on_progress,
+                retrieval_checkpoint=retrieval_checkpoint,
+                on_retrieval_checkpoint=on_retrieval_checkpoint,
                 experimental_profile=experimental_profile,
                 answer_effort=answer_effort,
                 retrieval_resources=resources,
@@ -2645,6 +2697,8 @@ def _answer_chatbot(
     on_argo_reserved: Callable[[], None] | None = None,
     on_argo_response: Callable[[], None] | None = None,
     on_progress: ChatbotProgressCallback | None = None,
+    retrieval_checkpoint: ChatRetrievalCheckpoint | None = None,
+    on_retrieval_checkpoint: ChatbotRetrievalCheckpointCallback | None = None,
     experimental_profile: Literal["p0", "p1", "p2"] | None = None,
     answer_effort: AnswerEffort = AnswerEffort.BALANCED,
     retrieval_resources: _ChatRetrievalResources,
@@ -2667,6 +2721,20 @@ def _answer_chatbot(
         return _out_of_scope_chatbot_result(
             message=message,
             retrieval_query=retrieval_query,
+            started=started,
+            interaction_mode=interaction_mode,
+            answer_effort=answer_effort,
+        )
+
+    if not _argo_generation_slot_available(settings):
+        return _fallback_chatbot_result(
+            message=message,
+            retrieval_query=retrieval_query,
+            evidence=(),
+            warnings=[
+                "La fenêtre de requêtes ARGO est saturée ; la recherche n'a pas été démarrée."
+            ],
+            diagnostic_code="provider_quota_before_retrieval",
             started=started,
             interaction_mode=interaction_mode,
             answer_effort=answer_effort,
@@ -2736,20 +2804,31 @@ def _answer_chatbot(
                         max_input_characters=settings.argo.max_input_characters,
                     )
                 )
-                answer = rag.answer(
-                    message,
-                    evidence,
-                    conversation_history=context,
+                answer_options = {
+                    "conversation_history": context,
                     # Compatibility only: no coverage controller populates this field.
-                    coverage_notes=(),
-                    concept_definition=(
+                    "coverage_notes": (),
+                    "concept_definition": (
                         planning.plan.concept_definition or planning.plan.interpreted_question
                     ),
-                    ambiguities=planning.plan.ambiguities,
-                    excluded_concepts=planning.plan.excluded_concepts,
-                    on_argo_reserved=reserve_llm_request,
-                    on_argo_response=on_argo_response,
-                )
+                    "ambiguities": planning.plan.ambiguities,
+                    "excluded_concepts": planning.plan.excluded_concepts,
+                    "on_argo_reserved": reserve_llm_request,
+                    "on_argo_response": on_argo_response,
+                }
+                # A large evidence table makes the all-in-one JSON request markedly less
+                # reliable with the local provider.  The faceted entry point uses its
+                # compact, independently grounded draft path for zero- and single-axis
+                # questions, while preserving the same citations and mandatory verifier.
+                if len(evidence) > 8 or sum(len(record.passages) for record in evidence) > 16:
+                    answer = rag.answer_faceted(
+                        message,
+                        evidence,
+                        facets=intent.facets,
+                        **answer_options,
+                    )
+                else:
+                    answer = rag.answer(message, evidence, **answer_options)
         except MandatoryVerificationError:
             raise
         except ArgoQuotaError:
@@ -2764,6 +2843,36 @@ def _answer_chatbot(
                 evidence=evidence,
                 warnings=warnings,
                 diagnostic_code="provider_quota_after_retrieval",
+                started=started,
+                external_result_count=external_result_count,
+                prompt_tokens=planning.prompt_tokens + semantic_prompt_tokens,
+                completion_tokens=planning.completion_tokens + semantic_completion_tokens,
+                interaction_mode=interaction_mode,
+                reused_previous_sources=reused_previous_sources,
+                figure_analysis_requested=analyze_figures,
+                figure_analysis_count=figure_analysis_count,
+                figure_analysis_duration_seconds=figure_analysis_duration,
+                figure_analysis_model=figure_analysis_model,
+                answer_effort=answer_effort,
+                timings=timings.models(),
+                retrieval_traces=retrieval_traces.models(),
+            )
+        except MemoryLimitError:
+            timings.add(
+                "argo_generation",
+                perf_counter() - generation_started,
+                before=generation_memory,
+            )
+            return _fallback_chatbot_result(
+                message=message,
+                retrieval_query=retrieval_query,
+                evidence=evidence,
+                warnings=[
+                    *warnings,
+                    "La génération a été arrêtée avant saturation de la mémoire locale ; "
+                    "les preuves retrouvées restent disponibles pour une reprise.",
+                ],
+                diagnostic_code="memory_pressure_after_retrieval",
                 started=started,
                 external_result_count=external_result_count,
                 prompt_tokens=planning.prompt_tokens + semantic_prompt_tokens,
@@ -2867,6 +2976,186 @@ def _answer_chatbot(
             timings=timings.models(),
             retrieval_traces=retrieval_traces.models(),
             generation_traces=getattr(answer, "generation_traces", []),
+        )
+
+    def complete_retrieved_evidence(
+        retrieved_evidence: Sequence[ChatEvidenceRecord],
+        *,
+        planning: HypothesisPlanningResult,
+        external_result_count: int,
+        reused_previous_sources: bool,
+    ) -> ChatbotResult:
+        """Resume the provider-bound stages from one SQLite-authoritative evidence set."""
+
+        evidence = list(retrieved_evidence)
+        semantic_prompt_tokens = 0
+        semantic_completion_tokens = 0
+        semantic_unassessed_count = 0
+        publish_progress("evidence_selection")
+        semantic_started = perf_counter()
+        semantic_memory = timings.snapshot()
+        try:
+            with _chat_llm_client(settings, llm_request_timeout_seconds()) as semantic_client:
+                semantic_filter: GlobalSemanticFilterResult | None = (
+                    ArgoGlobalSemanticEvidenceFilter(
+                        semantic_client,
+                        cache=ValidationCache(settings.paths.cache_dir / "semantic_validation"),
+                        max_input_characters=settings.argo.max_input_characters,
+                    ).filter_records(
+                        retrieval_query,
+                        planning.plan.verification_needs,
+                        evidence,
+                        on_argo_reserved=reserve_llm_request,
+                    )
+                )
+        except ArgoError as error:
+            raise MandatoryVerificationError("mandatory_semantic_filter_incomplete") from error
+        finally:
+            timings.add(
+                "argo_semantic_filter",
+                perf_counter() - semantic_started,
+                before=semantic_memory,
+            )
+        if semantic_filter is not None:
+            semantic_prompt_tokens = semantic_filter.prompt_tokens
+            semantic_completion_tokens = semantic_filter.completion_tokens
+            warnings.extend(
+                warning
+                for warning in semantic_filter.warnings
+                if warning.startswith("La validation sémantique globale")
+            )
+            timings.add_tokens(
+                "argo_semantic_filter",
+                prompt_tokens=semantic_prompt_tokens,
+                completion_tokens=semantic_completion_tokens,
+            )
+            semantic_unassessed_count = sum(
+                decision.relevance == "unassessed" for decision in semantic_filter.decisions
+            )
+            evidence = semantic_filter.selected_records(evidence)
+        else:
+            semantic_unassessed_count = len(retrieved_evidence)
+        semantic_trace_input_count = len(retrieved_evidence)
+        retrieval_traces.add(
+            "semantic_filter",
+            pre_rerank_candidate_count=semantic_trace_input_count,
+            post_rerank_candidate_count=len(evidence),
+            selected_article_count=len(evidence),
+            selected_passage_count=sum(len(record.passages) for record in evidence),
+            **_evidence_level_trace_counts(evidence),
+            rejection_counts={
+                "global_semantic_grade_c_or_d": max(
+                    0,
+                    semantic_trace_input_count - len(evidence),
+                ),
+                **(
+                    {"global_semantic_unassessed_retained": semantic_unassessed_count}
+                    if semantic_unassessed_count
+                    else {}
+                ),
+            },
+        )
+        if not evidence:
+            return _fallback_chatbot_result(
+                message=message,
+                retrieval_query=retrieval_query,
+                evidence=retrieved_evidence,
+                warnings=warnings,
+                diagnostic_code="semantic_filter_empty",
+                started=started,
+                external_result_count=external_result_count,
+                prompt_tokens=planning.prompt_tokens + semantic_prompt_tokens,
+                completion_tokens=planning.completion_tokens + semantic_completion_tokens,
+                figure_analysis_requested=analyze_figures,
+                answer_effort=answer_effort,
+                timings=timings.models(),
+                retrieval_traces=retrieval_traces.models(),
+            )
+
+        # Every semantically relevant record retained by the RAG reaches generation.
+        # The generation service preserves all of their presented evidence identities
+        # and only shortens passage text when required by the provider input contract.
+        figure_analysis_count = 0
+        figure_analysis_duration = 0.0
+        figure_analysis_model: str | None = None
+        if analyze_figures:
+            figure_started = perf_counter()
+            figure_memory = timings.snapshot()
+
+            def publish_figure_analysis() -> None:
+                publish_progress("figure_analysis")
+                if on_figure_analysis is not None:
+                    on_figure_analysis()
+
+            try:
+                with OllamaFigureAnalysisService(settings) as figure_service:
+                    figure_batch = figure_service.analyze(
+                        retrieval_query,
+                        figure_references_from_chat_records(evidence),
+                        on_analysis_started=publish_figure_analysis,
+                    )
+            except FigureAnalysisUnavailable as exc:
+                warnings.append(str(exc))
+            except Exception as exc:
+                warnings.append(
+                    "L'analyse locale des figures est indisponible "
+                    f"({type(exc).__name__}); la réponse reste fondée sur les passages SQLite."
+                )
+            else:
+                warnings.extend(figure_batch.warnings)
+                figure_analysis_count = len(figure_batch.admitted)
+                figure_analysis_duration = figure_batch.duration_seconds
+                figure_analysis_model = figure_batch.model_name
+                if figure_batch.admitted:
+                    warnings.append(
+                        "Les observations visuelles ont été analysées et persistées pour revue, "
+                        "mais ne sont pas utilisées dans cette synthèse : seuls les passages "
+                        "originaux SQLite font autorité."
+                    )
+            finally:
+                timings.add(
+                    "figure_analysis",
+                    perf_counter() - figure_started,
+                    before=figure_memory,
+                )
+
+        return generation_result(
+            evidence,
+            planning=planning,
+            semantic_prompt_tokens=semantic_prompt_tokens,
+            semantic_completion_tokens=semantic_completion_tokens,
+            external_result_count=external_result_count,
+            reused_previous_sources=reused_previous_sources,
+            figure_analysis_count=figure_analysis_count,
+            figure_analysis_duration=figure_analysis_duration,
+            figure_analysis_model=figure_analysis_model,
+        )
+
+    if retrieval_checkpoint is not None:
+        try:
+            checkpoint_matches = (
+                retrieval_checkpoint.retrieval_query == retrieval_query
+                and retrieval_checkpoint.corpus_fingerprint
+                == retrieval_resources.corpus_fingerprint(settings)
+            )
+            resumed_evidence = (
+                retrieval_checkpoint.rehydrate(settings) if checkpoint_matches else []
+            )
+        except (OSError, RuntimeError, sqlite3.Error, ValueError):
+            resumed_evidence = []
+        if len(resumed_evidence) == len(retrieval_checkpoint.evidence):
+            timings.restore(retrieval_checkpoint.timings)
+            retrieval_traces.restore(retrieval_checkpoint.retrieval_traces)
+            warnings[:] = list(dict.fromkeys([*retrieval_checkpoint.warnings, *warnings]))
+            return complete_retrieved_evidence(
+                resumed_evidence,
+                planning=retrieval_checkpoint.planning,
+                external_result_count=retrieval_checkpoint.external_result_count,
+                reused_previous_sources=False,
+            )
+        warnings.append(
+            "Le point de reprise des preuves n'est plus cohérent avec SQLite ; "
+            "une nouvelle recherche locale est exécutée."
         )
 
     # Conversation cards carry identities only. Both abstracts and full-text sources
@@ -3009,6 +3298,17 @@ def _answer_chatbot(
     maximum_variants = max(2, len(grouped_queries))
     grouped_expansions = grouped_queries[1:]
     candidate_limit = _initial_retrieval_candidate_limit(settings, effort_budget)
+    dense_retrieval_enabled = _dense_chat_retrieval_is_safe(settings)
+    vector_query_variant_limit = (
+        min(effort_budget.max_vector_query_variants, len(grouped_queries))
+        if dense_retrieval_enabled
+        else 0
+    )
+    if not dense_retrieval_enabled:
+        warnings.append(
+            "La recherche vectorielle locale est reportée faute de marge mémoire suffisante ; "
+            "la réponse utilise la recherche lexicale traçable du corpus SQLite."
+        )
 
     publish_progress("search")
     retrieval_failed = False
@@ -3024,13 +3324,10 @@ def _answer_chatbot(
                 query=retrieval_query,
                 limit=effort_budget.abstract_result_limit,
                 search_queries=grouped_expansions,
-                dense_queries=dense_queries,
+                dense_queries=dense_queries if dense_retrieval_enabled else (),
                 intent_override=intent,
                 max_query_variants=maximum_variants,
-                max_vector_query_variants=min(
-                    effort_budget.max_vector_query_variants,
-                    len(grouped_queries),
-                ),
+                max_vector_query_variants=vector_query_variant_limit,
                 candidate_limit=candidate_limit,
                 prefix_matching=False,
                 retrieval_resources=retrieval_resources,
@@ -3074,14 +3371,11 @@ def _answer_chatbot(
                 query=retrieval_query,
                 article_count=effort_budget.article_count,
                 search_queries=grouped_expansions,
-                dense_queries=dense_queries,
+                dense_queries=dense_queries if dense_retrieval_enabled else (),
                 axis_queries=None,
                 intent_override=intent,
                 max_query_variants=maximum_variants,
-                max_vector_query_variants=min(
-                    effort_budget.max_vector_query_variants,
-                    len(grouped_queries),
-                ),
+                max_vector_query_variants=vector_query_variant_limit,
                 candidate_limit=candidate_limit,
                 prefix_matching=False,
                 include_fallback_variants=False,
@@ -3198,147 +3492,24 @@ def _answer_chatbot(
             retrieval_traces=retrieval_traces.models(),
         )
 
-    retrieved_evidence = evidence
-    semantic_prompt_tokens = 0
-    semantic_completion_tokens = 0
-    semantic_unassessed_count = 0
-    publish_progress("evidence_selection")
-    semantic_started = perf_counter()
-    semantic_memory = timings.snapshot()
-    try:
-        with _chat_llm_client(settings, llm_request_timeout_seconds()) as semantic_client:
-            semantic_filter: GlobalSemanticFilterResult | None = ArgoGlobalSemanticEvidenceFilter(
-                semantic_client,
-                cache=ValidationCache(settings.paths.cache_dir / "semantic_validation"),
-                max_input_characters=settings.argo.max_input_characters,
-            ).filter_records(
-                retrieval_query,
-                planning.plan.verification_needs,
-                evidence,
-                on_argo_reserved=reserve_llm_request,
+    if on_retrieval_checkpoint is not None:
+        on_retrieval_checkpoint(
+            ChatRetrievalCheckpoint.capture(
+                retrieval_query=retrieval_query,
+                corpus_fingerprint=retrieval_resources.corpus_fingerprint(settings),
+                planning=planning,
+                evidence=evidence,
+                external_result_count=external_result_count,
+                warnings=warnings,
+                timings=timings.models(),
+                retrieval_traces=retrieval_traces.models(),
             )
-    except ArgoError as error:
-        raise MandatoryVerificationError("mandatory_semantic_filter_incomplete") from error
-    finally:
-        timings.add(
-            "argo_semantic_filter",
-            perf_counter() - semantic_started,
-            before=semantic_memory,
         )
-    if semantic_filter is not None:
-        semantic_prompt_tokens = semantic_filter.prompt_tokens
-        semantic_completion_tokens = semantic_filter.completion_tokens
-        warnings.extend(
-            warning
-            for warning in semantic_filter.warnings
-            if warning.startswith("La validation sémantique globale")
-        )
-        timings.add_tokens(
-            "argo_semantic_filter",
-            prompt_tokens=semantic_prompt_tokens,
-            completion_tokens=semantic_completion_tokens,
-        )
-        semantic_unassessed_count = sum(
-            decision.relevance == "unassessed" for decision in semantic_filter.decisions
-        )
-        evidence = semantic_filter.selected_records(evidence)
-    else:
-        semantic_unassessed_count = len(retrieved_evidence)
-    semantic_trace_input_count = len(retrieved_evidence)
-    retrieval_traces.add(
-        "semantic_filter",
-        pre_rerank_candidate_count=semantic_trace_input_count,
-        post_rerank_candidate_count=len(evidence),
-        selected_article_count=len(evidence),
-        selected_passage_count=sum(len(record.passages) for record in evidence),
-        **_evidence_level_trace_counts(evidence),
-        rejection_counts={
-            "global_semantic_grade_c_or_d": max(
-                0,
-                semantic_trace_input_count - len(evidence),
-            ),
-            **(
-                {"global_semantic_unassessed_retained": semantic_unassessed_count}
-                if semantic_unassessed_count
-                else {}
-            ),
-        },
-    )
-    if not evidence:
-        return _fallback_chatbot_result(
-            message=message,
-            retrieval_query=retrieval_query,
-            evidence=retrieved_evidence,
-            warnings=warnings,
-            diagnostic_code="semantic_filter_empty",
-            started=started,
-            external_result_count=external_result_count,
-            prompt_tokens=planning.prompt_tokens + semantic_prompt_tokens,
-            completion_tokens=planning.completion_tokens + semantic_completion_tokens,
-            figure_analysis_requested=analyze_figures,
-            answer_effort=answer_effort,
-            timings=timings.models(),
-            retrieval_traces=retrieval_traces.models(),
-        )
-
-    # Every semantically relevant record retained by the RAG reaches generation.
-    # The generation service preserves all of their presented evidence identities
-    # and only shortens passage text when required by the provider input contract.
-
-    figure_analysis_count = 0
-    figure_analysis_duration = 0.0
-    figure_analysis_model: str | None = None
-    if analyze_figures:
-        figure_started = perf_counter()
-        figure_memory = timings.snapshot()
-
-        def publish_figure_analysis() -> None:
-            publish_progress("figure_analysis")
-            if on_figure_analysis is not None:
-                on_figure_analysis()
-
-        try:
-            with OllamaFigureAnalysisService(settings) as figure_service:
-                figure_batch = figure_service.analyze(
-                    retrieval_query,
-                    figure_references_from_chat_records(evidence),
-                    on_analysis_started=publish_figure_analysis,
-                )
-        except FigureAnalysisUnavailable as exc:
-            warnings.append(str(exc))
-        except Exception as exc:
-            warnings.append(
-                "L'analyse locale des figures est indisponible "
-                f"({type(exc).__name__}); la réponse reste fondée sur les passages SQLite."
-            )
-        else:
-            warnings.extend(figure_batch.warnings)
-            figure_analysis_count = len(figure_batch.admitted)
-            figure_analysis_duration = figure_batch.duration_seconds
-            figure_analysis_model = figure_batch.model_name
-            if figure_batch.admitted:
-                warnings.append(
-                    "Les observations visuelles ont été analysées et persistées pour revue, "
-                    "mais ne sont pas utilisées dans cette synthèse : seuls les passages "
-                    "originaux SQLite font autorité."
-                )
-        finally:
-            timings.add(
-                "figure_analysis",
-                perf_counter() - figure_started,
-                before=figure_memory,
-            )
-
-    return generation_result(
+    return complete_retrieved_evidence(
         evidence,
         planning=planning,
-        semantic_prompt_tokens=semantic_prompt_tokens,
-        semantic_completion_tokens=semantic_completion_tokens,
         external_result_count=external_result_count,
         reused_previous_sources=False,
-        figure_analysis_count=figure_analysis_count,
-        figure_analysis_duration=figure_analysis_duration,
-        figure_analysis_model=figure_analysis_model,
     )
 
 

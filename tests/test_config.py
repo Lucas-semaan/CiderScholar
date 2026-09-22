@@ -18,6 +18,103 @@ def test_expert_memory_defaults_preserve_existing_configs(tmp_path: Path) -> Non
     assert memory.max_candidate_items_changed == 3
 
 
+def test_parser_defaults_preserve_pymupdf_and_reject_unbounded_external_modes() -> None:
+    parser = Settings().ingestion.parser
+    assert parser.mode == "pymupdf"
+    assert parser.experimental_external_parsers_enabled is False
+    assert parser.failure_policy == "fail"
+
+    with pytest.raises(ValidationError, match="experimental enablement"):
+        Settings.model_validate({"ingestion": {"parser": {"mode": "docling"}}})
+    with pytest.raises(ValidationError, match="complete resource limits"):
+        Settings.model_validate(
+            {
+                "ingestion": {
+                    "parser": {
+                        "mode": "docling",
+                        "experimental_external_parsers_enabled": True,
+                    }
+                }
+            }
+        )
+
+
+def test_external_parser_requires_all_explicit_limits_and_strict_policy() -> None:
+    limits = {
+        "max_file_bytes": 1,
+        "max_pages": 1,
+        "max_memory_mb": 1,
+        "timeout_seconds": 1.0,
+        "max_response_bytes": 1,
+        "max_attempts": 1,
+        "initial_backoff_seconds": 0.0,
+    }
+    settings = Settings.model_validate(
+        {
+            "ingestion": {
+                "parser": {
+                    "mode": "docling",
+                    "experimental_external_parsers_enabled": True,
+                    "failure_policy": "review_required",
+                    "limits": limits,
+                }
+            }
+        }
+    )
+    assert settings.ingestion.parser.limits.max_response_bytes == 1
+    with pytest.raises(ValidationError):
+        Settings.model_validate({"ingestion": {"parser": {"failure_policy": "retry"}}})
+    with pytest.raises(ValidationError):
+        Settings.model_validate({"ingestion": {"parser": {"unexpected": True}}})
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("max_file_bytes", 1_073_741_825),
+        ("max_pages", 10_001),
+        ("max_memory_mb", 32_769),
+        ("timeout_seconds", 3_600.1),
+        ("timeout_seconds", float("inf")),
+        ("timeout_seconds", float("nan")),
+        ("max_response_bytes", 536_870_913),
+        ("max_attempts", 6),
+        ("initial_backoff_seconds", 300.1),
+    ],
+)
+def test_external_parser_resource_limits_have_finite_safety_ceilings(field, value) -> None:
+    limits = {
+        "max_file_bytes": 1,
+        "max_pages": 1,
+        "max_memory_mb": 1,
+        "timeout_seconds": 1.0,
+        "max_response_bytes": 1,
+        "max_attempts": 1,
+        "initial_backoff_seconds": 0.0,
+    }
+    limits[field] = value
+    with pytest.raises(ValidationError):
+        Settings.model_validate(
+            {
+                "ingestion": {
+                    "parser": {
+                        "mode": "docling",
+                        "experimental_external_parsers_enabled": True,
+                        "limits": limits,
+                    }
+                }
+            }
+        )
+
+
+@pytest.mark.parametrize("value", ["yes", 1])
+def test_external_parser_experimental_flag_is_strict_boolean(value) -> None:
+    with pytest.raises(ValidationError):
+        Settings.model_validate(
+            {"ingestion": {"parser": {"experimental_external_parsers_enabled": value}}}
+        )
+
+
 @pytest.mark.parametrize(
     "field,value",
     [

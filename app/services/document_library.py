@@ -203,6 +203,7 @@ def _load_rows(database: Database) -> tuple[list[dict[str, Any]], list[dict[str,
 
 def _abstract_document(record: dict[str, Any], article: dict[str, Any] | None) -> dict[str, Any]:
     has_full_text = article is not None
+    has_pdf = bool(str((article or {}).get("pdf_path") or "").strip())
     sources = _sources(record.get("sources"))
     if article is not None and article.get("source"):
         sources = list(dict.fromkeys([*sources, str(article["source"])]))
@@ -211,7 +212,7 @@ def _abstract_document(record: dict[str, Any], article: dict[str, Any] | None) -
         "library_id": (f"article:{article['id']}" if has_full_text else f"abstract:{record['id']}"),
         "document_type": "full_text" if has_full_text else "abstract_only",
         "article_id": str(article["id"]) if article is not None else None,
-        "pdf_available": has_full_text,
+        "pdf_available": has_pdf,
         "pdf_path": str(article["pdf_path"]) if article is not None else None,
         "validation_status": str(article["validation_status"]) if article is not None else None,
         "chunk_count": int(article["chunk_count"] or 0) if article is not None else 0,
@@ -254,7 +255,7 @@ def _article_document(article: dict[str, Any]) -> dict[str, Any]:
         "last_seen_at": article.get("indexed_at") or article.get("created_at"),
         "document_type": "full_text",
         "article_id": str(article["id"]),
-        "pdf_available": True,
+        "pdf_available": bool(str(article.get("pdf_path") or "").strip()),
         "pdf_path": str(article["pdf_path"]),
         "validation_status": str(article["validation_status"]),
         "chunk_count": chunk_count,

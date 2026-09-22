@@ -4,7 +4,17 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from app.llm.argo_quota import ArgoQuotaPolicy
+from app.llm.argo_quota import ARGO_QUOTA_WINDOWS, ArgoQuotaPolicy, QuotaWindow
+
+
+def test_argo_quota_policy_uses_the_configured_provider_limits() -> None:
+    expected_windows = (
+        QuotaWindow(limit=20, duration=timedelta(minutes=1)),
+        QuotaWindow(limit=120, duration=timedelta(hours=1)),
+        QuotaWindow(limit=200, duration=timedelta(minutes=180)),
+    )
+
+    assert expected_windows == ARGO_QUOTA_WINDOWS
 
 
 @pytest.mark.parametrize(

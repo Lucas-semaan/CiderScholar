@@ -85,7 +85,7 @@ Chaque ligne décrit une observation attendue, pas seulement une fonction à app
 | P07 | Seuls résultats transposables B disponibles | Bornes de transfert conservées ; mêmes règles actuelles de validation/avertissement. |
 | P08 | Tous les candidats C/D puis repli sémantique existant | Nombre de repasses actuel conservé ; aucun passage externe ni assouplissement des contrôles finaux. |
 | P09 | Ensemble riche d’identités A/B et petit budget fournisseur | Instructions expertes optionnelles retirées avant les identités ; réduction du texte traçable. |
-| P10 | Réponses de génération systématiquement invalides | Au plus dix requêtes de génération, initiale comprise ; aucun reset du compteur par recette. |
+| P10 | Réponses de génération systématiquement invalides | Au plus une requête de génération, initiale comprise ; aucun reset du compteur par recette. |
 | P11 | Changement de release/recette/route/paramètre de mémoire | Cache miss ; anciennes entrées non réutilisées à tort. |
 | P12 | Réutilisation conversationnelle | Preuves originales rechargées depuis SQLite ; ancienne réponse jamais source scientifique. |
 | P13 | `fichier local` définitivement exclu | Aucune note/règle/recherche ne réintroduit l’article dans les citations. |

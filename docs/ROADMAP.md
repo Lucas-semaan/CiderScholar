@@ -1837,48 +1837,60 @@ progression lente, une saturation locale et un worker indisponible.
 - Les opérations d’import, de réparation et de publication restent des fonctions d’administration
   séparées. Elles n’ajoutent aucun état technique à la liste documentaire du Corpus.
 
-- [ ] `UI-031` Aligner le découpage de progression du chatbot sur le travail réellement exécuté.
+- [x] `UI-031` Aligner le découpage de progression du chatbot sur le travail réellement exécuté.
   Le premier appel ARGO de planification ne doit plus déclencher prématurément le libellé
   `Génération de la réponse`. La progression distingue au minimum planification, recherche,
   sélection des preuves, génération, validation scientifique et persistance, dans cet ordre réel.
   Les événements restent durables et ne révèlent ni question, ni réponse, ni détail de prompt.
-  Dépendances : `JOB-003`, `WRK-007`, `UI-007`. Fini lorsque : une chronologie testée montre que
-  `Génération de la réponse` commence seulement après la sélection des preuves et qu’aucune recherche
-  vectorielle n’est présentée sous ce libellé.
+   Dépendances : `JOB-003`, `WRK-007`, `UI-007`. Fini lorsque : une chronologie testée montre que
+   `Génération de la réponse` commence seulement après la sélection des preuves et qu’aucune recherche
+   vectorielle n’est présentée sous ce libellé.
+  Réalisation : progression durable vérifiée par le test du handler : la génération suit la sélection
+  des preuves, le retour ARGO ouvre la validation scientifique, puis le worker persiste le résultat.
 
-- [~] `COR-031` Stabiliser et valider le chatbot avant toute évolution de forme du corpus.
+- [x] `COR-031` Stabiliser et valider le chatbot avant toute évolution de forme du corpus.
   Avancement : le correctif du chatbot est en cours dans un travail séparé ; son comportement doit
   être validé avant de commencer les tâches `COR-032` à `COR-035`.
   Dépendances : `UI-031`.
   Fini lorsque : une question représentative reçoit une réponse traçable du chatbot et les
   validations automatisées concernées passent sans régression.
+  Réalisation : réponse traçable et reprises durables couvertes par les tests chatbot, worker et
+  validation scientifique ; les suites ciblées passent sans régression.
 
-- [ ] `COR-032` Définir la projection documentaire unifiée du Corpus.
+- [x] `COR-032` Définir la projection documentaire unifiée du Corpus.
   La projection réunit les articles disposant d’un PDF et les abstracts acceptés associés à un DOI
   vérifié. Un abstract de même DOI enrichit l’article sans créer une seconde entrée ; l’article
   complet est toujours prioritaire. Une référence sans abstract ou sans DOI vérifié reste une donnée
   technique invisible. Dépendances : `COR-031`. Fini lorsque : le contrat retourne une fiche par DOI
   vérifié, étiquetée `Full article` ou `Abstract only`, sans doublon.
+  Réalisation : projection SQLite unifiée ajoutée avec priorité au texte intégral, fusion par DOI
+  vérifié et tests de doublons, abstracts et niveaux de contenu.
 
-- [ ] `COR-033` Exposer la liste documentaire unifiée par l’API du Corpus.
+- [x] `COR-033` Exposer la liste documentaire unifiée par l’API du Corpus.
   Les informations rendues sont titre, auteurs, année, revue, DOI, abstract lorsqu’il existe et
   provenance bibliographique lorsqu’elle existe. La recherche par mot-clé couvre aussi les fragments
   extraits et les abstracts vérifiés ; l’API permet d’ouvrir le PDF explicitement sélectionné quand il
   existe. Dépendances : `COR-032`. Fini lorsque : les deux niveaux sont recherchables sans doublon de
   DOI et qu’un DOI invalide ne peut produire une fiche `Abstract only`.
+  Réalisation : routes de liste, résumé, filtres et recherche dans abstracts/fragments exposées par
+  FastAPI ; contrats et tests API vérifient la déduplication et les DOI invalides.
 
-- [ ] `COR-034` Faire du Corpus l’unique vue documentaire de l’interface.
+- [x] `COR-034` Faire du Corpus l’unique vue documentaire de l’interface.
   L’interface présente tous les documents sous l’intitulé `Base documentaire`, avec une vue de
   recherche et une vue opérationnelle d’import/indexation. Aucun onglet `Notices documentaires` n’est
   exposé. Dépendances : `COR-033`. Fini lorsque : articles complets et abstracts seuls apparaissent
   dans la même liste avec les badges `Full article` et `Abstract only`.
+  Réalisation : la page `Base documentaire` réunit les deux niveaux, conserve la vue opérationnelle
+  d’import/indexation et vérifie les badges et l’absence de l’ancien onglet par Vitest.
 
-- [ ] `COR-035` Vérifier la migration d’interface et préparer la prochaine mise à jour.
+- [x] `COR-035` Vérifier la migration d’interface et préparer la prochaine mise à jour.
   Les contrats FastAPI, client TypeScript, types, tests et documentation sont mis à jour ensemble ;
   la version de publication n’est préparée qu’après validation de `COR-031` à `COR-034`.
   Dépendances : `COR-034`. Fini lorsque : les validations backend et frontend passent, la note de
   version décrit la vue documentaire unifiée du Corpus et aucun libellé utilisateur ne présente une
   séparation technique.
+  Réalisation : note de version 0.2.11 mise à jour ; tests backend de bibliothèque/API et CI frontend
+  complète passent, avec navigation utilisateur centrée sur `Base documentaire`.
 
 ## Critères de sortie globaux
 

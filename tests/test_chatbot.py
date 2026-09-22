@@ -11,12 +11,14 @@ from app.llm.argo_client import (
     ArgoScientificValidationError,
     ScientificValidationReason,
 )
+from app.memory import MemoryLimitError
 from app.models.chatbot import (
     ChatbotRetrievalTrace,
     ChatEvidencePassage,
     ChatEvidenceRecord,
     ScientificGenerationTrace,
 )
+from app.retrieval.chat_checkpoint import ChatRetrievalCheckpoint
 from app.retrieval.coverage_assessment import (
     AxisCoverageAssessment,
     CoverageAssessmentResult,
@@ -26,6 +28,7 @@ from app.retrieval.global_semantic_filter import (
     GlobalSemanticDecision,
     GlobalSemanticFilterResult,
 )
+from app.retrieval.hypothesis_planning import deterministic_hypothesis_plan
 from app.retrieval.query_planning import (
     QueryPlanningProtocolDiagnostic,
     QueryPlanningProtocolError,
@@ -48,12 +51,14 @@ from app.services.chatbot import (
 )
 from app.services.workflows import (
     _abstract_route_warning,
+    _chat_retrieval_corpus_fingerprint,
     _ChatRetrievalResources,
     _ChatRetrievalTraceCollector,
     _fallback_chatbot_result,
     _full_text_intermediate_pool_sizes,
     _initial_retrieval_candidate_limit,
     _query_planning_diagnostic_code,
+    abstract_candidates_to_chat_evidence,
     acquire_common_full_text_for_chat,
     answer_chatbot,
     search_common_corpus_abstracts,
@@ -93,6 +98,16 @@ def _external(source_id: str, doi: str) -> BibliographicRecord:
         doi=doi,
         url=f"https://doi.org/{doi}",
     )
+
+
+def test_abstract_evidence_is_bounded_when_a_provider_returns_full_text() -> None:
+    candidate = _local(1)
+    candidate.abstract = "a" * 12_001
+
+    evidence = abstract_candidates_to_chat_evidence([candidate])
+
+    assert len(evidence) == 1
+    assert evidence[0].passages[0].text == "a" * 12_000
 
 
 def test_balanced_first_wave_reduces_cold_candidates_without_reducing_final_limits(
@@ -553,6 +568,49 @@ def test_chatbot_full_text_source_persists_chunks_and_pages_for_follow_up(
     assert sources[0].snippet.startswith("The full article")
 
 
+def test_chatbot_source_renders_structural_locator_without_pages(settings) -> None:
+    database = Database(settings.paths.common_database_path)
+    database.initialize()
+    database.save_article_and_chunks(
+        {
+            "id": "native-article",
+            "sha256": "a" * 64,
+            "title": "Native cider article",
+            "pdf_path": "data/common/pdf/native.pdf",
+            "validation_status": "validated",
+            "source": "local",
+        },
+        [],
+    )
+    evidence = ChatEvidenceRecord(
+        record_id="common:native-article",
+        origin="local_rag",
+        evidence_level="full_text",
+        scope="common",
+        article_id="native-article",
+        title="Native cider article",
+        providers=["local"],
+        passages=[
+            ChatEvidencePassage(
+                evidence_id="common:native-article:chunk:1",
+                chunk_id=1,
+                text="Native structured evidence.",
+                locator_kind="structural",
+                section_path="Results/Fermentation",
+                paragraph_start=2,
+                paragraph_end=3,
+            )
+        ],
+    )
+
+    source = chatbot_sources_from_evidence([evidence], ["common:native-article:chunk:1"], database)[
+        0
+    ]
+
+    assert source.page_ranges == []
+    assert source.structural_ranges == ["§ Results/Fermentation, par. 2-3"]
+
+
 def test_answer_chatbot_prefers_full_text_over_the_matching_abstract(
     settings,
     monkeypatch,
@@ -753,8 +811,13 @@ def test_answer_chatbot_applies_the_multilingual_semantic_selection_before_synth
         "app.services.workflows.CiderEvidenceRagService",
         FakeEvidenceService,
     )
+    monkeypatch.setattr(
+        "app.services.workflows._chat_retrieval_corpus_fingerprint",
+        lambda _settings: "a" * 64,
+    )
 
     progress_stages = []
+    retrieval_checkpoints: list[ChatRetrievalCheckpoint] = []
     result = answer_chatbot(
         settings,
         Database(settings.paths.database_path),
@@ -762,6 +825,7 @@ def test_answer_chatbot_applies_the_multilingual_semantic_selection_before_synth
         history=[],
         use_external_sources=False,
         on_progress=progress_stages.append,
+        on_retrieval_checkpoint=retrieval_checkpoints.append,
     )
 
     assert [record.record_id for record in captured["records"]] == [relevant.record_id]
@@ -795,6 +859,146 @@ def test_answer_chatbot_applies_the_multilingual_semantic_selection_before_synth
         "evidence_selection",
         "generation",
     ]
+    assert len(retrieval_checkpoints) == 1
+    assert [record.record_id for record in retrieval_checkpoints[0].evidence] == [
+        relevant.record_id,
+        noise.record_id,
+    ]
+
+
+def test_answer_chatbot_resumes_at_semantic_validation_from_sqlite_checkpoint(
+    settings,
+    monkeypatch,
+) -> None:
+    message = "Quels résultats démontrent la stabilité des protéines du jus de pomme ?"
+    scientific_database = Database(settings.paths.common_database_path)
+    scientific_database.initialize()
+    with scientific_database.transaction() as connection:
+        connection.execute(
+            """
+            INSERT INTO articles(
+                id, sha256, title, abstract, authors, pdf_path, validation_status, source
+            ) VALUES ('resume-1', ?, ?, ?, '["Ada Test"]', 'missing.pdf', 'validated', 'local')
+            """,
+            (
+                "a" * 64,
+                "Protein stability in apple juice",
+                "Current SQLite evidence about protein stability in apple juice.",
+            ),
+        )
+    stale_evidence = ChatEvidenceRecord(
+        record_id="common:resume-1",
+        origin="local_rag",
+        evidence_level="abstract",
+        scope="common",
+        article_id="resume-1",
+        title="Stale checkpoint title",
+        providers=["stale-provider"],
+        passages=[
+            ChatEvidencePassage(
+                evidence_id="common:resume-1:abstract",
+                text="Stale checkpoint text that must never be reused.",
+                section="abstract",
+            )
+        ],
+    )
+    checkpoint = ChatRetrievalCheckpoint.capture(
+        retrieval_query=message,
+        corpus_fingerprint=_chat_retrieval_corpus_fingerprint(settings),
+        planning=deterministic_hypothesis_plan(message),
+        evidence=[stale_evidence],
+        external_result_count=0,
+        warnings=[],
+        timings=[],
+        retrieval_traces=[],
+    )
+    captured: dict[str, object] = {}
+
+    class FakeArgoClient:
+        def __init__(self, _settings):
+            pass
+
+        def __enter__(self):
+            return object()
+
+        def __exit__(self, *_args):
+            return None
+
+    class AcceptCheckpointEvidence:
+        def __init__(self, _client, **_options):
+            pass
+
+        def filter_records(self, question, _needs, evidence, **_options):
+            captured["semantic_evidence"] = evidence
+            return GlobalSemanticFilterResult(
+                question=question,
+                decisions=[
+                    GlobalSemanticDecision(
+                        candidate_id=evidence[0].record_id,
+                        relevance="direct",
+                        supported_need_ids=["v1"],
+                        rationale="Preuve directement pertinente.",
+                    )
+                ],
+                selected_candidate_ids=[evidence[0].record_id],
+                model="semantic-test",
+                prompt_tokens=1,
+                completion_tokens=1,
+            )
+
+    class FakeEvidenceService:
+        def __init__(self, _client, **_options):
+            pass
+
+        def answer(self, _question, records, **_options):
+            captured["generation_evidence"] = records
+            return SimpleNamespace(
+                answer_markdown="Réponse reprise depuis les preuves persistées.",
+                cited_evidence_ids=[records[0].passages[0].evidence_id],
+                model="answer-test",
+                prompt_tokens=2,
+                completion_tokens=2,
+                generation_traces=[],
+                validation_warning_codes=[],
+                generation_status="generated",
+            )
+
+    def must_not_run(*_args, **_kwargs):
+        raise AssertionError("planning and local retrieval must be skipped after resume")
+
+    monkeypatch.setattr("app.services.workflows.ArgoClient", FakeArgoClient)
+    monkeypatch.setattr(
+        "app.services.workflows.ArgoGlobalSemanticEvidenceFilter",
+        AcceptCheckpointEvidence,
+    )
+    monkeypatch.setattr("app.services.workflows.CiderEvidenceRagService", FakeEvidenceService)
+    monkeypatch.setattr("app.services.workflows.ArgoQueryPlanningService", must_not_run)
+    monkeypatch.setattr("app.services.workflows.search_common_corpus_abstracts", must_not_run)
+    monkeypatch.setattr(
+        "app.services.workflows.search_common_corpus_full_text_evidence",
+        must_not_run,
+    )
+    progress_stages: list[str] = []
+    saved_checkpoints: list[ChatRetrievalCheckpoint] = []
+
+    result = answer_chatbot(
+        settings,
+        Database(settings.paths.database_path),
+        message=message,
+        history=[],
+        use_external_sources=False,
+        retrieval_checkpoint=checkpoint,
+        on_retrieval_checkpoint=saved_checkpoints.append,
+        on_progress=progress_stages.append,
+    )
+
+    semantic_evidence = captured["semantic_evidence"]
+    assert isinstance(semantic_evidence, list)
+    assert semantic_evidence[0].title == "Protein stability in apple juice"
+    assert semantic_evidence[0].passages[0].text.startswith("Current SQLite evidence")
+    assert result.answer_markdown == "Réponse reprise depuis les preuves persistées."
+    assert progress_stages == ["evidence_selection", "generation"]
+    assert saved_checkpoints == []
 
 
 def test_answer_chatbot_runs_one_grouped_wave_without_axis_follow_up(
@@ -1125,6 +1329,82 @@ def test_answer_chatbot_does_not_restart_retrieval_after_late_quota(
     assert result.diagnostic_code == "provider_quota_after_retrieval"
 
 
+def test_answer_chatbot_skips_retrieval_when_argo_has_no_generation_slot(
+    settings, monkeypatch
+) -> None:
+    monkeypatch.setattr(
+        "app.services.workflows._argo_generation_slot_available",
+        lambda _settings: False,
+    )
+    monkeypatch.setattr(
+        "app.services.workflows.search_common_corpus_abstracts",
+        lambda *_args, **_kwargs: pytest.fail("quota preflight must precede retrieval"),
+    )
+
+    result = answer_chatbot(
+        settings,
+        Database(settings.paths.database_path),
+        message="Quels facteurs influencent la fermentation ?",
+        history=[],
+        use_external_sources=False,
+    )
+
+    assert result.generation_status == "diagnostic_only"
+    assert result.diagnostic_code == "provider_quota_before_retrieval"
+    assert result.local_result_count == 0
+
+
+def test_answer_chatbot_returns_recoverable_diagnostic_on_generation_memory_pressure(
+    settings,
+    monkeypatch,
+) -> None:
+    candidate = _local(1)
+
+    class FakeArgoClient:
+        def __init__(self, _settings):
+            pass
+
+        def __enter__(self):
+            return object()
+
+        def __exit__(self, *_args):
+            return None
+
+    class MemoryLimitedEvidenceService:
+        def __init__(self, _client, **_options):
+            pass
+
+        def answer(self, *_args, **_kwargs):
+            raise MemoryLimitError("simulated generation pressure")
+
+        answer_faceted = answer
+
+    monkeypatch.setattr("app.services.workflows.ArgoClient", FakeArgoClient)
+    monkeypatch.setattr(
+        "app.services.workflows.search_common_corpus_abstracts",
+        lambda *_args, **_kwargs: [candidate],
+    )
+    monkeypatch.setattr(
+        "app.services.workflows.search_common_corpus_full_text_evidence",
+        lambda *_args, **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        "app.services.workflows.CiderEvidenceRagService", MemoryLimitedEvidenceService
+    )
+
+    result = answer_chatbot(
+        settings,
+        Database(settings.paths.database_path),
+        message="Quels facteurs influencent la fermentation ?",
+        history=[],
+        use_external_sources=False,
+    )
+
+    assert result.generation_status == "diagnostic_only"
+    assert result.diagnostic_code == "memory_pressure_after_retrieval"
+    assert any("mémoire locale" in warning for warning in result.warnings)
+
+
 def test_answer_chatbot_returns_structured_diagnostic_when_argo_synthesis_is_invalid(
     settings,
     monkeypatch,
@@ -1211,8 +1491,11 @@ def test_answer_chatbot_returns_structured_diagnostic_when_argo_synthesis_is_inv
     assert result.generation_traces[0].cited_evidence_count == 1
     assert result.model == "deterministic-structured-fallback"
     assert result.sources == []
-    assert "## Réponse synthétique" in result.answer_markdown
+    assert "## Réponse synthétique" not in result.answer_markdown
     assert "passages les mieux classés" not in result.answer_markdown
+    assert not any(
+        "Les passages pertinents ont été trouvés" in warning for warning in result.warnings
+    )
 
 
 def test_invalid_faceted_schema_has_a_stable_non_unknown_diagnostic() -> None:
@@ -1262,8 +1545,8 @@ def test_answer_chatbot_returns_a_diagnostic_when_retrieval_is_empty(
     assert result.generation_status == "diagnostic_only"
     assert result.diagnostic_code == "retrieval_no_qualified_evidence"
     assert result.sources == []
-    assert "## Réponse synthétique" in result.answer_markdown
-    assert "## Limites des preuves" in result.answer_markdown
+    assert "## Réponse synthétique" not in result.answer_markdown
+    assert "## Limites des preuves" not in result.answer_markdown
 
 
 def test_answer_chatbot_returns_a_diagnostic_when_local_retrieval_crashes(
@@ -1395,7 +1678,7 @@ def test_answer_chatbot_abstains_without_exposing_candidates_when_semantic_filte
     assert result.diagnostic_code == "semantic_filter_empty"
     assert result.sources == []
     assert candidate.abstract not in result.answer_markdown
-    assert "## Limites des preuves" in result.answer_markdown
+    assert "## Limites des preuves" not in result.answer_markdown
 
 
 def test_answer_chatbot_uses_one_validated_synthesis_for_multidimensional_research(

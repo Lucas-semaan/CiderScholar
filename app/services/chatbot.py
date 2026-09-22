@@ -281,6 +281,21 @@ def chatbot_sources_from_evidence(
             for passage in passages
             if passage.page_start is not None and passage.page_end is not None
         ]
+        structural_ranges = [
+            "§ "
+            + str(passage.section_path)
+            + ", par. "
+            + (
+                str(passage.paragraph_start)
+                if passage.paragraph_start == passage.paragraph_end
+                else f"{passage.paragraph_start}-{passage.paragraph_end}"
+            )
+            for passage in passages
+            if passage.locator_kind == "structural"
+            and passage.section_path is not None
+            and passage.paragraph_start is not None
+            and passage.paragraph_end is not None
+        ]
         sources.append(
             ChatbotSource(
                 record_id=record.record_id,
@@ -292,6 +307,7 @@ def chatbot_sources_from_evidence(
                     passage.chunk_id for passage in passages if passage.chunk_id is not None
                 ],
                 page_ranges=list(dict.fromkeys(page_ranges)),
+                structural_ranges=list(dict.fromkeys(structural_ranges)),
                 figure_refs=list(
                     dict.fromkeys(
                         passage.figure_label

@@ -279,9 +279,12 @@ def _indexed_snapshots(database: Database) -> tuple[int, str, str, int, int, dic
             for row in connection.execute(
                 """
                 SELECT c.id, c.article_id, c.chunk_index, c.section, c.subsection,
-                       c.page_start, c.page_end, c.token_count, c.text
+                       c.page_start, c.page_end, c.token_count,
+                       COALESCE(correction.corrected_text, c.text) AS text
                 FROM chunks AS c
                 JOIN articles AS a ON a.id = c.article_id
+                LEFT JOIN chunk_corrections AS correction
+                  ON correction.chunk_id = c.id AND correction.state = 'approved'
                 WHERE c.embedding_status = 'indexed'
                   AND a.validation_status IN ('validated', 'indexed')
                 ORDER BY c.id

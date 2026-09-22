@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "benchmark_version": "1.0.0",
+  "state": "draft",
+  "annotations_human_source_reviewed": false,
+  "annotations_frozen_before_candidate_outputs": false,
+  "entries": [
+    {
+      "id": "extract-public-placeholder",
+      "category": "text_simple",
+      "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "local_path": null,
+      "redistributable": false,
+      "license": null,
+      "expected_document_result": {
+        "outcome": "extracted",
+        "page_count": 1
+      },
+      "page_annotations": [
+        {
+          "page_number": 1,
+          "sections": [
+            {
+              "id": "section-introduction",
+              "title": "Introduction",
+              "level": 1,
+              "reading_order": 1
+            }
+          ],
+          "elements": [
+            {
+              "id": "element-heading",
+              "kind": "heading",
+              "reading_order": 1,
+              "section_id": "section-introduction"
+            },
+            {
+              "id": "element-paragraph",
+              "kind": "text",
+              "reading_order": 2,
+              "section_id": "section-introduction"
+            }
+          ],
+          "expected_text_fragments": [
+            {
+              "reading_order": 1,
+              "text": "Example source text transcribed by a human reviewer."
+            }
+          ],
+          "table_cells": [],
+          "figures": [],
+          "missing_text_expected": false,
+          "duplicated_text_expected": false
+        }
+      ]
+    }
+  ]
+}

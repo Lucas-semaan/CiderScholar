@@ -44,9 +44,11 @@ class MemoryGuard:
             return None
         if snapshot.system_used_gb >= self.config.warning_used_gb:
             LOGGER.warning(
-                "Memory warning operation=%s system_used_gb=%.2f process_rss_gb=%.2f",
+                "Memory warning operation=%s system_used_gb=%.2f "
+                "system_available_gb=%.2f process_rss_gb=%.2f",
                 operation,
                 snapshot.system_used_gb,
+                snapshot.system_available_gb,
                 snapshot.process_rss_gb,
             )
         if (

@@ -8,6 +8,7 @@ from threading import Event
 from time import monotonic, sleep
 from uuid import uuid4
 
+import httpx
 import pytest
 
 from app.corpora import LOCAL_PROFILE_ENV
@@ -33,10 +34,22 @@ from app.llm.argo_client import (
     ArgoAuthorizationError,
     ArgoLocalQuotaError,
     ArgoQuotaError,
+    ArgoRequestTimeoutError,
     ArgoScientificValidationError,
+    ArgoTransportError,
     ArgoUnavailableError,
 )
-from app.models.chatbot import ChatbotResult, ChatbotRetrievalTrace, ChatbotTiming
+from app.llm.chat_claims import MandatoryVerificationError
+from app.memory import MemoryLimitError
+from app.models.chatbot import (
+    ChatbotResult,
+    ChatbotRetrievalTrace,
+    ChatbotTiming,
+    ChatEvidencePassage,
+    ChatEvidenceRecord,
+)
+from app.retrieval.chat_checkpoint import ChatRetrievalCheckpoint
+from app.retrieval.hypothesis_planning import deterministic_hypothesis_plan
 from app.services.chatbot import ChatbotNoSourcesError
 
 
@@ -433,6 +446,9 @@ def test_chat_handler_delegates_to_existing_answer_chatbot_workflow(settings, tm
             assert persisted is not None
             assert persisted.step is expected
         on_argo_response()
+        persisted = repository.get(job.id)
+        assert persisted is not None
+        assert persisted.step is JobStep.VALIDATION
         calls.append((active_settings, database, message, history, use_external_sources))
         return ChatbotResult(
             message=message,
@@ -533,6 +549,93 @@ def test_chat_handler_does_not_apply_a_wall_clock_budget_to_queued_jobs(settings
     handler.handle(job, context)
 
     assert "max_duration_seconds" not in captured
+
+
+def test_chat_handler_reloads_retrieval_checkpoint_for_the_same_durable_message(
+    settings,
+    tmp_path,
+) -> None:
+    repository = JobRepository(tmp_path / "queue.sqlite3")
+    repository.initialize()
+    now = datetime(2026, 7, 22, 12, tzinfo=UTC)
+    job = _claimed_job(repository, now)
+    received: list[ChatRetrievalCheckpoint | None] = []
+    checkpoint = ChatRetrievalCheckpoint.capture(
+        retrieval_query="Question durable",
+        corpus_fingerprint="a" * 64,
+        planning=deterministic_hypothesis_plan("Question durable"),
+        evidence=[
+            ChatEvidenceRecord(
+                record_id="common:article-1",
+                origin="local_rag",
+                evidence_level="abstract",
+                scope="common",
+                article_id="article-1",
+                title="Persisted article",
+                providers=["local"],
+                passages=[
+                    ChatEvidencePassage(
+                        evidence_id="common:article-1:abstract",
+                        text="Persisted abstract",
+                    )
+                ],
+            )
+        ],
+        external_result_count=0,
+        warnings=[],
+        timings=[],
+        retrieval_traces=[],
+    )
+
+    def fake_answer(
+        _settings,
+        _database,
+        *,
+        message,
+        retrieval_checkpoint,
+        on_retrieval_checkpoint,
+        **_options,
+    ) -> ChatbotResult:
+        received.append(retrieval_checkpoint)
+        if retrieval_checkpoint is None:
+            on_retrieval_checkpoint(checkpoint)
+            raise ArgoUnavailableError("simulated semantic timeout")
+        return ChatbotResult(
+            message=message,
+            retrieval_query=message,
+            answer_markdown="Réponse reprise.",
+            sources=[],
+            warnings=[],
+            model="test-model",
+            local_result_count=1,
+            external_result_count=0,
+            external_enrichment_used=False,
+            prompt_tokens=0,
+            completion_tokens=0,
+            duration_seconds=0.1,
+        )
+
+    handler = ChatAnswerHandler(settings, repository.database, fake_answer)
+    context = JobProgressContext(
+        repository=repository,
+        job_id=job.id,
+        worker_id="worker-test",
+        clock=lambda: now + timedelta(seconds=1),
+    )
+
+    with pytest.raises(ArgoUnavailableError, match="semantic timeout"):
+        handler.handle(job, context)
+    result = handler.handle(job, context)
+
+    assert received == [None, checkpoint]
+    assert result.assistant_content == "Réponse reprise."
+    checkpoint_path = (
+        settings.paths.cache_dir
+        / "chat_job_checkpoints"
+        / str(job.user_message_id)
+        / "retrieval.json"
+    )
+    assert checkpoint_path.is_file()
 
 
 def test_evaluation_job_pins_profile_and_persists_cell_identity(settings, tmp_path) -> None:
@@ -1151,7 +1254,9 @@ def test_argo_timeout_uses_bounded_retry_delays(tmp_path) -> None:
 
     class TimeoutHandler:
         def handle(self, job, context) -> JobHandlerResult:
-            raise ArgoUnavailableError("simulated timeout")
+            raise ArgoRequestTimeoutError("simulated timeout") from httpx.ReadTimeout(
+                "private transport detail"
+            )
 
     current_time = [start]
     worker = DurableJobWorker(
@@ -1177,6 +1282,46 @@ def test_argo_timeout_uses_bounded_retry_delays(tmp_path) -> None:
     assert third is not None
     assert third.state.value == "failed"
     assert third.attempt == 3
+    assert third.error_message == "Le fournisseur LLM a dépassé le délai de réponse."
+    conversation = repository.database.chat_conversation(str(job.conversation_id))
+    assert conversation is not None
+    notice = conversation["messages"][-1]["response"]
+    assert notice["diagnostic_code"] == "llm_timeout"
+
+
+def test_memory_pressure_is_retried_instead_of_reported_as_internal_error(tmp_path) -> None:
+    repository = JobRepository(tmp_path / "queue.sqlite3")
+    repository.initialize()
+    now = datetime(2026, 7, 22, 12, tzinfo=UTC)
+    job = _claimed_job(repository, now)
+    with repository.database.transaction() as connection:
+        connection.execute(
+            """
+            UPDATE jobs
+            SET state = 'queued', attempt = 0, worker_id = NULL,
+                lease_expires_at = NULL, heartbeat_at = NULL
+            WHERE id = ?
+            """,
+            (str(job.id),),
+        )
+
+    class MemoryLimitedHandler:
+        def handle(self, job, context) -> JobHandlerResult:
+            raise MemoryLimitError("private memory detail")
+
+    retried = DurableJobWorker(
+        repository=repository,
+        registry=JobHandlerRegistry({JobType.CHAT_ANSWER: MemoryLimitedHandler()}),
+        worker_id="worker-memory-pressure",
+        clock=lambda: now + timedelta(seconds=1),
+    ).run_once()
+
+    assert retried is not None
+    assert retried.state is JobState.QUEUED
+    assert retried.error_code is JobErrorKind.TIMEOUT
+    assert retried.available_at == now + timedelta(seconds=31)
+    assert "memory_pressure" in (retried.error_message or "")
+    assert "private memory detail" not in (retried.error_message or "")
 
 
 def test_invalid_scientific_generation_is_terminal_without_exposing_detail(tmp_path) -> None:
@@ -1510,6 +1655,96 @@ def test_remote_quota_defers_without_stopping_or_consuming_an_attempt(tmp_path) 
     assert deferred.error_code.value == "quota"
     assert deferred.available_at == deferred_at + timedelta(minutes=1)
     assert "provider detail" not in deferred.error_message
+
+
+def test_semantic_timeout_schedules_resume_without_promising_another_local_search(tmp_path) -> None:
+    repository = JobRepository(tmp_path / "queue.sqlite3")
+    repository.initialize()
+    now = datetime(2026, 7, 22, 12, tzinfo=UTC)
+    job = _claimed_job(repository, now)
+    with repository.database.transaction() as connection:
+        connection.execute(
+            """
+            UPDATE jobs
+            SET state = 'queued', attempt = 0, worker_id = NULL,
+                lease_expires_at = NULL, heartbeat_at = NULL
+            WHERE id = ?
+            """,
+            (str(job.id),),
+        )
+
+    class SemanticTimeoutHandler:
+        def handle(self, job, context) -> JobHandlerResult:
+            try:
+                raise ArgoRequestTimeoutError("private provider detail") from httpx.ReadTimeout(
+                    "private transport detail"
+                )
+            except ArgoRequestTimeoutError as error:
+                raise MandatoryVerificationError("mandatory_semantic_filter_incomplete") from error
+
+    retried = DurableJobWorker(
+        repository=repository,
+        registry=JobHandlerRegistry({JobType.CHAT_ANSWER: SemanticTimeoutHandler()}),
+        worker_id="worker-semantic-timeout",
+        clock=lambda: now + timedelta(seconds=1),
+    ).run_once()
+
+    assert retried is not None
+    assert retried.state is JobState.QUEUED
+    assert retried.error_code is JobErrorKind.TIMEOUT
+    assert retried.available_at == now + timedelta(seconds=31)
+    assert "sans relancer la recherche locale" in (retried.error_message or "")
+    assert "semantic_timeout" in (retried.error_message or "")
+    assert "private provider detail" not in (retried.error_message or "")
+
+
+def test_semantic_transport_failure_is_not_reported_as_timeout(tmp_path, caplog) -> None:
+    repository = JobRepository(tmp_path / "queue.sqlite3")
+    repository.initialize()
+    now = datetime(2026, 7, 22, 12, tzinfo=UTC)
+    job = _claimed_job(repository, now)
+    with repository.database.transaction() as connection:
+        connection.execute(
+            """
+            UPDATE jobs
+            SET state = 'queued', attempt = 0, worker_id = NULL,
+                lease_expires_at = NULL, heartbeat_at = NULL
+            WHERE id = ?
+            """,
+            (str(job.id),),
+        )
+
+    class SemanticTransportHandler:
+        def handle(self, job, context) -> JobHandlerResult:
+            try:
+                raise ArgoTransportError("private provider detail") from httpx.ConnectError(
+                    "private transport detail"
+                )
+            except ArgoTransportError as error:
+                raise MandatoryVerificationError("mandatory_semantic_filter_incomplete") from error
+
+    retried = DurableJobWorker(
+        repository=repository,
+        registry=JobHandlerRegistry({JobType.CHAT_ANSWER: SemanticTransportHandler()}),
+        worker_id="worker-semantic-transport",
+        clock=lambda: now + timedelta(seconds=1),
+    ).run_once()
+
+    assert retried is not None
+    assert retried.state is JobState.QUEUED
+    assert retried.error_code is JobErrorKind.TIMEOUT
+    assert retried.available_at == now + timedelta(seconds=31)
+    assert "n'a pas pu être joint" in (retried.error_message or "")
+    assert "semantic_transport_unavailable" in (retried.error_message or "")
+    assert "private provider detail" not in (retried.error_message or "")
+    matching_records = [
+        record
+        for record in caplog.records
+        if record.msg.startswith("mandatory_verification_provider_unavailable")
+    ]
+    assert len(matching_records) == 1
+    assert "transport_error_type=ConnectError" in matching_records[0].getMessage()
+    assert "private transport detail" not in matching_records[0].getMessage()
 
 
 def test_cancellation_before_argo_sends_no_argo_request(settings, tmp_path) -> None:

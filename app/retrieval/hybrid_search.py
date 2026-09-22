@@ -7,7 +7,7 @@ import unicodedata
 from collections.abc import Sequence
 from dataclasses import dataclass
 from time import perf_counter
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -106,8 +106,14 @@ class HybridChunkResult(BaseModel):
     article_title: str
     publication_year: int | None
     section: str | None
-    page_start: int = Field(ge=1)
-    page_end: int = Field(ge=1)
+    page_start: int | None = Field(default=None, ge=1)
+    page_end: int | None = Field(default=None, ge=1)
+    locator_kind: Literal["page", "structural"] | None = None
+    section_path: str | None = None
+    paragraph_start: int | None = Field(default=None, ge=0)
+    paragraph_end: int | None = Field(default=None, ge=0)
+    xml_id_start: str | None = None
+    xml_id_end: str | None = None
     text: str
     hybrid_score: float = Field(ge=0.0)
     lexical_rank: int | None = Field(default=None, ge=1)
@@ -400,6 +406,21 @@ class HybridSearchService:
             k=self.settings.retrieval.rrf_k,
             limit=result_limit,
         )
+        if self.settings.retrieval.outline_expansion_enabled and fused:
+            expanded_chunk_ids = self.database.outline_expanded_chunk_ids(
+                [candidate.chunk_id for candidate in fused],
+                candidate_limit=self.settings.retrieval.outline_expansion_candidate_limit,
+                passages_per_article=self.settings.retrieval.outline_expansion_passages_per_article,
+            )
+            fused.extend(
+                FusedRank(
+                    chunk_id=chunk_id,
+                    score=0.0,
+                    source_ranks={"outline": rank},
+                    source_contributions={"outline": 0.0},
+                )
+                for rank, chunk_id in enumerate(expanded_chunk_ids, start=1)
+            )
         details = self.database.chunk_details_by_ids([candidate.chunk_id for candidate in fused])
         results: list[HybridChunkResult] = []
         for rank, candidate in enumerate(fused, start=1):
@@ -420,9 +441,23 @@ class HybridSearchService:
                         else None
                     ),
                     section=row["section"],
-                    page_start=int(row["page_start"]),
-                    page_end=int(row["page_end"]),
-                    text=str(row["text"]),
+                    page_start=(
+                        int(row["locator_page_start"])
+                        if row["locator_page_start"] is not None
+                        else None
+                    ),
+                    page_end=(
+                        int(row["locator_page_end"])
+                        if row["locator_page_end"] is not None
+                        else None
+                    ),
+                    locator_kind=row["locator_kind"],
+                    section_path=row["section_path"],
+                    paragraph_start=row["paragraph_start"],
+                    paragraph_end=row["paragraph_end"],
+                    xml_id_start=row["xml_id_start"],
+                    xml_id_end=row["xml_id_end"],
+                    text=str(row["effective_text"]),
                     hybrid_score=candidate.score,
                     lexical_rank=lexical_ranks.get(candidate.chunk_id),
                     vector_rank=vector_ranks.get(candidate.chunk_id),

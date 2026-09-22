@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 
-import { RefreshCw, Trash2 } from "lucide-react";
+import { BookOpenText, Eye, Image, RefreshCw, Table2, Trash2 } from "lucide-react";
 
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
@@ -15,6 +15,10 @@ interface CorpusArticlesPanelProps {
   onIndex: () => void;
   onReindex: (article: CorpusArticle) => void;
   onDelete: (article: CorpusArticle) => void;
+  onInspect: (article: CorpusArticle) => void;
+  onViewNativeSource: (article: CorpusArticle) => void;
+  onViewTables: (article: CorpusArticle) => void;
+  onViewFigures: (article: CorpusArticle) => void;
 }
 
 const articlesPerPage = 50;
@@ -25,6 +29,10 @@ export function CorpusArticlesPanel({
   onIndex,
   onReindex,
   onDelete,
+  onInspect,
+  onViewNativeSource,
+  onViewTables,
+  onViewFigures,
 }: CorpusArticlesPanelProps) {
   const [page, setPage] = useState(1);
   const pageCount = Math.max(1, Math.ceil(articles.length / articlesPerPage));
@@ -79,7 +87,11 @@ export function CorpusArticlesPanel({
                   busy={busy}
                   key={article.id}
                   onDelete={onDelete}
+                  onInspect={onInspect}
                   onReindex={onReindex}
+                  onViewNativeSource={onViewNativeSource}
+                  onViewTables={onViewTables}
+                  onViewFigures={onViewFigures}
                 />
               ))}
             </tbody>
@@ -114,11 +126,19 @@ function CorpusArticleRow({
   busy,
   onReindex,
   onDelete,
+  onInspect,
+  onViewNativeSource,
+  onViewTables,
+  onViewFigures,
 }: {
   article: CorpusArticle;
   busy: string | null;
   onReindex: (article: CorpusArticle) => void;
   onDelete: (article: CorpusArticle) => void;
+  onInspect: (article: CorpusArticle) => void;
+  onViewNativeSource: (article: CorpusArticle) => void;
+  onViewTables: (article: CorpusArticle) => void;
+  onViewFigures: (article: CorpusArticle) => void;
 }) {
   const indexed = article.indexed_chunk_count ?? 0;
   const coverage = Math.round((indexed / Math.max(article.chunk_count, 1)) * 100);
@@ -154,6 +174,50 @@ function CorpusArticleRow({
       </td>
       <td className="sticky right-0 bg-white px-5 py-4 shadow-[-8px_0_12px_-12px_rgb(15_23_42_/_0.35)] transition group-hover:bg-forest-50/40">
         <div className="flex justify-end gap-2">
+          <Button
+            aria-label={`Lire la source native de ${article.title}`}
+            className="shrink-0"
+            onClick={() => onViewNativeSource(article)}
+            size="icon"
+            title={`Lire la source native de ${article.title}`}
+            variant="ghost"
+          >
+            <BookOpenText aria-hidden="true" className="size-4" />
+            <span className="sr-only">Lire la source native</span>
+          </Button>
+          <Button
+            aria-label={`Consulter les tableaux de ${article.title}`}
+            className="shrink-0"
+            onClick={() => onViewTables(article)}
+            size="icon"
+            title={`Consulter les tableaux de ${article.title}`}
+            variant="ghost"
+          >
+            <Table2 aria-hidden="true" className="size-4" />
+            <span className="sr-only">Consulter les tableaux</span>
+          </Button>
+          <Button
+            aria-label={`Consulter les figures de ${article.title}`}
+            className="shrink-0"
+            onClick={() => onViewFigures(article)}
+            size="icon"
+            title={`Consulter les figures de ${article.title}`}
+            variant="ghost"
+          >
+            <Image aria-hidden="true" className="size-4" />
+            <span className="sr-only">Consulter les figures</span>
+          </Button>
+          <Button
+            aria-label={`Inspecter ${article.title}`}
+            className="shrink-0"
+            onClick={() => onInspect(article)}
+            size="icon"
+            title={`Inspecter ${article.title}`}
+            variant="ghost"
+          >
+            <Eye aria-hidden="true" className="size-4" />
+            <span className="sr-only">Inspecter</span>
+          </Button>
           <Button
             aria-label={`Réindexer ${article.title}`}
             className="shrink-0"

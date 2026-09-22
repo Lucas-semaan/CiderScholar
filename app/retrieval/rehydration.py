@@ -38,11 +38,12 @@ def rehydrate_records(
                         (article_id,),
                     ).fetchone()
                 else:
+                    bibliographic_id = record.record_id.removeprefix("common-abstract:")
                     row = connection.execute(
                         "SELECT * FROM bibliographic_records WHERE id=? "
                         "AND relevance_status='accepted' "
                         "AND (manual_decision IS NULL OR manual_decision!='rejected')",
-                        (record.record_id,),
+                        (bibliographic_id,),
                     ).fetchone()
                 if row is None or row["title"].strip().casefold() == "fichier local":
                     continue
@@ -50,17 +51,41 @@ def rehydrate_records(
                 if record.evidence_level == "full_text":
                     for passage in record.passages:
                         chunk = connection.execute(
-                            "SELECT * FROM chunks WHERE id=? AND article_id=?",
+                            """
+                            SELECT c.*,
+                                   COALESCE(correction.corrected_text, c.text) AS effective_text,
+                                   l.locator_kind,
+                                   CASE WHEN l.locator_kind = 'structural' THEN NULL
+                                        ELSE COALESCE(l.page_start, c.page_start) END
+                                     AS locator_page_start,
+                                   CASE WHEN l.locator_kind = 'structural' THEN NULL
+                                        ELSE COALESCE(l.page_end, c.page_end) END
+                                     AS locator_page_end,
+                                   l.section_path,
+                                   l.paragraph_start, l.paragraph_end,
+                                   l.xml_id_start, l.xml_id_end
+                            FROM chunks AS c
+                            LEFT JOIN chunk_locators AS l ON l.chunk_id = c.id
+                            LEFT JOIN chunk_corrections AS correction
+                              ON correction.chunk_id = c.id AND correction.state = 'approved'
+                            WHERE c.id=? AND c.article_id=?
+                            """,
                             (passage.chunk_id, article_id),
                         ).fetchone()
                         if chunk is not None:
                             passages.append(
                                 passage.model_copy(
                                     update={
-                                        "text": chunk["text"],
+                                        "text": chunk["effective_text"],
                                         "section": chunk["section"],
-                                        "page_start": chunk["page_start"],
-                                        "page_end": chunk["page_end"],
+                                        "page_start": chunk["locator_page_start"],
+                                        "page_end": chunk["locator_page_end"],
+                                        "locator_kind": chunk["locator_kind"],
+                                        "section_path": chunk["section_path"],
+                                        "paragraph_start": chunk["paragraph_start"],
+                                        "paragraph_end": chunk["paragraph_end"],
+                                        "xml_id_start": chunk["xml_id_start"],
+                                        "xml_id_end": chunk["xml_id_end"],
                                     }
                                 )
                             )

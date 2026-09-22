@@ -117,6 +117,45 @@ class PathConfig(BaseModel):
             path.mkdir(parents=True, exist_ok=True)
 
 
+class ParserResourceLimits(BaseModel):
+    """Explicit bounds required before an external parser may be activated."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    # Safety ceilings pending empirical calibration in FUS-003/FUS-204. They
+    # prevent an accidental configuration from disabling all resource guards.
+    max_file_bytes: int | None = Field(default=None, strict=True, ge=1, le=1_073_741_824)
+    max_pages: int | None = Field(default=None, strict=True, ge=1, le=10_000)
+    max_memory_mb: int | None = Field(default=None, strict=True, ge=1, le=32_768)
+    timeout_seconds: float | None = Field(default=None, strict=True, gt=0.0, le=3_600.0)
+    max_response_bytes: int | None = Field(default=None, strict=True, ge=1, le=536_870_912)
+    max_attempts: int | None = Field(default=None, strict=True, ge=1, le=5)
+    initial_backoff_seconds: float | None = Field(default=None, strict=True, ge=0.0, le=300.0)
+
+    def is_complete(self) -> bool:
+        return all(value is not None for _name, value in self)
+
+
+class ExtractionParserConfig(BaseModel):
+    """Parser selection remains builtin by default until external gates are passed."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    mode: Literal["pymupdf", "docling", "ragflow_deepdoc", "auto_experimental"] = "pymupdf"
+    failure_policy: Literal["fail", "review_required", "explicit_retry_builtin"] = "fail"
+    experimental_external_parsers_enabled: bool = Field(default=False, strict=True)
+    limits: ParserResourceLimits = Field(default_factory=ParserResourceLimits)
+
+    @model_validator(mode="after")
+    def external_modes_require_explicit_gate_and_limits(self) -> ExtractionParserConfig:
+        external = self.mode in {"docling", "ragflow_deepdoc", "auto_experimental"}
+        if external and not self.experimental_external_parsers_enabled:
+            raise ValueError("external parser modes require explicit experimental enablement")
+        if external and not self.limits.is_complete():
+            raise ValueError("external parser modes require complete resource limits")
+        return self
+
+
 class IngestionConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -128,6 +167,7 @@ class IngestionConfig(BaseModel):
     ocr_language: str = Field(default="fr-FR", pattern=r"^[a-z]{2,3}(?:-[A-Z]{2})?$")
     ocr_min_confidence: float = Field(default=0.75, ge=0.5, le=1.0)
     metadata_scan_pages: int = Field(default=3, ge=1, le=10)
+    parser: ExtractionParserConfig = Field(default_factory=ExtractionParserConfig)
 
     @model_validator(mode="after")
     def validate_chunk_sizes(self) -> IngestionConfig:
@@ -230,6 +270,9 @@ class RetrievalConfig(BaseModel):
     dense_article_prefilter_enabled: bool = True
     dense_article_prefilter_max_articles: int = Field(default=60, ge=1, le=250)
     dense_article_prefilter_min_articles: int = Field(default=4, ge=1, le=250)
+    outline_expansion_enabled: bool = False
+    outline_expansion_candidate_limit: int = Field(default=20, ge=1, le=40)
+    outline_expansion_passages_per_article: int = Field(default=6, ge=1, le=8)
 
     @model_validator(mode="after")
     def validate_weights(self) -> RetrievalConfig:
@@ -238,6 +281,8 @@ class RetrievalConfig(BaseModel):
             raise ValueError("retrieval weights must add up to 1.0")
         if self.dense_article_prefilter_min_articles > self.dense_article_prefilter_max_articles:
             raise ValueError("dense article prefilter minimum cannot exceed its maximum")
+        if self.outline_expansion_passages_per_article > self.outline_expansion_candidate_limit:
+            raise ValueError("outline expansion passages cannot exceed its candidate limit")
         return self
 
 

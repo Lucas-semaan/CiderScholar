@@ -40,7 +40,7 @@ avancement. Les trois commandes déjà disponibles sont décrites dans [knowledg
    hypothèse réservée au retrieval, besoins atomiques, vague groupée unique, contexte intra-article
    borné, filtre global A–D, synthèse unique et validateurs existants.
 3. Ne réintroduire ni axes de recherche successifs, ni contrôleur de couverture, ni acquisition
-   implicite pour corriger une réponse. Les dix requêtes maximales de génération, initiale comprise,
+   implicite pour corriger une réponse. L’unique requête maximale de génération, initiale comprise,
    restent une borne ; les repasses utilisent les mêmes preuves.
 4. Une preuve contradictoire directement pertinente reste admissible. La mémoire ne force ni
    confirmation d’hypothèse, ni niveau A/B, ni suppression des preuves pertinentes présentées.

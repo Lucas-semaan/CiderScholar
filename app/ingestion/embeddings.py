@@ -245,8 +245,8 @@ class EmbeddedChunkBatch:
     chunk_ids: tuple[int, ...]
     article_ids: tuple[str, ...]
     sections: tuple[str | None, ...]
-    page_starts: tuple[int, ...]
-    page_ends: tuple[int, ...]
+    page_starts: tuple[int | None, ...]
+    page_ends: tuple[int | None, ...]
     vectors: Any
     model_name: str
     vector_dimension: int
@@ -339,8 +339,14 @@ class EmbeddingBatchProcessor:
                             chunk_ids=chunk_ids,
                             article_ids=tuple(str(row["article_id"]) for row in rows),
                             sections=tuple(row["section"] for row in rows),
-                            page_starts=tuple(int(row["page_start"]) for row in rows),
-                            page_ends=tuple(int(row["page_end"]) for row in rows),
+                            page_starts=tuple(
+                                int(row["page_start"]) if row["page_start"] is not None else None
+                                for row in rows
+                            ),
+                            page_ends=tuple(
+                                int(row["page_end"]) if row["page_end"] is not None else None
+                                for row in rows
+                            ),
                             vectors=vectors,
                             model_name=self.backend.model_name,
                             vector_dimension=vector_dimension,

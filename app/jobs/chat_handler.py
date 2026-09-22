@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+import logging
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Protocol
@@ -16,8 +17,14 @@ from app.jobs.repository import JobRecord
 from app.jobs.worker import JobHandlerResult, JobProgressContext
 from app.llm.argo_client import ArgoScientificValidationError, ScientificValidationReason
 from app.models.chatbot import ChatbotEvaluationTrace, ChatbotResult, ChatbotSource
+from app.retrieval.chat_checkpoint import (
+    ChatRetrievalCheckpoint,
+    ChatRetrievalCheckpointStore,
+)
 from app.services.chatbot import latest_chatbot_sources, resolve_chat_interaction_mode
 from app.services.workflows import ChatbotProgressStage, answer_chatbot
+
+LOGGER = logging.getLogger("ciderscholar.jobs.chat_handler")
 
 
 class ChatbotAnswerer(Protocol):
@@ -36,6 +43,8 @@ class ChatbotAnswerer(Protocol):
         on_argo_reserved: Callable[[], None] | None = None,
         on_argo_response: Callable[[], None] | None = None,
         on_progress: Callable[[ChatbotProgressStage], None] | None = None,
+        retrieval_checkpoint: ChatRetrievalCheckpoint | None = None,
+        on_retrieval_checkpoint: Callable[[ChatRetrievalCheckpoint], None] | None = None,
         experimental_profile: str | None = None,
         answer_effort: AnswerEffort = AnswerEffort.BALANCED,
     ) -> ChatbotResult: ...
@@ -144,15 +153,55 @@ class ChatAnswerHandler:
         evaluation_options = (
             {"experimental_profile": evaluation_profile} if evaluation_profile is not None else {}
         )
-        answer_parameters = inspect.signature(self.answer).parameters.values()
-        effort_options = (
-            {"answer_effort": job.payload.answer_effort}
-            if any(
-                parameter.name == "answer_effort" or parameter.kind is inspect.Parameter.VAR_KEYWORD
+        answer_parameters = tuple(inspect.signature(self.answer).parameters.values())
+
+        def supports_answer_parameter(name: str) -> bool:
+            return any(
+                parameter.name == name or parameter.kind is inspect.Parameter.VAR_KEYWORD
                 for parameter in answer_parameters
             )
+
+        effort_options = (
+            {"answer_effort": job.payload.answer_effort}
+            if supports_answer_parameter("answer_effort")
             else {}
         )
+        checkpoint_store = ChatRetrievalCheckpointStore(
+            self.settings.paths.cache_dir / "chat_job_checkpoints"
+        )
+        checkpoint_request = {
+            "payload": job.payload.model_dump(
+                mode="json",
+                exclude={"client_request_id"},
+            ),
+            "history": history,
+            "interaction_mode": interaction_mode,
+            "external_enrichment_allowed": enrichment_allowed,
+        }
+        checkpoint_fingerprint = checkpoint_store.request_fingerprint(checkpoint_request)
+        retrieval_checkpoint = checkpoint_store.load(
+            job.user_message_id,
+            request_fingerprint=checkpoint_fingerprint,
+        )
+
+        def save_retrieval_checkpoint(checkpoint: ChatRetrievalCheckpoint) -> None:
+            try:
+                checkpoint_store.save(
+                    job.user_message_id,
+                    request_fingerprint=checkpoint_fingerprint,
+                    checkpoint=checkpoint,
+                )
+            except OSError:
+                LOGGER.warning(
+                    "chat_retrieval_checkpoint_write_failed job_id=%s",
+                    job.id,
+                )
+
+        checkpoint_options = {}
+        if supports_answer_parameter("retrieval_checkpoint"):
+            checkpoint_options["retrieval_checkpoint"] = retrieval_checkpoint
+        if supports_answer_parameter("on_retrieval_checkpoint"):
+            checkpoint_options["on_retrieval_checkpoint"] = save_retrieval_checkpoint
         result = self.answer(
             self.settings,
             self.database,
@@ -167,6 +216,7 @@ class ChatAnswerHandler:
             **figure_options,
             **evaluation_options,
             **effort_options,
+            **checkpoint_options,
         )
         if result.message != job.payload.message:
             raise ArgoScientificValidationError(

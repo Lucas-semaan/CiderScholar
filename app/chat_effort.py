@@ -112,7 +112,9 @@ _BUDGETS: dict[AnswerEffort, AnswerEffortBudget] = {
         follow_up_query_limit=0,
         follow_up_incomplete_axes=False,
         mono_max_statements=12,
-        mono_max_output_tokens=4_096,
+        # chat-gpt-oss counts hidden reasoning against max_tokens. Deep prompts
+        # need the configured 8k ceiling to leave room for the validated JSON.
+        mono_max_output_tokens=8_192,
         facet_max_statements=6,
         facet_max_output_tokens=3_072,
         final_max_statements=16,

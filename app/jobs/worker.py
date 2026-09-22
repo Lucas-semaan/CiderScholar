@@ -21,10 +21,13 @@ from app.llm.argo_client import (
     ArgoAuthorizationError,
     ArgoLocalQuotaError,
     ArgoQuotaError,
+    ArgoRequestTimeoutError,
     ArgoScientificValidationError,
+    ArgoTransportError,
     ArgoUnavailableError,
 )
 from app.llm.chat_claims import MandatoryVerificationError
+from app.memory import MemoryLimitError
 from app.services.chatbot import ChatbotNoSourcesError
 
 _PROCESS_WORKER_ID = f"worker-{uuid4().hex}"
@@ -269,12 +272,37 @@ class DurableJobWorker:
                     "remote LLM quota deferral could not be persisted"
                 ) from None
             return self._logged_result(deferred, cycle_started_monotonic)
+        except MemoryLimitError:
+            self.logger.warning(
+                "job_memory_pressure job_id=%s job_type=%s",
+                job.id,
+                job.type.value,
+            )
+            failed = self.repository.fail_attempt(
+                job.id,
+                worker_id=self.worker_id,
+                error_code=JobErrorKind.TIMEOUT,
+                diagnostic_code="memory_pressure",
+                safe_message=(
+                    "Une pression mémoire locale a interrompu le traitement. "
+                    "Les résultats intermédiaires persistés sont conservés pour une reprise "
+                    "(memory_pressure)."
+                ),
+                now=self.clock(),
+            )
+            if failed is None:
+                raise JobLeaseLostError("memory-pressure failure could not be persisted") from None
+            return self._logged_result(failed, cycle_started_monotonic)
         except MandatoryVerificationError as error:
             cause = error.__cause__ or error
             kind = JobErrorKind.VALIDATION
             code = "semantic_invalid_schema"
-            if isinstance(cause, ArgoUnavailableError):
+            if isinstance(cause, ArgoRequestTimeoutError):
                 kind, code = JobErrorKind.TIMEOUT, "semantic_timeout"
+            elif isinstance(cause, ArgoTransportError):
+                kind, code = JobErrorKind.TIMEOUT, "semantic_transport_unavailable"
+            elif isinstance(cause, ArgoUnavailableError):
+                kind, code = JobErrorKind.TIMEOUT, "semantic_unavailable"
             elif isinstance(cause, ArgoQuotaError):
                 kind, code = JobErrorKind.QUOTA, "semantic_quota"
             elif isinstance(cause, (ArgoAuthenticationError, ArgoAuthorizationError)):
@@ -283,24 +311,64 @@ class DurableJobWorker:
                 code = "semantic_context_exceeded"
             elif "invalid_json" in str(cause):
                 code = "semantic_invalid_json"
+            if kind is JobErrorKind.TIMEOUT:
+                provider_failure = cause.__cause__ or cause
+                self.logger.warning(
+                    "mandatory_verification_provider_unavailable "
+                    "job_id=%s code=%s transport_error_type=%s",
+                    job.id,
+                    code,
+                    type(provider_failure).__name__,
+                )
+                if code == "semantic_timeout":
+                    failure_detail = "le fournisseur LLM a dépassé le délai de réponse"
+                else:
+                    failure_detail = "le fournisseur LLM n'a pas pu être joint"
+                safe_message = (
+                    "La validation scientifique obligatoire n'a pas terminé car "
+                    f"{failure_detail}. Le corpus de preuves déjà récupéré est conservé ; "
+                    "la reprise recommencera à la sélection sémantique sans relancer "
+                    f"la recherche locale ({code})."
+                )
+            else:
+                safe_message = (
+                    "La validation scientifique obligatoire n'a pas terminé. "
+                    f"Les évaluations terminées sont conservées pour la reprise ({code})."
+                )
             failed = self.repository.fail_attempt(
                 job.id,
                 worker_id=self.worker_id,
                 error_code=kind,
                 diagnostic_code=code,
-                safe_message="La validation scientifique obligatoire n'a pas terminé. "
-                f"Les évaluations terminées sont conservées pour la reprise ({code}).",
+                safe_message=safe_message,
                 now=self.clock(),
             )
             if failed is None:
                 raise JobLeaseLostError("semantic failure could not be persisted") from None
             return self._logged_result(failed, cycle_started_monotonic)
-        except ArgoUnavailableError:
+        except ArgoUnavailableError as error:
+            provider_failure = error.__cause__ or error
+            if isinstance(error, ArgoRequestTimeoutError):
+                code = "llm_timeout"
+                safe_message = "Le fournisseur LLM a dépassé le délai de réponse."
+            elif isinstance(error, ArgoTransportError):
+                code = "llm_transport_unavailable"
+                safe_message = "Le fournisseur LLM n'a pas pu être joint."
+            else:
+                code = "llm_unavailable"
+                safe_message = "Le fournisseur LLM est temporairement indisponible."
+            self.logger.warning(
+                "llm_provider_unavailable job_id=%s code=%s transport_error_type=%s",
+                job.id,
+                code,
+                type(provider_failure).__name__,
+            )
             failed = self.repository.fail_attempt(
                 job.id,
                 worker_id=self.worker_id,
                 error_code=JobErrorKind.TIMEOUT,
-                safe_message="Le fournisseur LLM n'a pas répondu dans le délai imparti.",
+                safe_message=safe_message,
+                diagnostic_code=code,
                 now=self.clock(),
             )
             if failed is None:

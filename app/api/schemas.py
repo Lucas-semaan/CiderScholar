@@ -78,6 +78,17 @@ class IndexRequest(ApiModel):
     retry_failed: bool = False
 
 
+class ChunkCorrectionRequest(ApiModel):
+    chunk_id: int = Field(gt=0)
+    corrected_text: str = Field(min_length=1, max_length=100_000)
+    reason: str = Field(min_length=1, max_length=1_000)
+    reviewer: str = Field(min_length=1, max_length=200)
+
+
+class ChunkCorrectionDecisionRequest(ApiModel):
+    decision: Literal["approved", "rejected"]
+
+
 class ChatJobSubmitRequest(ApiModel):
     message: str = Field(min_length=2, max_length=4000)
     client_request_id: UUID

@@ -23,8 +23,15 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from app.config import Settings
 from app.database.sqlite import Database
+from app.ingestion.chunker import ScientificChunker
 from app.ingestion.deduplication import sha256_file
+from app.ingestion.native_pipeline import (
+    NativeArticleMetadata,
+    NativeAssetInput,
+    NativeTextIngestionService,
+)
 from app.ingestion.pipeline import IngestionPipeline, PdfCatalogMetadata
+from app.ingestion.token_budget import LocalEmbeddingTokenBudget
 from app.updates.models import normalize_doi
 
 AssetState = Literal[
@@ -51,6 +58,7 @@ NativeAssetState = Literal[
     "failed",
 ]
 ProgressCallback = Callable[[str], None]
+NativeChunkIndexer = Callable[[Settings, Database, Sequence[str]], None]
 
 
 class FullTextApiError(RuntimeError):
@@ -525,6 +533,20 @@ class FullTextStore:
                 """
             ).fetchall()
         return {(str(row["record_id"]), str(row["source"]), str(row["format"])) for row in rows}
+
+    def native_asset(self, *, record_id: str, source: str, format: str) -> dict[str, Any] | None:
+        """Read metadata only; source bytes remain in the controlled asset directory."""
+
+        with closing(self.database.connect()) as connection:
+            row = connection.execute(
+                """
+                SELECT id, file_path, sha256, byte_count, media_type, final_url, license
+                FROM native_full_text_assets
+                WHERE record_id = ? AND source = ? AND format = ?
+                """,
+                (record_id, source, format),
+            ).fetchone()
+        return dict(row) if row is not None else None
 
     def failed_native_candidate_keys(self) -> set[tuple[str, str, str]]:
         with closing(self.database.connect()) as connection:
@@ -1573,12 +1595,16 @@ class FullTextHarvestService:
         *,
         rag_settings: Settings | None = None,
         rag_database: Database | None = None,
+        native_ingester: NativeTextIngestionService | None = None,
+        native_indexer: NativeChunkIndexer | None = None,
     ) -> None:
         self.settings = settings
         self.database = database
         self.rag_settings = rag_settings or settings
         self.rag_database = rag_database or database
         self.store = FullTextStore(database)
+        self._native_ingester = native_ingester
+        self._native_indexer = native_indexer
 
     def run(
         self,
@@ -1651,6 +1677,7 @@ class FullTextHarvestService:
             "native_failed": 0,
         }
         article_ids: list[str] = []
+        newly_ingested_native_article_ids: list[str] = []
         errors: list[dict[str, str]] = []
         blocked_hosts: dict[str, int] = {}
         if not audit_only:
@@ -1724,6 +1751,64 @@ class FullTextHarvestService:
                         state="downloaded",
                         downloaded=downloaded,
                     )
+                    existing_article = self.rag_database.article_by_doi(audited.doi)
+                    native_asset = self.store.native_asset(
+                        record_id=audited.record_id,
+                        source=candidate.source,
+                        format=candidate.format,
+                    )
+                    if native_asset is not None and candidate.format in {"jats_xml", "tei_xml"}:
+                        catalog = _catalog_metadata(
+                            records_by_id[audited.record_id], candidate.source
+                        )
+                        ingestion = self._native_ingestion_service().ingest(
+                            metadata=NativeArticleMetadata.model_validate(
+                                catalog.model_dump(mode="python")
+                            ),
+                            asset=NativeAssetInput(
+                                path=Path(str(native_asset["file_path"])),
+                                format=candidate.format,
+                                sha256=str(native_asset["sha256"]),
+                                media_type=str(native_asset["media_type"]),
+                                byte_count=int(native_asset["byte_count"]),
+                                provider=candidate.source,
+                                source_url=str(native_asset["final_url"] or candidate.url),
+                                license=(
+                                    str(native_asset["license"])
+                                    if native_asset["license"]
+                                    else None
+                                ),
+                                native_asset_id=(
+                                    str(native_asset["id"])
+                                    if self.rag_database.path == self.database.path
+                                    else None
+                                ),
+                            ),
+                        )
+                        counters["ingested"] += int(not ingestion.reused_existing_asset)
+                        article_ids.append(ingestion.article_id)
+                        if not ingestion.reused_existing_asset:
+                            newly_ingested_native_article_ids.append(ingestion.article_id)
+                    elif existing_article is not None and native_asset is not None:
+                        self.rag_database.save_article_source_asset(
+                            article_id=str(existing_article["id"]),
+                            kind=candidate.format,
+                            file_path=str(native_asset["file_path"]),
+                            sha256=str(native_asset["sha256"]),
+                            media_type=str(native_asset["media_type"]),
+                            byte_count=int(native_asset["byte_count"]),
+                            provider=candidate.source,
+                            source_url=str(native_asset["final_url"] or candidate.url),
+                            license=(
+                                str(native_asset["license"]) if native_asset["license"] else None
+                            ),
+                            is_primary=False,
+                            native_asset_id=(
+                                str(native_asset["id"])
+                                if self.rag_database.path == self.database.path
+                                else None
+                            ),
+                        )
                 except Exception as exc:
                     if isinstance(exc, ProviderDeferred):
                         self.store.set_cooldown(
@@ -1789,6 +1874,7 @@ class FullTextHarvestService:
                         state="failed",
                         error=exc,
                     )
+            self._index_native_chunks(newly_ingested_native_article_ids)
             pipeline = IngestionPipeline(self.rag_settings, self.rag_database)
             download_attempts = 0
             for audited in candidates:
@@ -1982,6 +2068,36 @@ class FullTextHarvestService:
         if self.database.path.resolve() == self.rag_database.path.resolve():
             return article_id
         return None
+
+    def _native_ingestion_service(self) -> NativeTextIngestionService:
+        if self._native_ingester is None:
+            self._native_ingester = NativeTextIngestionService(
+                self.rag_database,
+                ScientificChunker(
+                    target_tokens=self.rag_settings.ingestion.target_tokens,
+                    max_tokens=self.rag_settings.ingestion.max_tokens,
+                    overlap_tokens=0,
+                    token_budget=LocalEmbeddingTokenBudget.from_settings(self.rag_settings),
+                ),
+            )
+        return self._native_ingester
+
+    def _index_native_chunks(self, article_ids: Sequence[str]) -> None:
+        unique_article_ids = tuple(dict.fromkeys(article_ids))
+        if not unique_article_ids:
+            return
+        if self._native_indexer is not None:
+            self._native_indexer(self.rag_settings, self.rag_database, unique_article_ids)
+            return
+        # Workflows import the harvester, so importing lazily avoids a module cycle.
+        from app.services.workflows import index_pending_chunks
+
+        index_pending_chunks(
+            self.rag_settings,
+            self.rag_database,
+            article_ids=unique_article_ids,
+            retry_failed=True,
+        )
 
 
 def _europe_pmc_candidate(doi: str, hit: Mapping[str, Any]) -> FullTextCandidate | None:

@@ -126,6 +126,39 @@ def test_search_is_accent_insensitive_and_page_traceable(settings) -> None:
     assert all(result.article_id != "hidden-article" for result in response.results)
 
 
+def test_search_prefers_a_structural_locator_to_legacy_chunk_pages(settings) -> None:
+    service = _service(settings)
+    database = service.database
+    chunk_id = int(database.chunks_for_article("polyphenol-article", limit=1)[0]["id"])
+    asset_id = database.save_article_source_asset(
+        article_id="polyphenol-article",
+        kind="jats_xml",
+        file_path="data/native/polyphenols.xml",
+        sha256="e" * 64,
+        media_type="application/xml",
+        byte_count=100,
+        provider="europe_pmc",
+    )
+    database.save_structural_chunk_locator(
+        chunk_id=chunk_id,
+        asset_id=asset_id,
+        section_path="Results / Storage",
+        paragraph_start=2,
+        paragraph_end=2,
+        xml_id_start="storage-2",
+        xml_id_end="storage-2",
+        span_text="Les polyphénols diminuent progressivement pendant le stockage prolongé.",
+    )
+
+    result = service.search("polyphénols stockage", limit=10).results[0]
+
+    assert result.locator_kind == "structural"
+    assert result.page_start is None
+    assert result.page_end is None
+    assert result.section_path == "Results / Storage"
+    assert (result.paragraph_start, result.paragraph_end) == (2, 2)
+
+
 def test_search_filters_by_article_and_section(settings) -> None:
     service = _service(settings)
     filtered_article = service.search(

@@ -139,11 +139,117 @@ def test_global_semantic_filter_corrects_one_incomplete_json_response() -> None:
     )
 
     assert client.calls == 2
-    assert client.maximum_output_tokens == 980
+    assert client.maximum_output_tokens == 6000
     assert result.used_fallback is False
     assert result.selected_candidate_ids == [direct.record_id]
     assert result.prompt_tokens == 24
     assert result.completion_tokens == 12
+
+
+def test_global_semantic_filter_recovers_one_wrapped_schema_valid_object() -> None:
+    direct = _record("common:1", "Pre-press holding changed apple juice yield.")
+    payload = {
+        "decisions": [
+            {
+                "candidate_id": direct.record_id,
+                "relevance": "direct",
+                "supported_need_ids": ["v1"],
+                "rationale": "Direct matrix, process and outcome.",
+            }
+        ]
+    }
+
+    class WrappedClient:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def chat(self, messages, **_options):
+            self.calls += 1
+            assert "direct=A" in messages[0]["content"]
+            return GenerationResponse(
+                model="argo-semantic-test",
+                content=(
+                    f"<think>Validation terminée.</think>\n```json\n{json.dumps(payload)}\n```"
+                ),
+                done_reason="stop",
+                metrics=GenerationMetrics(
+                    total_duration_seconds=1,
+                    load_duration_seconds=0,
+                    prompt_eval_count=12,
+                    prompt_eval_duration_seconds=0.5,
+                    eval_count=6,
+                    eval_duration_seconds=0.5,
+                ),
+            )
+
+    client = WrappedClient()
+    result = ArgoGlobalSemanticEvidenceFilter(client).filter_records(
+        "Quels effets le cuvage a-t-il sur le rendement ?",
+        [_need()],
+        [direct],
+    )
+
+    assert client.calls == 1
+    assert result.selected_candidate_ids == [direct.record_id]
+
+
+def test_global_semantic_filter_splits_a_batch_that_stays_invalid() -> None:
+    records = [
+        _record(
+            f"common:{index}",
+            f"Pre-press holding observation {index} for apple juice yield.",
+        )
+        for index in range(1, 5)
+    ]
+
+    class SizeSensitiveClient:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def chat(self, messages, **_options):
+            self.calls += 1
+            candidates = json.loads(messages[1]["content"])["candidates"]
+            if len(candidates) > 2:
+                content = '{"decisions": ['
+            else:
+                content = json.dumps(
+                    {
+                        "decisions": [
+                            {
+                                "candidate_id": candidate["candidate_id"],
+                                "relevance": "direct",
+                                "supported_need_ids": ["v1"],
+                                "rationale": "Direct matrix, process and outcome.",
+                            }
+                            for candidate in candidates
+                        ]
+                    }
+                )
+            return GenerationResponse(
+                model="argo-semantic-test",
+                content=content,
+                done_reason="stop",
+                metrics=GenerationMetrics(
+                    total_duration_seconds=1,
+                    load_duration_seconds=0,
+                    prompt_eval_count=12,
+                    prompt_eval_duration_seconds=0.5,
+                    eval_count=6,
+                    eval_duration_seconds=0.5,
+                ),
+            )
+
+    client = SizeSensitiveClient()
+    result = ArgoGlobalSemanticEvidenceFilter(client).filter_records(
+        "Quels effets le cuvage a-t-il sur le rendement ?",
+        [_need()],
+        records,
+    )
+
+    assert client.calls == 5
+    assert result.selected_candidate_ids == [record.record_id for record in records]
+    assert result.prompt_tokens == 60
+    assert result.completion_tokens == 30
 
 
 def test_global_semantic_filter_keeps_all_cd_verdicts_without_retry() -> None:
@@ -267,6 +373,6 @@ def test_global_semantic_filter_assesses_a_deep_candidate_set_atomically() -> No
     )
 
     assert client.calls == 4
-    assert client.maximum_output_tokens == 1_880
+    assert client.maximum_output_tokens == 6_000
     assert result.used_fallback is False
     assert result.selected_candidate_ids == [record.record_id for record in records]

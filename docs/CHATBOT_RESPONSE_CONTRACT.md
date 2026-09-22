@@ -103,6 +103,10 @@ Il doit signaler, lorsque les sources le permettent :
 
 Ces éléments ne deviennent pas automatiquement six sections. Argo choisit une organisation naturelle
 adaptée au contenu ; un élément absent des sources est omis ou explicitement déclaré non documenté.
+Les rubriques « Réponse synthétique », « Effets documentés » et « Limites des preuves » ne sont pas
+imposées par le renderer : leur contenu peut être intégré dans des paragraphes ou des sections
+adaptées à la question. Seule la forme explicitement demandée par l'utilisateur peut imposer une
+organisation particulière.
 La validation contrôle aussi la densité de chaque paragraphe et la longueur globale en fonction de la
 matière disponible dans les passages cités. Une réponse télégraphique est régénérée dans l'enveloppe
 globale de correction ; une source brève ne crée jamais une obligation de développer au-delà de ce
@@ -189,10 +193,9 @@ Le filtre global peut conserver un pool large pour l'évaluation et le diagnosti
 de synthèse finale conserve tous les éléments pertinents retenus dans l'ordre classé. Tous les éléments A/B de cette
 fenêtre doivent être utilisés dans les affirmations citées. Le validateur refuse une omission et, pour
 un ensemble riche, une densité rédactionnelle anormalement faible. La réponse initiale et ses corrections
-se partagent une enveloppe globale de dix requêtes au plus ; chaque correction reçoit tous les codes encore
-actifs et une action précise par code, en restant fondée sur les mêmes passages SQLite. La consigne active
-remplace la précédente et reste bornée à la marge d'entrée réservée ; un dépassement résiduel produit un
-diagnostic structuré et ne remonte jamais comme erreur interne du worker.
+se limitent à une requête ARGO au plus pour préserver le quota du fournisseur. Après un rejet,
+l’application conserve les résultats validés récupérables ou produit un diagnostic structuré ; elle ne
+relance aucune correction ARGO.
 
 À l'épuisement de cette enveloppe, les atteintes à la fidélité scientifique restent bloquantes : référence
 inexistante, niveau C/D, chiffre, causalité, norme, évaluation ou sécurité non étayés, fuite d'identifiant ou
@@ -256,15 +259,15 @@ la réponse scientifique.
 ## Réponses partielles et abstentions
 
 Une synthèse dont certaines affirmations ou certains axes ont déjà passé les validations peut être
-rendue avec `generation_status=partial_generated`. Elle utilise le même renderer, les mêmes citations
-et la même structure que `generated`, puis décrit précisément ce qui n’a pas pu être établi.
+rendue avec `generation_status=partial_generated`. Elle utilise le même renderer et les mêmes citations
+que `generated`, puis décrit précisément ce qui n’a pas pu être établi.
 Une récupération après rejet d'affirmations, dans un brouillon d'axe ou dans l'assemblage final,
 propage obligatoirement `partial_generated` jusqu'à la réponse publique. Le statut `generated` est
 réservé aux réponses dont toutes les phases utilisées sont intégralement validées.
 
-Si aucune affirmation n’est validable, `abstained` conserve la structure rédactionnelle attendue et
-n’invente aucune citation. Un problème technique sans synthèse prend le statut `diagnostic_only`,
-également sous forme structurée. Dans aucun de ces cas l’application n’affiche les candidats de
+Si aucune affirmation n’est validable, `abstained` conserve une réponse lisible et n’invente aucune
+citation. Un problème technique sans synthèse prend le statut `diagnostic_only`, également sous forme
+lisible. Dans aucun de ces cas l’application n’affiche les candidats de
 retrieval ou une succession de sources comme s’il s’agissait de la réponse.
 
 ## Citations et références

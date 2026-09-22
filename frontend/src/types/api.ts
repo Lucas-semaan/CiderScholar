@@ -289,15 +289,104 @@ export interface CorpusResponse {
   };
 }
 
+export interface CorpusInspection {
+  article_id: string;
+  limit: number;
+  offset: number;
+  totals: {
+    assets: number;
+    outline: number;
+    elements: number;
+    chunks: number;
+    extraction_runs: number;
+  };
+  assets: Array<Record<string, unknown>>;
+  outline: Array<{ title: string; level: number; source_locator: string; kind: string }>;
+  elements: Array<Record<string, unknown>>;
+  chunks: Array<{
+    id: number;
+    chunk_index: number;
+    section: string | null;
+    locator_kind: string | null;
+    embedding_status: string;
+  }>;
+  extraction_runs: Array<{
+    parser_id: string;
+    parser_version: string;
+    state: string;
+    warning_count: number;
+  }>;
+}
+
+export interface NativeSourceView {
+  article_id: string;
+  assets: Array<{
+    id: string;
+    kind: "jats_xml" | "tei_xml";
+    sha256: string;
+    media_type: string;
+    byte_count: number;
+    provider: string | null;
+    source_url: string | null;
+    license: string | null;
+  }>;
+  passages: Array<{
+    chunk_id: number;
+    section: string | null;
+    chunk_index: number;
+    text: string;
+    asset_id: string;
+    section_path: string;
+    paragraph_start: number;
+    paragraph_end: number;
+    xml_id_start: string | null;
+    xml_id_end: string | null;
+    span_sha256: string;
+  }>;
+}
+
+export interface TableEvidenceView {
+  article_id: string;
+  tables: Array<{
+    element_id: string;
+    article_id: string;
+    page_number: number;
+    cells: Array<{
+      row_index: number;
+      column_index: number;
+      text: string;
+    }>;
+    related_chunk_ids: number[];
+  }>;
+}
+
+export interface FigureEvidenceView {
+  article_id: string;
+  figures: Array<{
+    element_id: string;
+    article_id: string;
+    page_number: number;
+    original_caption: string | null;
+    related_chunk_ids: number[];
+    synthetic_caption: null;
+  }>;
+}
+
 export interface IngestionReport {
   pdf_path: string;
   sha256: string | null;
   article_id: string | null;
-  status: "chunks_ready" | "duplicate" | "ocr_required" | "failed";
+  status: "chunks_ready" | "duplicate" | "ocr_required" | "review_required" | "failed";
   duplicate_reason: "sha256" | "doi" | "normalized_text" | null;
   page_count: number;
   chunk_count: number;
+  element_count: number;
+  ocr_uncertain_page_count: number;
   resumed_from_cache: boolean;
+  requested_parser_id: string | null;
+  actual_parser_id: string | null;
+  extraction_run_id: string | null;
+  warning_count: number;
   error_type: string | null;
   error_message: string | null;
   duration_seconds: number;

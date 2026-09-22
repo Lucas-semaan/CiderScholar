@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import json
+from hashlib import sha256
 
 import httpx
 
 from app.config import FullTextConfig
 from app.database.sqlite import Database
+from app.ingestion.chunker import ScientificChunker
+from app.ingestion.native_pipeline import NativeTextIngestionService
 from app.updates.full_text import (
     DownloadedFullText,
     FullTextAuditRecord,
@@ -325,6 +328,18 @@ def test_harvest_retains_one_native_article_body_without_pdf_ingestion(
     database = Database(settings.paths.database_path)
     database.initialize()
     _insert_record(database, "record-1", "10.1371/example")
+    database.save_article_and_chunks(
+        {
+            "id": "article-1",
+            "sha256": "b" * 64,
+            "doi": "10.1371/example",
+            "title": "Existing article",
+            "pdf_path": "data/common/pdf/existing.pdf",
+            "validation_status": "validated",
+            "source": "local",
+        },
+        [],
+    )
     candidate = NativeFullTextCandidate(
         doi="10.1371/example",
         source="europe_pmc",
@@ -373,14 +388,19 @@ def test_harvest_retains_one_native_article_body_without_pdf_ingestion(
             )
 
     asset_path = tmp_path / "article.jats.xml"
-    asset_path.write_text("<article><body>Text</body></article>", encoding="utf-8")
+    asset_path.write_text(
+        """<article><front><article-meta><title-group><article-title>Native title</article-title>
+        </title-group></article-meta></front><body><sec><title>Results</title>
+        <p xml:id="result-1">Native result.</p></sec></body></article>""",
+        encoding="utf-8",
+    )
 
     def fake_download(_self, downloaded_candidate):
         assert downloaded_candidate == candidate
         return DownloadedFullText(
             path=asset_path,
             final_url=downloaded_candidate.url,
-            sha256="a" * 64,
+            sha256=sha256(asset_path.read_bytes()).hexdigest(),
             byte_count=asset_path.stat().st_size,
             media_type="application/xml",
         )
@@ -388,10 +408,29 @@ def test_harvest_retains_one_native_article_body_without_pdf_ingestion(
     monkeypatch.setattr("app.updates.full_text.FullTextAuditService", FakeAuditService)
     monkeypatch.setattr(FullTextDownloader, "download_native", fake_download)
 
-    _audit, harvest = FullTextHarvestService(settings, database).run()
+    indexed_article_ids: list[str] = []
+
+    def index_native_chunks(_settings, _database, article_ids) -> None:
+        indexed_article_ids.extend(article_ids)
+
+    _audit, harvest = FullTextHarvestService(
+        settings,
+        database,
+        native_ingester=NativeTextIngestionService(
+            database,
+            ScientificChunker(target_tokens=20, max_tokens=40, overlap_tokens=0),
+        ),
+        native_indexer=index_native_chunks,
+    ).run()
 
     assert harvest.native_downloaded == 1
-    assert harvest.ingested == 0
+    assert harvest.ingested == 1
+    assert indexed_article_ids == ["article-1"]
     with database.connect() as connection:
         state = connection.execute("SELECT state FROM native_full_text_assets").fetchone()[0]
     assert state == "downloaded"
+    assets = database.article_source_assets("article-1")
+    assert len(assets) == 1
+    assert assets[0]["kind"] == "jats_xml"
+    assert assets[0]["native_asset_id"] is not None
+    assert database.chunk_count("article-1") == 1

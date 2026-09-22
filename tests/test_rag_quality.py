@@ -218,6 +218,27 @@ def test_valid_citation_does_not_admit_an_unsupported_claim(dimension):
     assert verifier.removed_count == 1
 
 
+def test_supported_sentence_survives_an_unsupported_sentence_in_the_same_paragraph():
+    source = record()
+    verifier = ChatAnswerVerifier(ClaimVerifier(ClaimClient()))
+    answer = CiderEvidenceAnswer(
+        statements=[
+            CitedEvidenceStatement(
+                statement="A supported observation. An unsupported extrapolation.",
+                evidence_ids=["e1"],
+            )
+        ],
+        limitations=[],
+    )
+
+    checked = verifier.admit("Fermentation?", answer, {"e1": (source, source.passages[0])})
+
+    assert checked.status == "answerable"
+    assert [item.statement for item in checked.statements] == ["A supported observation."]
+    assert checked.statements[0].evidence_ids == ["e1"]
+    assert verifier.removed_count == 1
+
+
 def test_mechanism_introduction_and_limitations_are_also_verified():
     source = record()
     verifier = ChatAnswerVerifier(ClaimVerifier(ClaimClient()))

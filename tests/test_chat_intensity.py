@@ -54,7 +54,7 @@ def test_answer_effort_budgets_are_monotonic_and_bounded() -> None:
     assert balanced.max_vector_query_variants == 2
     assert deep.max_vector_query_variants == 2
     assert deep.max_retrieval_waves == 1
-    assert deep.mono_max_output_tokens == 4_096
+    assert deep.mono_max_output_tokens == 8_192
     assert deep.facet_max_output_tokens == 3_072
     assert deep.final_max_output_tokens == 4_096
     assert deep.max_vector_query_variants < deep.max_query_variants

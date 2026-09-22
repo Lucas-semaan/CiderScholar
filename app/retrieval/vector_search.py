@@ -9,7 +9,7 @@ from collections import OrderedDict
 from collections.abc import Sequence
 from hashlib import sha256
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 from qdrant_client import QdrantClient, models
@@ -122,8 +122,14 @@ class VectorSearchResult(BaseModel):
     article_id: str
     score: float
     section: str | None
-    page_start: int = Field(ge=1)
-    page_end: int = Field(ge=1)
+    page_start: int | None = Field(default=None, ge=1)
+    page_end: int | None = Field(default=None, ge=1)
+    locator_kind: Literal["page", "structural"] | None = None
+    section_path: str | None = None
+    paragraph_start: int | None = Field(default=None, ge=0)
+    paragraph_end: int | None = Field(default=None, ge=0)
+    xml_id_start: str | None = None
+    xml_id_end: str | None = None
     text: str
     scope: CorpusScope = CorpusScope.COMMON
 
@@ -635,9 +641,23 @@ class VectorSearchService:
                     article_id=reference.article_id,
                     score=reference.score,
                     section=chunk["section"],
-                    page_start=int(chunk["page_start"]),
-                    page_end=int(chunk["page_end"]),
-                    text=str(chunk["text"]),
+                    page_start=(
+                        int(chunk["locator_page_start"])
+                        if chunk["locator_page_start"] is not None
+                        else None
+                    ),
+                    page_end=(
+                        int(chunk["locator_page_end"])
+                        if chunk["locator_page_end"] is not None
+                        else None
+                    ),
+                    locator_kind=chunk["locator_kind"],
+                    section_path=chunk["section_path"],
+                    paragraph_start=chunk["paragraph_start"],
+                    paragraph_end=chunk["paragraph_end"],
+                    xml_id_start=chunk["xml_id_start"],
+                    xml_id_end=chunk["xml_id_end"],
+                    text=str(chunk["effective_text"]),
                 )
             )
         return results
@@ -740,9 +760,23 @@ class VectorSearchService:
                     article_id=reference.article_id,
                     score=reference.score,
                     section=chunk["section"],
-                    page_start=int(chunk["page_start"]),
-                    page_end=int(chunk["page_end"]),
-                    text=str(chunk["text"]),
+                    page_start=(
+                        int(chunk["locator_page_start"])
+                        if chunk["locator_page_start"] is not None
+                        else None
+                    ),
+                    page_end=(
+                        int(chunk["locator_page_end"])
+                        if chunk["locator_page_end"] is not None
+                        else None
+                    ),
+                    locator_kind=chunk["locator_kind"],
+                    section_path=chunk["section_path"],
+                    paragraph_start=chunk["paragraph_start"],
+                    paragraph_end=chunk["paragraph_end"],
+                    xml_id_start=chunk["xml_id_start"],
+                    xml_id_end=chunk["xml_id_end"],
+                    text=str(chunk["effective_text"]),
                 )
             )
         return results

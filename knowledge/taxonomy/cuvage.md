@@ -6,7 +6,7 @@ kind: "taxonomy"
 title: "Cuvage : vocabulaire candidat"
 language: "multilingual"
 authority: "proposal"
-provenance: [{"document":"docs/HOW_TO_WORK_ON_CIDERSCHOLAR.md","section":"§4 Rechercher et utiliser le RAG","revision_sha256":"355c44d3a1d0b3496f1fa55c59ecc484054ad3656c37aafa1a0ca94ef926ba03"},{"document":"app/retrieval/scientific_intent.py","section":"MASH_MACERATION_PROCESS et FALSE_FRIENDS","revision_sha256":"c1356c149efaa6b34ff648f413ef7359f8019505b440a92912f923557a415fdb"}]
+provenance: [{"document":"docs/HOW_TO_WORK_ON_CIDERSCHOLAR.md","section":"§4 Rechercher et utiliser le RAG","revision_sha256":"d1902afa3e5f0b59446bed54a01d37fcbf5ad6c798bd57ef164fde953571cf51"},{"document":"app/retrieval/scientific_intent.py","section":"MASH_MACERATION_PROCESS et FALSE_FRIENDS","revision_sha256":"c1356c149efaa6b34ff648f413ef7359f8019505b440a92912f923557a415fdb"}]
 depends_on: []
 stage: "planning"
 required: false
