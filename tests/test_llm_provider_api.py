@@ -25,6 +25,7 @@ def _use_test_dpapi(monkeypatch) -> None:
 def test_llm_provider_api_configures_custom_profile_without_exposing_key(
     settings, monkeypatch
 ) -> None:
+    settings.app.generation_provider_policy = "provider_selectable"
     _use_test_dpapi(monkeypatch)
     sentinel = "CIDERSCHOLAR-CUSTOM-LLM-SENTINEL-7f62a93d"
 
@@ -60,6 +61,7 @@ def test_llm_provider_api_configures_custom_profile_without_exposing_key(
 def test_llm_provider_api_rejects_unsafe_custom_endpoint_and_unknown_fields(
     settings, monkeypatch
 ) -> None:
+    settings.app.generation_provider_policy = "provider_selectable"
     _use_test_dpapi(monkeypatch)
 
     with TestClient(create_app(settings)) as client:
@@ -86,6 +88,7 @@ def test_llm_provider_api_rejects_unsafe_custom_endpoint_and_unknown_fields(
 
 
 def test_llm_provider_api_tests_then_activates_selected_provider(settings, monkeypatch) -> None:
+    settings.app.generation_provider_policy = "provider_selectable"
     _use_test_dpapi(monkeypatch)
     calls: list[str] = []
 
@@ -137,6 +140,7 @@ def test_llm_provider_api_tests_then_activates_selected_provider(settings, monke
 def test_active_custom_provider_uses_openai_compatible_models_and_chat(
     settings, monkeypatch
 ) -> None:
+    settings.app.generation_provider_policy = "provider_selectable"
     _use_test_dpapi(monkeypatch)
     requests: list[httpx.Request] = []
     store = LlmProviderStore(settings)
@@ -188,6 +192,7 @@ def test_active_custom_provider_uses_openai_compatible_models_and_chat(
 def test_llm_provider_api_delete_custom_clears_profile_and_reselects_argo(
     settings, monkeypatch
 ) -> None:
+    settings.app.generation_provider_policy = "provider_selectable"
     _use_test_dpapi(monkeypatch)
 
     with TestClient(create_app(settings)) as client:

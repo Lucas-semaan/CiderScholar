@@ -70,6 +70,7 @@ export interface ChatJobSubmitResponse {
 export interface ChatbotSource {
   record_id: string;
   origin: "local_rag" | "external_api";
+  source_family?: "scientific_publication" | "ascocid_knowledge";
   evidence_level: "abstract" | "full_text";
   article_id: string | null;
   chunk_ids: number[];
@@ -85,6 +86,32 @@ export interface ChatbotSource {
   url: string | null;
   local_pdf_url: string | null;
   snippet: string;
+}
+
+export interface ChatbotCitationEvidence {
+  evidence_id: string;
+  snippet: string;
+  chunk_id: number | null;
+  section: string | null;
+  page_start: number | null;
+  page_end: number | null;
+  section_path: string | null;
+  paragraph_start: number | null;
+  paragraph_end: number | null;
+  figure_label: string | null;
+}
+
+export interface ChatbotCitationAnchor {
+  citation_id: string;
+  display_index: number;
+  label: string;
+  record_id: string;
+  source_family: "scientific_publication" | "ascocid_knowledge";
+  article_id: string | null;
+  title: string;
+  evidence: ChatbotCitationEvidence[];
+  local_pdf_url: string | null;
+  source_url: string | null;
 }
 
 export interface ChatbotFacetDraft {
@@ -177,6 +204,7 @@ export interface ChatbotResponse {
   retrieval_query: string;
   answer_markdown: string;
   sources: ChatbotSource[];
+  citation_anchors?: ChatbotCitationAnchor[];
   warnings: string[];
   model: string;
   local_result_count: number;

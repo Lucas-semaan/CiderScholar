@@ -2603,6 +2603,119 @@ class Database:
                 )
             )
 
+    def upsert_ascocid_wiki_document(
+        self,
+        *,
+        document_id: str,
+        relative_path: str,
+        filename: str,
+        source_sha256: str,
+        article_id: str,
+        indexed_file_path: str,
+        indexed_file_sha256: str,
+        state: Literal["indexed", "review", "failed"] = "indexed",
+        error_type: str | None = None,
+        error_message: str | None = None,
+    ) -> None:
+        """Link one versioned Ascocid source file to SQLite-authoritative evidence."""
+
+        cleaned_id = _validate_extraction_run_text(
+            document_id, field_name="Ascocid document ID", maximum=128
+        )
+        cleaned_relative_path = _validate_extraction_run_text(
+            relative_path, field_name="Ascocid relative path", maximum=4_000
+        )
+        cleaned_filename = _validate_extraction_run_text(
+            filename, field_name="Ascocid filename", maximum=500
+        )
+        cleaned_article_id = _validate_extraction_run_text(
+            article_id, field_name="Ascocid article ID", maximum=300
+        )
+        cleaned_indexed_path = _validate_extraction_run_text(
+            indexed_file_path, field_name="Ascocid indexed file path", maximum=4_000
+        )
+        _validate_extraction_run_hash(source_sha256, field_name="Ascocid source SHA-256")
+        _validate_extraction_run_hash(
+            indexed_file_sha256, field_name="Ascocid indexed file SHA-256"
+        )
+        if state not in {"indexed", "review", "failed"}:
+            raise ValueError("Ascocid document state is invalid")
+        if (error_type is None) != (error_message is None):
+            raise ValueError("Ascocid diagnostics must be both present or absent")
+        if error_type is not None and error_message is not None:
+            error_type, error_message = _validate_extraction_run_diagnostic(
+                error_type, error_message
+            )
+        with closing(self.connect()) as connection, connection:
+            connection.execute(
+                """
+                INSERT INTO ascocid_wiki_documents(
+                    id, relative_path, filename, source_sha256, article_id,
+                    indexed_file_path, indexed_file_sha256, state, error_type, error_message
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(relative_path) DO UPDATE SET
+                    filename = excluded.filename,
+                    source_sha256 = excluded.source_sha256,
+                    article_id = excluded.article_id,
+                    indexed_file_path = excluded.indexed_file_path,
+                    indexed_file_sha256 = excluded.indexed_file_sha256,
+                    state = excluded.state,
+                    error_type = excluded.error_type,
+                    error_message = excluded.error_message,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (
+                    cleaned_id,
+                    cleaned_relative_path,
+                    cleaned_filename,
+                    source_sha256,
+                    cleaned_article_id,
+                    cleaned_indexed_path,
+                    indexed_file_sha256,
+                    state,
+                    error_type,
+                    error_message,
+                ),
+            )
+
+    def ascocid_wiki_documents(self, article_ids: Sequence[str] | None = None) -> list[sqlite3.Row]:
+        """Return active Ascocid aliases in deterministic citation order."""
+
+        predicate = "WHERE w.state = 'indexed'"
+        parameters: list[str] = []
+        if article_ids is not None:
+            unique = list(dict.fromkeys(article_ids))
+            if not unique:
+                return []
+            placeholders = ",".join("?" for _ in unique)
+            predicate += f" AND w.article_id IN ({placeholders})"
+            parameters.extend(unique)
+        with closing(self.connect()) as connection:
+            table_exists = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+                ("ascocid_wiki_documents",),
+            ).fetchone()
+            if table_exists is None:
+                return []
+            return list(
+                connection.execute(
+                    f"""
+                    SELECT w.*, a.validation_status
+                    FROM ascocid_wiki_documents AS w
+                    JOIN articles AS a ON a.id = w.article_id
+                    {predicate}
+                      AND a.validation_status IN ('validated', 'indexed')
+                    ORDER BY w.article_id, w.relative_path
+                    """,
+                    parameters,
+                )
+            )
+
+    def ascocid_wiki_article_ids(self) -> list[str]:
+        """Return distinct searchable article IDs represented in the Ascocid wiki."""
+
+        return list(dict.fromkeys(str(row["article_id"]) for row in self.ascocid_wiki_documents()))
+
     def list_ingestion_jobs(
         self, *, states: Sequence[str] | None = None, limit: int = 200
     ) -> list[sqlite3.Row]:

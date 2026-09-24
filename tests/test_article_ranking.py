@@ -5,8 +5,14 @@ from contextlib import closing
 import pytest
 
 from app.database.sqlite import Database
+from app.deep_research.query_variants import QueryVariant
 from app.retrieval.article_ranking import ArticleRankingService
-from app.retrieval.hybrid_search import HybridChunkResult, HybridSearchResponse
+from app.retrieval.hybrid_search import (
+    HybridChunkResult,
+    HybridOmittedCandidateTrace,
+    HybridSearchResponse,
+)
+from app.services.workflows import _lexical_full_text_ranking
 
 
 def _seed_article(
@@ -135,6 +141,43 @@ def test_article_score_aggregates_fragments_and_metadata_relevance(settings) -> 
     assert article.base_score == 0.875
     assert article.top_chunk_ids == chunk_ids
     assert article.page_ranges == ["2", "3", "4"]
+    assert len(response.candidate_traces) == 4
+    assert response.candidate_traces[0].article_id == "article-1"
+    assert len(response.candidate_traces[0].text_sha256) == 64
+
+
+def test_lexical_variant_mismatch_is_traced_as_omitted(settings) -> None:
+    database = Database(settings.paths.database_path)
+    database.initialize()
+    _seed_article(
+        database,
+        "article-999",
+        title="Temperature study",
+        abstract="Fermentation temperature result.",
+        chunks=["Fermentation temperature result."],
+    )
+
+    response = _lexical_full_text_ranking(
+        settings,
+        database,
+        query="temperature TargetMarker",
+        variants=[
+            QueryVariant(
+                text="temperature TargetMarker",
+                language="en",
+                derivation="matched_terms",
+                anchor_terms=["TargetMarker"],
+            )
+        ],
+        article_count=1,
+        central_concepts=None,
+        article_ids=None,
+        candidate_limit=10,
+    )
+
+    assert response.articles == []
+    assert response.candidate_traces[-1].decision == "omitted"
+    assert response.candidate_traces[-1].reason == "variant_mismatch"
 
 
 def test_selects_exactly_twenty_distinct_articles_from_twenty_five(settings) -> None:
@@ -296,6 +339,16 @@ def test_article_search_propagates_hybrid_pool_counters(settings) -> None:
                 original_query="fermentation",
                 queries=["fermentation", "cider kinetics"],
                 results=[result],
+                omitted_candidate_traces=[
+                    HybridOmittedCandidateTrace(
+                        article_id="article-1",
+                        chunk_id=chunk_id + 100,
+                        rank=5,
+                        score=0.1,
+                        text_sha256="f" * 64,
+                        reason="fusion_limit",
+                    )
+                ],
                 lexical_candidates=17,
                 vector_candidates=13,
                 unique_candidates=21,
@@ -320,3 +373,6 @@ def test_article_search_propagates_hybrid_pool_counters(settings) -> None:
     assert response.dense_candidate_count == 13
     assert response.rrf_unique_candidate_count == 21
     assert response.hybrid_candidate_count == 1
+    assert response.candidate_traces[0].chunk_id == chunk_id
+    assert response.candidate_traces[-1].decision == "omitted"
+    assert response.candidate_traces[-1].reason == "fusion_limit"

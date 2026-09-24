@@ -175,6 +175,9 @@ def enqueue_chat_job(
                     analyze_figures=payload.analyze_figures,
                     interaction_mode=payload.interaction_mode,
                     answer_effort=payload.answer_effort,
+                    expert_memory_pin=repository.resolve_expert_memory_pin(
+                        mode=settings.expert_memory.mode
+                    ),
                     evaluation_run_id=payload.evaluation_run_id,
                     evaluation_question_id=payload.evaluation_question_id,
                     evaluation_profile=payload.evaluation_profile,

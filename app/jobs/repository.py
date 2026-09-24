@@ -22,6 +22,8 @@ from app.jobs.contracts import (
     ChatAnswerPayload,
     CorpusIngestionPayload,
     DeepResearchPayload,
+    ExpertImprovementPayload,
+    ExpertMemoryPin,
     JobErrorDisposition,
     JobErrorKind,
     JobPayload,
@@ -34,6 +36,7 @@ from app.jobs.contracts import (
     WeeklyMaintenancePayload,
     retry_delay_after,
 )
+from app.knowledge.trace import ExpertRunManifest
 
 
 def _timestamp(value: datetime) -> str:
@@ -71,6 +74,10 @@ class EvaluationQuestionAlreadySubmittedError(RuntimeError):
 
 class EvaluationRunBusyError(RuntimeError):
     """Another durable job is active while an evaluation cell is submitted."""
+
+
+class ExpertImprovementConflictError(RuntimeError):
+    """An expert-improvement idempotency key was reused with another payload."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -181,18 +188,25 @@ class JobRepository:
         self.database.initialize()
 
     @staticmethod
-    def _assert_evaluation_queue_idle(connection: sqlite3.Connection) -> None:
+    def _assert_evaluation_queue_idle(
+        connection: sqlite3.Connection,
+        *,
+        exclude_job_id: UUID | None = None,
+    ) -> None:
+        exclusion = " AND id != ?" if exclude_job_id is not None else ""
+        parameters: tuple[object, ...] = (
+            JobState.QUEUED.value,
+            JobState.RUNNING.value,
+            JobState.CANCEL_REQUESTED.value,
+            *((str(exclude_job_id),) if exclude_job_id is not None else ()),
+        )
         active = connection.execute(
-            """
+            f"""
             SELECT id FROM jobs
-            WHERE state IN (?, ?, ?)
+            WHERE state IN (?, ?, ?){exclusion}
             LIMIT 1
             """,
-            (
-                JobState.QUEUED.value,
-                JobState.RUNNING.value,
-                JobState.CANCEL_REQUESTED.value,
-            ),
+            parameters,
         ).fetchone()
         if active is not None:
             raise EvaluationRunBusyError(
@@ -203,10 +217,12 @@ class JobRepository:
     def _assert_evaluation_submission(
         connection: sqlite3.Connection,
         payload: ChatAnswerPayload,
+        *,
+        exclude_job_id: UUID | None = None,
     ) -> None:
         if payload.evaluation_run_id is None:
             return
-        JobRepository._assert_evaluation_queue_idle(connection)
+        JobRepository._assert_evaluation_queue_idle(connection, exclude_job_id=exclude_job_id)
         duplicate = connection.execute(
             """
             SELECT id FROM jobs
@@ -435,6 +451,55 @@ class JobRepository:
             raise RuntimeError("queued job disappeared before commit")
         return self._row_to_record(row)
 
+    def enqueue_expert_improvement(
+        self,
+        payload: ExpertImprovementPayload,
+        *,
+        user_message_id: UUID,
+        priority: int = 80,
+        now: datetime | None = None,
+    ) -> JobRecord:
+        """Queue a private diagnosis without adding a conversation message."""
+
+        queued_at = now or datetime.now(UTC)
+        timestamp = _timestamp(queued_at)
+        payload_json = payload.model_dump_json()
+        with self.database.transaction() as connection:
+            anchor = connection.execute(
+                """
+                SELECT conversation_id, role FROM chat_messages WHERE id = ?
+                """,
+                (str(user_message_id),),
+            ).fetchone()
+            if anchor is None or anchor["role"] != "assistant":
+                raise ValueError("expert-improvement jobs require an assistant message anchor")
+            if str(anchor["conversation_id"]) != str(payload.conversation_id):
+                raise ValueError("expert-improvement conversation does not match the message")
+            existing = connection.execute(
+                """
+                SELECT * FROM jobs
+                WHERE conversation_id = ? AND client_request_id = ?
+                """,
+                (str(payload.conversation_id), str(payload.client_request_id)),
+            ).fetchone()
+            if existing is not None:
+                if existing["payload_json"] != payload_json:
+                    raise ExpertImprovementConflictError(
+                        "expert-improvement client request id was reused"
+                    )
+                return self._row_to_record(existing)
+            row = self._insert_queued_job(
+                connection,
+                job_id=uuid4(),
+                job_type=JobType.EXPERT_IMPROVEMENT,
+                payload=payload,
+                user_message_id=user_message_id,
+                priority=priority,
+                available_at=timestamp,
+                created_at=timestamp,
+            )
+        return self._row_to_record(row)
+
     def enqueue_chat(
         self,
         payload: ChatAnswerPayload | DeepResearchPayload,
@@ -536,6 +601,9 @@ class JobRepository:
         profile: str,
         message: str,
         client_request_id: UUID,
+        expert_memory_pin: ExpertMemoryPin | None = None,
+        exclude_active_job_id: UUID | None = None,
+        orchestrator_parent_job_id: UUID | None = None,
         priority: int = 100,
         now: datetime | None = None,
     ) -> EnqueuedChat:
@@ -554,6 +622,8 @@ class JobRepository:
             evaluation_run_id=run_id,
             evaluation_question_id=question_id,
             evaluation_profile=profile,
+            expert_memory_pin=expert_memory_pin or ExpertMemoryPin(),
+            orchestrator_parent_job_id=orchestrator_parent_job_id,
         )
         with self.database.transaction() as connection:
             existing = connection.execute(
@@ -568,9 +638,18 @@ class JobRepository:
                 (JobType.CHAT_ANSWER.value, run_id, question_id, profile),
             ).fetchone()
             if existing is not None:
-                if existing["client_request_id"] != str(client_request_id):
+                existing_payload = self._row_to_record(existing).payload
+                if (
+                    existing["client_request_id"] != str(client_request_id)
+                    or not isinstance(existing_payload, ChatAnswerPayload)
+                    or existing_payload.message != payload.message
+                    or existing_payload.expert_memory_pin != payload.expert_memory_pin
+                    or existing_payload.orchestrator_parent_job_id
+                    != payload.orchestrator_parent_job_id
+                ):
                     raise EvaluationQuestionAlreadySubmittedError(
-                        "this evaluation run/profile/question cell has already been submitted"
+                        "this evaluation run/profile/question cell has already been submitted "
+                        "with another immutable request"
                     )
                 user_message = connection.execute(
                     """
@@ -588,7 +667,11 @@ class JobRepository:
                     user_message_created_at=datetime.fromisoformat(user_message["created_at"]),
                     created=False,
                 )
-            self._assert_evaluation_submission(connection, payload)
+            self._assert_evaluation_submission(
+                connection,
+                payload,
+                exclude_job_id=exclude_active_job_id,
+            )
             title = f"[{profile.upper()} {question_id}] {' '.join(message.split())}"[:120]
             connection.execute(
                 """
@@ -880,6 +963,49 @@ class JobRepository:
             priority=original.priority,
             now=now,
             enforce_active_limit=True,
+        )
+
+    def resolve_expert_memory_pin(self, *, mode: str) -> ExpertMemoryPin:
+        """Resolve the eligible release identity before constructing a chat payload."""
+
+        normalized_mode = mode.strip().lower()
+        if normalized_mode == "off":
+            return ExpertMemoryPin()
+        if normalized_mode not in {"shadow", "active"}:
+            raise ValueError("unsupported expert memory mode")
+        with closing(self.database.connect()) as connection:
+            active = connection.execute(
+                """
+                SELECT a.release_id, r.package_sha256, r.state
+                FROM expert_active_release AS a
+                LEFT JOIN expert_releases AS r ON r.id = a.release_id
+                WHERE a.singleton = 1
+                """
+            ).fetchone()
+            if active is None or active["release_id"] is None or active["state"] != "eligible":
+                raise RuntimeError("expert memory mode requires an eligible active release")
+            recipe = connection.execute(
+                """
+                SELECT content_sha256, payload_json
+                FROM expert_release_items
+                WHERE release_id = ? AND kind = 'recipe'
+                ORDER BY item_id
+                LIMIT 1
+                """,
+                (active["release_id"],),
+            ).fetchone()
+        recipe_version = None
+        recipe_sha256 = None
+        if recipe is not None:
+            recipe_payload = json.loads(recipe["payload_json"])
+            recipe_version = str(recipe_payload["data"]["recipe_version"])
+            recipe_sha256 = str(recipe["content_sha256"])
+        return ExpertMemoryPin(
+            mode=normalized_mode,
+            release_id=UUID(active["release_id"]),
+            release_sha256=active["package_sha256"],
+            recipe_version=recipe_version,
+            recipe_sha256=recipe_sha256,
         )
 
     def list_active(self, conversation_id: UUID) -> list[JobRecord]:
@@ -1202,6 +1328,7 @@ class JobRepository:
         assistant_content: str,
         assistant_response: dict[str, Any],
         response_time_milliseconds: float,
+        trace_manifest: ExpertRunManifest | None = None,
         now: datetime | None = None,
     ) -> JobRecord | None:
         """Persist the assistant message and job success in one transaction."""
@@ -1218,7 +1345,7 @@ class JobRepository:
         with self.database.transaction() as connection:
             current = connection.execute(
                 """
-                SELECT conversation_id FROM jobs
+                SELECT conversation_id, attempt FROM jobs
                 WHERE id = ? AND worker_id = ? AND state = ?
                   AND lease_expires_at >= ?
                 """,
@@ -1255,6 +1382,12 @@ class JobRepository:
                     completed_timestamp,
                 ),
             )
+            if trace_manifest is not None and not self._save_trace_manifest(
+                connection,
+                trace_manifest,
+                result_message_id=result_message_id,
+            ):
+                raise RuntimeError("trace manifest does not belong to the leased job attempt")
             connection.execute(
                 "UPDATE chat_conversations SET updated_at = ? WHERE id = ?",
                 (completed_timestamp, current["conversation_id"]),
@@ -1267,12 +1400,165 @@ class JobRepository:
             )
         return self._row_to_record(row)
 
+    def save_trace_checkpoint(
+        self,
+        job_id: UUID,
+        *,
+        worker_id: str,
+        manifest: ExpertRunManifest,
+        now: datetime | None = None,
+    ) -> bool:
+        """Persist one manifest checkpoint only while the caller owns the lease."""
+
+        if manifest.job_id != job_id:
+            raise ValueError("trace manifest job_id does not match the requested job")
+        checkpointed_at = now or datetime.now(UTC)
+        checkpoint_timestamp = _timestamp(checkpointed_at)
+        with self.database.transaction() as connection:
+            current = connection.execute(
+                """
+                SELECT attempt FROM jobs
+                WHERE id = ? AND worker_id = ? AND state IN (?, ?)
+                  AND lease_expires_at >= ?
+                """,
+                (
+                    str(job_id),
+                    worker_id,
+                    JobState.RUNNING.value,
+                    JobState.CANCEL_REQUESTED.value,
+                    checkpoint_timestamp,
+                ),
+            ).fetchone()
+            if current is None or int(current["attempt"]) != manifest.attempt:
+                return False
+            return self._save_trace_manifest(
+                connection,
+                manifest,
+                result_message_id=None,
+                updated_at=checkpoint_timestamp,
+            )
+
+    def trace_manifest(
+        self,
+        job_id: UUID,
+        *,
+        attempt: int,
+    ) -> ExpertRunManifest | None:
+        """Load one private manifest identity for resuming the same attempt."""
+
+        with closing(self.database.connect()) as connection:
+            row = connection.execute(
+                """
+                SELECT payload_json FROM expert_run_manifests
+                WHERE job_id = ? AND attempt = ?
+                """,
+                (str(job_id), attempt),
+            ).fetchone()
+        return (
+            ExpertRunManifest.model_validate_json(row["payload_json"]) if row is not None else None
+        )
+
+    @staticmethod
+    def _save_trace_manifest(
+        connection: sqlite3.Connection,
+        manifest: ExpertRunManifest,
+        *,
+        result_message_id: UUID | None,
+        updated_at: str | None = None,
+    ) -> bool:
+        """Insert or update one attempt, refusing stale workers and identity changes."""
+
+        payload_json = manifest.model_dump_json()
+        if len(payload_json.encode("utf-8")) > 2 * 1024 * 1024:
+            raise ValueError("trace manifest exceeds the 2 MiB persistence limit")
+        existing = connection.execute(
+            """
+            SELECT id FROM expert_run_manifests
+            WHERE job_id = ? AND attempt = ?
+            """,
+            (str(manifest.job_id), manifest.attempt),
+        ).fetchone()
+        if existing is not None and existing["id"] != str(manifest.run_id):
+            return False
+        timestamp = updated_at or _timestamp(manifest.updated_at)
+        values = (
+            str(manifest.run_id),
+            str(manifest.job_id),
+            manifest.attempt,
+            str(manifest.release_id) if manifest.release_id is not None else None,
+            payload_json,
+            manifest.manifest_sha256(),
+            manifest.state,
+            str(result_message_id) if result_message_id is not None else None,
+            _timestamp(manifest.created_at),
+            timestamp,
+        )
+        if existing is None:
+            connection.execute(
+                """
+                INSERT INTO expert_run_manifests(
+                    id, job_id, attempt, release_id, payload_json, manifest_sha256,
+                    state, result_message_id, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                values,
+            )
+        else:
+            connection.execute(
+                """
+                UPDATE expert_run_manifests
+                SET release_id = ?, payload_json = ?, manifest_sha256 = ?, state = ?,
+                    result_message_id = COALESCE(?, result_message_id), updated_at = ?
+                WHERE job_id = ? AND attempt = ? AND id = ?
+                """,
+                values[3:8] + (timestamp, str(manifest.job_id), manifest.attempt, values[0]),
+            )
+        return True
+
+    @classmethod
+    def _finalize_trace_manifest(
+        cls,
+        connection: sqlite3.Connection,
+        *,
+        job_id: UUID,
+        attempt: int,
+        state: str,
+        result_message_id: UUID | None,
+        updated_at: str,
+    ) -> None:
+        """Close an existing attempt trace inside its job transition transaction."""
+
+        row = connection.execute(
+            """
+            SELECT payload_json FROM expert_run_manifests
+            WHERE job_id = ? AND attempt = ?
+            """,
+            (str(job_id), attempt),
+        ).fetchone()
+        if row is None:
+            return
+        manifest = ExpertRunManifest.model_validate_json(row["payload_json"])
+        final = manifest.model_copy(
+            update={
+                "state": state,
+                "output": manifest.output.model_copy(update={"state": state}),
+                "updated_at": datetime.fromisoformat(updated_at),
+            }
+        )
+        if not cls._save_trace_manifest(
+            connection,
+            final,
+            result_message_id=result_message_id,
+            updated_at=updated_at,
+        ):
+            raise RuntimeError("trace manifest identity changed during terminal transition")
+
     def _mark_succeeded(
         self,
         connection: sqlite3.Connection,
         *,
         job_id: UUID,
-        result_message_id: UUID,
+        result_message_id: UUID | None,
         completed_at: str,
     ) -> sqlite3.Row:
         connection.execute(
@@ -1286,7 +1572,7 @@ class JobRepository:
             (
                 JobState.SUCCEEDED.value,
                 JobStep.PERSISTENCE.value,
-                str(result_message_id),
+                str(result_message_id) if result_message_id is not None else None,
                 completed_at,
                 completed_at,
                 str(job_id),
@@ -1378,6 +1664,15 @@ class JobRepository:
                     diagnostic_code=diagnostic_code,
                 )
 
+            self._finalize_trace_manifest(
+                connection,
+                job_id=job_id,
+                attempt=attempt,
+                state="failed",
+                result_message_id=result_message_id,
+                updated_at=failed_timestamp,
+            )
+
             connection.execute(
                 """
                 UPDATE jobs
@@ -1407,6 +1702,41 @@ class JobRepository:
                 created_at=failed_timestamp,
             )
             row = connection.execute("SELECT * FROM jobs WHERE id = ?", (str(job_id),)).fetchone()
+        return self._row_to_record(row)
+
+    def complete_without_result(
+        self,
+        job_id: UUID,
+        *,
+        worker_id: str,
+        now: datetime | None = None,
+    ) -> JobRecord | None:
+        """Complete a private job without creating a chat message."""
+
+        completed_at = now or datetime.now(UTC)
+        completed_timestamp = _timestamp(completed_at)
+        with self.database.transaction() as connection:
+            current = connection.execute(
+                """
+                SELECT id FROM jobs
+                WHERE id = ? AND worker_id = ? AND state = ?
+                  AND lease_expires_at >= ?
+                """,
+                (
+                    str(job_id),
+                    worker_id,
+                    JobState.RUNNING.value,
+                    completed_timestamp,
+                ),
+            ).fetchone()
+            if current is None:
+                return None
+            row = self._mark_succeeded(
+                connection,
+                job_id=job_id,
+                result_message_id=None,
+                completed_at=completed_timestamp,
+            )
         return self._row_to_record(row)
 
     def defer_for_quota(
@@ -1463,6 +1793,66 @@ class JobRepository:
                 state=JobState.QUEUED,
                 step=JobStep(current["step"]),
                 technical_message="job.quota_deferred",
+                created_at=deferred_timestamp,
+            )
+            row = connection.execute("SELECT * FROM jobs WHERE id = ?", (str(job_id),)).fetchone()
+        return self._row_to_record(row)
+
+    def defer_without_attempt(
+        self,
+        job_id: UUID,
+        *,
+        worker_id: str,
+        retry_at: datetime,
+        technical_message: str,
+        now: datetime | None = None,
+    ) -> JobRecord | None:
+        """Return an owned job to the queue for normal bounded orchestration waiting."""
+
+        deferred_at = now or datetime.now(UTC)
+        if retry_at <= deferred_at:
+            raise ValueError("deferred retry_at must be in the future")
+        if not 1 <= len(technical_message) <= 300:
+            raise ValueError("deferred technical message must contain 1-300 characters")
+        deferred_timestamp = _timestamp(deferred_at)
+        retry_timestamp = _timestamp(retry_at)
+        with self.database.transaction() as connection:
+            current = connection.execute(
+                """
+                SELECT step FROM jobs
+                WHERE id = ? AND worker_id = ? AND state = ?
+                  AND lease_expires_at >= ?
+                """,
+                (
+                    str(job_id),
+                    worker_id,
+                    JobState.RUNNING.value,
+                    deferred_timestamp,
+                ),
+            ).fetchone()
+            if current is None:
+                return None
+            connection.execute(
+                """
+                UPDATE jobs
+                SET state = ?, attempt = MAX(attempt - 1, 0), available_at = ?,
+                    worker_id = NULL, lease_expires_at = NULL, heartbeat_at = NULL,
+                    error_code = NULL, error_message = NULL, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    JobState.QUEUED.value,
+                    retry_timestamp,
+                    deferred_timestamp,
+                    str(job_id),
+                ),
+            )
+            self._insert_event(
+                connection,
+                job_id=job_id,
+                state=JobState.QUEUED,
+                step=JobStep(current["step"]),
+                technical_message=technical_message,
                 created_at=deferred_timestamp,
             )
             row = connection.execute("SELECT * FROM jobs WHERE id = ?", (str(job_id),)).fetchone()
@@ -1556,6 +1946,142 @@ class JobRepository:
             row = connection.execute("SELECT * FROM jobs WHERE id = ?", (str(job_id),)).fetchone()
         return self._row_to_record(row)
 
+    def cancel_orchestrator(
+        self,
+        job_id: UUID,
+        *,
+        now: datetime | None = None,
+    ) -> JobRecord | None:
+        """Cancel an orchestration parent and propagate it to its evaluation cells."""
+
+        cancelled_at = now or datetime.now(UTC)
+        cancelled_timestamp = _timestamp(cancelled_at)
+        with self.database.transaction() as connection:
+            current = connection.execute(
+                "SELECT * FROM jobs WHERE id = ? AND state IN (?, ?)",
+                (str(job_id), JobState.QUEUED.value, JobState.RUNNING.value),
+            ).fetchone()
+            if current is None:
+                return None
+            parent_payload = ExpertImprovementPayload.model_validate_json(current["payload_json"])
+            if parent_payload.operation != "orchestrate":
+                raise ValueError("only orchestration jobs support tree cancellation")
+
+            parent_state = JobState(current["state"])
+            if parent_state is JobState.QUEUED:
+                connection.execute(
+                    """
+                    UPDATE jobs
+                    SET state = ?, updated_at = ?, completed_at = ?
+                    WHERE id = ? AND state = ?
+                    """,
+                    (
+                        JobState.CANCELLED.value,
+                        cancelled_timestamp,
+                        cancelled_timestamp,
+                        str(job_id),
+                        JobState.QUEUED.value,
+                    ),
+                )
+                self._insert_event(
+                    connection,
+                    job_id=job_id,
+                    state=JobState.CANCELLED,
+                    step=JobStep(current["step"]),
+                    technical_message="job.cancelled",
+                    created_at=cancelled_timestamp,
+                )
+            else:
+                connection.execute(
+                    "UPDATE jobs SET state = ?, updated_at = ? WHERE id = ? AND state = ?",
+                    (
+                        JobState.CANCEL_REQUESTED.value,
+                        cancelled_timestamp,
+                        str(job_id),
+                        JobState.RUNNING.value,
+                    ),
+                )
+                self._insert_event(
+                    connection,
+                    job_id=job_id,
+                    state=JobState.CANCEL_REQUESTED,
+                    step=JobStep(current["step"]),
+                    technical_message="job.cancel_requested",
+                    created_at=cancelled_timestamp,
+                )
+
+            children = connection.execute(
+                """
+                SELECT * FROM jobs
+                WHERE type = ?
+                  AND json_extract(payload_json, '$.orchestrator_parent_job_id') = ?
+                  AND state IN (?, ?, ?)
+                """,
+                (
+                    JobType.CHAT_ANSWER.value,
+                    str(job_id),
+                    JobState.QUEUED.value,
+                    JobState.RUNNING.value,
+                    JobState.CANCEL_REQUESTED.value,
+                ),
+            ).fetchall()
+            for child in children:
+                child_id = UUID(child["id"])
+                child_state = JobState(child["state"])
+                if child_state is JobState.QUEUED:
+                    result_message_id = self._persist_terminal_notice(
+                        connection,
+                        job_id=child_id,
+                        conversation_id=child["conversation_id"],
+                        state=JobState.CANCELLED,
+                        content=(
+                            "**Traitement annulé.** Aucune réponse scientifique n'a été produite "
+                            "pour cette question."
+                        ),
+                        created_at=cancelled_timestamp,
+                    )
+                    connection.execute(
+                        """
+                        UPDATE jobs
+                        SET state = ?, result_message_id = ?, updated_at = ?, completed_at = ?
+                        WHERE id = ? AND state = ?
+                        """,
+                        (
+                            JobState.CANCELLED.value,
+                            str(result_message_id),
+                            cancelled_timestamp,
+                            cancelled_timestamp,
+                            str(child_id),
+                            JobState.QUEUED.value,
+                        ),
+                    )
+                    child_event_state = JobState.CANCELLED
+                    child_message = "job.cancelled"
+                elif child_state is JobState.RUNNING:
+                    connection.execute(
+                        "UPDATE jobs SET state = ?, updated_at = ? WHERE id = ? AND state = ?",
+                        (
+                            JobState.CANCEL_REQUESTED.value,
+                            cancelled_timestamp,
+                            str(child_id),
+                            JobState.RUNNING.value,
+                        ),
+                    )
+                    child_event_state = JobState.CANCEL_REQUESTED
+                    child_message = "job.cancel_requested"
+                else:
+                    continue
+                self._insert_event(
+                    connection,
+                    job_id=child_id,
+                    state=child_event_state,
+                    step=JobStep(child["step"]),
+                    technical_message=child_message,
+                    created_at=cancelled_timestamp,
+                )
+            row = connection.execute("SELECT * FROM jobs WHERE id = ?", (str(job_id),)).fetchone()
+        return self._row_to_record(row)
+
     def acknowledge_cancellation(
         self,
         job_id: UUID,
@@ -1570,7 +2096,7 @@ class JobRepository:
         with self.database.transaction() as connection:
             current = connection.execute(
                 """
-                SELECT step, type, conversation_id FROM jobs
+                SELECT attempt, step, type, conversation_id FROM jobs
                 WHERE id = ? AND state = ? AND worker_id = ?
                   AND lease_expires_at >= ?
                 """,
@@ -1596,6 +2122,14 @@ class JobRepository:
                     ),
                     created_at=cancelled_timestamp,
                 )
+            self._finalize_trace_manifest(
+                connection,
+                job_id=job_id,
+                attempt=int(current["attempt"]),
+                state="cancelled",
+                result_message_id=result_message_id,
+                updated_at=cancelled_timestamp,
+            )
             connection.execute(
                 """
                 UPDATE jobs
@@ -1790,6 +2324,12 @@ class JobRepository:
         available_at: str,
         created_at: str,
     ) -> sqlite3.Row:
+        if isinstance(payload, ChatAnswerPayload):
+            self._assert_expert_memory_pin(
+                connection,
+                payload.expert_memory_pin,
+                allow_non_active_release=payload.evaluation_run_id is not None,
+            )
         active_evaluation = connection.execute(
             """
             SELECT id FROM jobs
@@ -1835,6 +2375,70 @@ class JobRepository:
         return row
 
     @staticmethod
+    def _assert_expert_memory_pin(
+        connection: sqlite3.Connection,
+        pin: ExpertMemoryPin,
+        *,
+        allow_non_active_release: bool = False,
+    ) -> None:
+        """Refuse a payload whose release changed between resolution and enqueue."""
+
+        if pin.mode == "off":
+            return
+        if allow_non_active_release:
+            release = connection.execute(
+                "SELECT id, package_sha256, state FROM expert_releases WHERE id = ?",
+                (str(pin.release_id),),
+            ).fetchone()
+            if (
+                release is None
+                or release["state"] not in {"candidate", "eligible"}
+                or release["package_sha256"] != pin.release_sha256
+            ):
+                raise RuntimeError("expert memory evaluation release changed before enqueue")
+            release_id = release["id"]
+        else:
+            active = connection.execute(
+                """
+                SELECT a.release_id, r.package_sha256, r.state
+                FROM expert_active_release AS a
+                LEFT JOIN expert_releases AS r ON r.id = a.release_id
+                WHERE a.singleton = 1
+                """
+            ).fetchone()
+            if (
+                active is None
+                or active["state"] != "eligible"
+                or active["release_id"] != str(pin.release_id)
+                or active["package_sha256"] != pin.release_sha256
+            ):
+                raise RuntimeError("expert memory active release changed before enqueue")
+            release_id = active["release_id"]
+        if pin.recipe_sha256 is not None:
+            recipe = connection.execute(
+                """
+                SELECT content_sha256, payload_json
+                FROM expert_release_items
+                WHERE release_id = ? AND kind = 'recipe'
+                ORDER BY item_id
+                LIMIT 1
+                """,
+                (release_id,),
+            ).fetchone()
+            recipe_version = None
+            if recipe is not None:
+                try:
+                    recipe_version = json.loads(recipe["payload_json"])["data"]["recipe_version"]
+                except (TypeError, ValueError, KeyError):
+                    recipe_version = None
+            if (
+                recipe is None
+                or recipe["content_sha256"] != pin.recipe_sha256
+                or (pin.recipe_version is not None and recipe_version != pin.recipe_version)
+            ):
+                raise RuntimeError("expert memory recipe changed before enqueue")
+
+    @staticmethod
     def _job_type_for_payload(payload: JobPayload) -> JobType:
         if isinstance(payload, ChatAnswerPayload):
             return JobType.CHAT_ANSWER
@@ -1848,6 +2452,8 @@ class JobRepository:
             return JobType.LONG_SYNTHESIS
         if isinstance(payload, CorpusIngestionPayload):
             return JobType.CORPUS_INGESTION
+        if isinstance(payload, ExpertImprovementPayload):
+            return JobType.EXPERT_IMPROVEMENT
         raise TypeError("unsupported durable job payload")
 
     @staticmethod
@@ -1887,6 +2493,8 @@ class JobRepository:
             payload = WeeklyMaintenancePayload.model_validate_json(row["payload_json"])
         elif job_type is JobType.LONG_SYNTHESIS:
             payload = LongSynthesisPayload.model_validate_json(row["payload_json"])
+        elif job_type is JobType.EXPERT_IMPROVEMENT:
+            payload = ExpertImprovementPayload.model_validate_json(row["payload_json"])
         else:
             payload = CorpusIngestionPayload.model_validate_json(row["payload_json"])
         return JobRecord(

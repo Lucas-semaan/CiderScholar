@@ -1,6 +1,7 @@
 import type { ChatbotSource } from "@/types/api";
 
 export function sourceOriginLabel(source: ChatbotSource): string {
+  if (source.source_family === "ascocid_knowledge") return "Livre AsCoCid";
   if (source.origin === "external_api") return "API en direct";
   return "Corpus commun";
 }

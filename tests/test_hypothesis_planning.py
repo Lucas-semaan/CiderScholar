@@ -11,6 +11,9 @@ from app.llm.argo_client import ArgoProtocolError
 from app.llm.contracts import GenerationMetrics, GenerationResponse
 from app.retrieval.hypothesis_planning import (
     ArgoHypothesisPlanningService,
+    HypotheticalResearchPlan,
+    VerificationNeed,
+    controlled_scientific_alias_queries,
     deterministic_hypothesis_plan,
 )
 
@@ -137,3 +140,34 @@ def test_deterministic_hypothesis_fallback_contains_no_scientific_conclusion() -
     assert result.used_fallback is True
     assert len(result.plan.verification_needs) == 1
     assert "sans présumer de leur conclusion" in result.plan.hypothetical_answer
+
+
+def test_tca_aliases_are_preserved_before_generated_verification_queries() -> None:
+    question = "Quel rôle du TCA dans le goût de bouchon du cidre ?"
+    plan = HypotheticalResearchPlan(
+        interpreted_question=question,
+        hypothetical_answer="La réponse doit vérifier le mécanisme et ses limites.",
+        verification_needs=[
+            VerificationNeed(
+                need_id="v1",
+                claim_to_verify="Lien entre nettoyage et défaut sensoriel.",
+                evidence_required="Une étude analytique ou expérimentale.",
+                search_query="chlorinated cleaning cider sensory defect",
+            )
+        ],
+    )
+
+    assert controlled_scientific_alias_queries(question) == [
+        "2,4,6-trichloroanisole TCA",
+        "trichloroanisole cork taint",
+    ]
+    assert plan.lexical_queries(question) == [
+        question,
+        "2,4,6-trichloroanisole TCA",
+        "trichloroanisole cork taint",
+        "chlorinated cleaning cider sensory defect",
+    ]
+
+
+def test_unscoped_tca_acronym_does_not_expand_to_cork_taint() -> None:
+    assert controlled_scientific_alias_queries("Les TCA sont-ils fréquents ?") == []

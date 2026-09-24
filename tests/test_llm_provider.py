@@ -34,6 +34,7 @@ def test_custom_endpoint_normalizes_safe_https_url() -> None:
 
 
 def test_provider_state_and_active_selection_persist(settings, monkeypatch) -> None:
+    settings.app.generation_provider_policy = "provider_selectable"
     monkeypatch.setattr(
         "app.secrets._protect_windows_data",
         lambda value, *, description: b"protected:" + description.encode() + b":" + value,
@@ -63,6 +64,7 @@ def test_provider_state_and_active_selection_persist(settings, monkeypatch) -> N
 
 
 def test_argo_and_custom_dpapi_keys_are_isolated(settings, monkeypatch) -> None:
+    settings.app.generation_provider_policy = "provider_selectable"
     protected_descriptions: list[str] = []
 
     def protect(value: bytes, *, description: str) -> bytes:
@@ -113,7 +115,17 @@ def test_legacy_argo_key_remains_the_canonical_provider_key(settings, monkeypatc
 
 
 def test_custom_provider_must_be_complete_before_activation(settings) -> None:
+    settings.app.generation_provider_policy = "provider_selectable"
     store = LlmProviderStore(settings)
 
     with pytest.raises(ValueError, match="fully configured"):
+        store.activate("custom")
+
+
+def test_internal_policy_rejects_custom_provider_activation(settings) -> None:
+    store = LlmProviderStore(settings)
+
+    assert store.active_provider() == "argo"
+    assert [profile.id for profile in store.profiles()] == ["argo"]
+    with pytest.raises(ValueError, match="ARGO only"):
         store.activate("custom")

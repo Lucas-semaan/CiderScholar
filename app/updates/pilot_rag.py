@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import unicodedata
@@ -35,6 +36,8 @@ from app.llm.response_style import (
 )
 from app.llm.structured_output import validate_structured_response
 from app.models.chatbot import (
+    ChatbotCitationAnchor,
+    ChatbotCitationEvidence,
     ChatbotFacetDraft,
     ChatEvidencePassage,
     ChatEvidenceRecord,
@@ -63,9 +66,10 @@ class AbstractChatClient(Protocol):
 
 CORRECTION_TEMPERATURE_DEFAULT = 0.1
 CORRECTION_TEMPERATURE_MAX = 0.2
-# One ARGO request covers each scientific generation phase. Invalid output is
-# surfaced safely rather than spending the interactive quota on corrections.
-MAX_SCIENTIFIC_GENERATION_REQUESTS = 1
+# Every scientific answer has exactly two bounded ARGO passes: an initial
+# draft followed by one reviewer pass. No additional correction loop is
+# allowed, even when either pass is invalid.
+MAX_SCIENTIFIC_GENERATION_REQUESTS = 2
 PROMPT_RETRY_HEADROOM_CHARACTERS = 4096
 MAX_RETRY_MESSAGE_CHARACTERS = PROMPT_RETRY_HEADROOM_CHARACTERS - 128
 MIN_PROMPT_EVIDENCE_TEXT_CHARACTERS = 64
@@ -330,6 +334,20 @@ def _set_retry_message(messages: list[Mapping[str, str]], content: str) -> None:
         raise _PromptBudgetError("scientific retry instruction exceeds reserved headroom")
     del messages[2:]
     messages.append({"role": "user", "content": content})
+
+
+def _set_reviewer_message(messages: list[Mapping[str, str]], draft: str, instruction: str) -> None:
+    """Give the sole reviewer pass the complete bounded draft it must inspect."""
+
+    if len(draft) > 16_000 or len(instruction) > MAX_RETRY_MESSAGE_CHARACTERS:
+        raise _PromptBudgetError("scientific reviewer input exceeds its reserved headroom")
+    del messages[2:]
+    messages.extend(
+        [
+            {"role": "assistant", "content": draft},
+            {"role": "user", "content": instruction},
+        ]
+    )
 
 
 def _generation_input_failure_reason(error: ValueError) -> ScientificValidationReason:
@@ -637,6 +655,18 @@ class CiderAbstractRagService:
                         requested_style,
                         question=cleaned_question,
                     )
+                    if request_count == 1:
+                        validation_retries = 1
+                        _set_reviewer_message(
+                            messages,
+                            response.content,
+                            "Agis comme relecteur scientifique du brouillon précédent. "
+                            "Régénère le JSON complet en conservant uniquement les affirmations "
+                            "strictement étayées par les abstracts fournis ; corrige toute erreur "
+                            "de citation, de langue, de style ou de portée. Aucun commentaire de "
+                            "relecture ne doit apparaître dans la réponse visible.",
+                        )
+                        continue
                     break
                 except RuntimeError as exc:
                     validation_error = exc
@@ -1248,7 +1278,10 @@ class CiderEvidenceRagService:
                     "local de cadres de décision. Utilise-le pour organiser les distinctions et "
                     "compromis, jamais comme preuve d'un fait, d'une valeur, d'une norme ou d'une "
                     "recommandation. Toute affirmation visible reste entièrement soutenue par les "
-                    "evidence_ids."
+                    "evidence_ids. Les preuves dont providers contient ascocid_wiki sont "
+                    "distinctes de ce cadre organisationnel : ce sont des documents Ascocid "
+                    "persistés dans SQLite et elles peuvent étayer une affirmation comme toute "
+                    "autre preuve A/B."
                 ),
             },
             {
@@ -1490,6 +1523,18 @@ class CiderEvidenceRagService:
                         required_evidence_ids=required_synthesis_ids,
                         answer_effort=self.answer_effort,
                     )
+                    if request_count == 1:
+                        validation_retries = 1
+                        _set_reviewer_message(
+                            messages,
+                            response.content,
+                            "Agis comme relecteur scientifique du brouillon précédent. "
+                            "Régénère le JSON complet en conservant uniquement les affirmations "
+                            "strictement étayées par les preuves fournies ; corrige toute erreur "
+                            "de citation, de langue, de style ou de portée. Aucun commentaire de "
+                            "relecture ne doit apparaître dans la réponse visible.",
+                        )
+                        continue
                     break
                 except RuntimeError as exc:
                     validation_error = exc
@@ -3723,7 +3768,7 @@ def _render_evidence_answer(
                 grouped[record.record_id] = (record, [])
             grouped[record.record_id][1].append(passage)
         citation = "; ".join(
-            _evidence_citation(record, passages) for record, passages in grouped.values()
+            _evidence_citation_markdown(record, passages) for record, passages in grouped.values()
         )
         paragraph = re.sub(
             r"^\s*(?:preuves? (?:directes?|indirectes?)|(?:direct|indirect) evidence)\s*[:—-]\s*",
@@ -3840,12 +3885,102 @@ def _render_evidence_answer(
     return "\n\n".join(blocks)
 
 
+def _citation_anchor_id(record_id: str, evidence_ids: Sequence[str]) -> str:
+    payload = "\x1f".join([record_id, *evidence_ids]).encode("utf-8")
+    return f"cite-{hashlib.sha256(payload).hexdigest()[:16]}"
+
+
+def _evidence_citation_markdown(
+    record: ChatEvidenceRecord,
+    passages: Sequence[ChatEvidencePassage],
+) -> str:
+    label = _evidence_citation(record, passages)
+    citation_id = _citation_anchor_id(record.record_id, [item.evidence_id for item in passages])
+    escaped_label = label.replace("[", r"\[").replace("]", r"\]")
+    return f"[{escaped_label}](#citation-{citation_id})"
+
+
+def chatbot_citation_anchors(
+    answer: CiderEvidenceAnswer,
+    records: Sequence[ChatEvidenceRecord],
+) -> list[ChatbotCitationAnchor]:
+    """Build claim-level UI targets from the same validated evidence used by rendering."""
+
+    by_evidence_id = {
+        passage.evidence_id: (record, passage) for record in records for passage in record.passages
+    }
+    groups: list[list[str]] = []
+    if answer.definition_evidence_ids:
+        groups.append(answer.definition_evidence_ids)
+    groups.extend(statement.evidence_ids for statement in answer.statements)
+    groups.extend(item for item in answer.limitation_evidence_ids if item)
+
+    anchors: list[ChatbotCitationAnchor] = []
+    seen: set[str] = set()
+    for evidence_ids in groups:
+        grouped: dict[str, tuple[ChatEvidenceRecord, list[ChatEvidencePassage]]] = {}
+        for evidence_id in evidence_ids:
+            resolved = by_evidence_id.get(evidence_id)
+            if resolved is None:
+                continue
+            record, passage = resolved
+            grouped.setdefault(record.record_id, (record, []))[1].append(passage)
+        for record, passages in grouped.values():
+            citation_id = _citation_anchor_id(
+                record.record_id, [passage.evidence_id for passage in passages]
+            )
+            if citation_id in seen:
+                continue
+            seen.add(citation_id)
+            source_family: Literal["scientific_publication", "ascocid_knowledge"] = (
+                "ascocid_knowledge"
+                if "ascocid_wiki" in record.providers
+                else "scientific_publication"
+            )
+            anchors.append(
+                ChatbotCitationAnchor(
+                    citation_id=citation_id,
+                    display_index=len(anchors) + 1,
+                    label=_evidence_citation(record, passages),
+                    record_id=record.record_id,
+                    source_family=source_family,
+                    article_id=record.article_id,
+                    title=record.title,
+                    evidence=[
+                        ChatbotCitationEvidence(
+                            evidence_id=passage.evidence_id,
+                            snippet=passage.text[:1_200],
+                            source_text_sha256=hashlib.sha256(
+                                passage.text.encode("utf-8")
+                            ).hexdigest(),
+                            presented_text_sha256=hashlib.sha256(
+                                passage.text[:1_200].encode("utf-8")
+                            ).hexdigest(),
+                            chunk_id=passage.chunk_id,
+                            section=passage.section,
+                            page_start=passage.page_start,
+                            page_end=passage.page_end,
+                            section_path=passage.section_path,
+                            paragraph_start=passage.paragraph_start,
+                            paragraph_end=passage.paragraph_end,
+                            figure_label=passage.figure_label,
+                        )
+                        for passage in passages
+                    ],
+                )
+            )
+    return anchors
+
+
 def _evidence_citation(
     record: ChatEvidenceRecord,
     passages: Sequence[ChatEvidencePassage],
 ) -> str:
-    base = _author_date_citation(_as_bibliographic_result(record))
     pages = _citation_pages(passages)
+    if "ascocid_wiki" in record.providers:
+        details = f", {pages}" if pages else ""
+        return f"(Ascocid — {record.title}{details})"
+    base = _author_date_citation(_as_bibliographic_result(record))
     figure_labels = list(
         dict.fromkeys(
             passage.figure_label
@@ -3949,6 +4084,8 @@ def _author_date_citation(record: BibliographicHybridResult) -> str:
 
 
 def _apa_reference(record: BibliographicHybridResult) -> str:
+    if "ascocid_wiki" in record.sources:
+        return f"Ascocid — {record.title}."
     cleaned_authors = _clean_author_names(record.authors)
     authors = _apa_authors(cleaned_authors)
     year = str(record.publication_year) if record.publication_year else "n.d."

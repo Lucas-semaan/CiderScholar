@@ -16,6 +16,7 @@ from uuid import UUID, uuid4
 
 from app.jobs.contracts import JobErrorKind, JobState, JobStep, JobType
 from app.jobs.repository import JobRecord, JobRepository
+from app.knowledge.trace import ExpertRunManifest
 from app.llm.argo_client import (
     ArgoAuthenticationError,
     ArgoAuthorizationError,
@@ -43,6 +44,19 @@ class JobCancelledError(RuntimeError):
     def __init__(self, job: JobRecord) -> None:
         self.job = job
         super().__init__(f"job {job.id} was cancelled")
+
+
+class JobHandlerDeferred(RuntimeError):
+    """Normal resumable wait; it is not a failed attempt."""
+
+    def __init__(self, retry_at: datetime, technical_message: str) -> None:
+        if retry_at <= datetime.now(UTC):
+            raise ValueError("deferred retry_at must be in the future")
+        if not technical_message or len(technical_message) > 300:
+            raise ValueError("deferred technical message is invalid")
+        self.retry_at = retry_at
+        self.technical_message = technical_message
+        super().__init__(technical_message)
 
 
 class UnknownJobTypeError(LookupError):
@@ -91,6 +105,8 @@ class JobHandlerResult:
     assistant_content: str
     assistant_response: dict[str, Any]
     response_time_milliseconds: float
+    trace_manifest: ExpertRunManifest | None = None
+    persist_conversation_result: bool = True
 
 
 class JobHandler(Protocol):
@@ -163,6 +179,18 @@ class JobProgressContext:
         if updated is None:
             raise JobLeaseLostError("job lease cannot be renewed")
         return updated
+
+    def save_trace_checkpoint(self, manifest: ExpertRunManifest) -> None:
+        """Checkpoint a trace through the same lease boundary as progress updates."""
+
+        saved = self.repository.save_trace_checkpoint(
+            self.job_id,
+            worker_id=self.worker_id,
+            manifest=manifest,
+            now=self.clock(),
+        )
+        if not saved:
+            raise JobLeaseLostError("trace checkpoint cannot be persisted under this lease")
 
     def check_cancellation(self) -> None:
         """Honor a persisted request at a safe boundary or continue normally."""
@@ -249,6 +277,17 @@ class DurableJobWorker:
                     raise JobLeaseLostError("job lease was lost during handler execution")
         except JobCancelledError as error:
             return self._logged_result(error.job, cycle_started_monotonic)
+        except JobHandlerDeferred as error:
+            deferred = self.repository.defer_without_attempt(
+                job.id,
+                worker_id=self.worker_id,
+                retry_at=error.retry_at,
+                technical_message=error.technical_message,
+                now=self.clock(),
+            )
+            if deferred is None:
+                raise JobLeaseLostError("job deferral could not be persisted") from None
+            return self._logged_result(deferred, cycle_started_monotonic)
         except ArgoLocalQuotaError as error:
             deferred = self.repository.defer_for_quota(
                 job.id,
@@ -446,7 +485,11 @@ class DurableJobWorker:
         except JobLeaseLostError:
             raise
         except Exception as error:
-            if job.type not in {JobType.CHAT_ANSWER, JobType.DEEP_RESEARCH}:
+            if job.type not in {
+                JobType.CHAT_ANSWER,
+                JobType.DEEP_RESEARCH,
+                JobType.EXPERT_IMPROVEMENT,
+            }:
                 raise
             self.logger.error(
                 "job_handler_unexpected_failure job_id=%s job_type=%s error_type=%s location=%s",
@@ -472,16 +515,28 @@ class DurableJobWorker:
                 ) from None
             return self._logged_result(failed, cycle_started_monotonic)
         try:
-            completed = self.repository.persist_result_and_succeed(
-                job.id,
-                worker_id=self.worker_id,
-                assistant_content=result.assistant_content,
-                assistant_response=result.assistant_response,
-                response_time_milliseconds=result.response_time_milliseconds,
-                now=self.clock(),
-            )
+            if result.persist_conversation_result:
+                completed = self.repository.persist_result_and_succeed(
+                    job.id,
+                    worker_id=self.worker_id,
+                    assistant_content=result.assistant_content,
+                    assistant_response=result.assistant_response,
+                    response_time_milliseconds=result.response_time_milliseconds,
+                    trace_manifest=result.trace_manifest,
+                    now=self.clock(),
+                )
+            else:
+                completed = self.repository.complete_without_result(
+                    job.id,
+                    worker_id=self.worker_id,
+                    now=self.clock(),
+                )
         except Exception as error:
-            if job.type not in {JobType.CHAT_ANSWER, JobType.DEEP_RESEARCH}:
+            if job.type not in {
+                JobType.CHAT_ANSWER,
+                JobType.DEEP_RESEARCH,
+                JobType.EXPERT_IMPROVEMENT,
+            }:
                 raise
             self.logger.error(
                 "job_result_persistence_failed job_id=%s job_type=%s error_type=%s location=%s",

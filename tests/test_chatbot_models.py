@@ -4,6 +4,8 @@ import pytest
 from pydantic import ValidationError
 
 from app.models.chatbot import (
+    ChatbotCitationAnchor,
+    ChatbotCitationEvidence,
     ChatbotFacetDraft,
     ChatbotRetrievalTrace,
     ChatbotTiming,
@@ -76,6 +78,39 @@ def test_facet_draft_is_bounded_and_serializable() -> None:
             label="Arômes",
             query="query",
             answer_markdown="answer",
+        )
+
+
+def test_citation_anchor_requires_unique_exact_evidence() -> None:
+    evidence = ChatbotCitationEvidence(
+        evidence_id="record-1:chunk:2",
+        snippet="A persisted result.",
+        chunk_id=2,
+        page_start=4,
+        page_end=4,
+    )
+    anchor = ChatbotCitationAnchor(
+        citation_id="cite-0123456789abcdef",
+        display_index=1,
+        label="(Test, 2025, p. 4)",
+        record_id="record-1",
+        source_family="scientific_publication",
+        article_id="article-1",
+        title="A relevant article",
+        evidence=[evidence],
+    )
+
+    assert anchor.evidence[0].page_start == 4
+    with pytest.raises(ValidationError, match="must be unique"):
+        ChatbotCitationAnchor(
+            citation_id="cite-0123456789abcdef",
+            display_index=1,
+            label="(Test, 2025, p. 4)",
+            record_id="record-1",
+            source_family="scientific_publication",
+            article_id="article-1",
+            title="A relevant article",
+            evidence=[evidence, evidence],
         )
 
 

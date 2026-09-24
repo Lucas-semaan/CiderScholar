@@ -6,6 +6,65 @@ import type { ChatMessage as ChatMessageValue } from "./chatSession";
 import { ChatMessage } from "./ChatMessage";
 
 describe("ChatMessage", () => {
+  it("renders validated inline citations as accessible evidence controls", () => {
+    const message: ChatMessageValue = {
+      id: "assistant-citation",
+      role: "assistant",
+      content:
+        "La gamme optimale se situe entre 6 et 10 °C. [(Ascocid — Fermentation.docx, p. 4)](#citation-cite-0123456789abcdef)",
+      response: {
+        message: "Question",
+        retrieval_query: "température fermentation",
+        answer_markdown: "Réponse citée",
+        sources: [],
+        citation_anchors: [
+          {
+            citation_id: "cite-0123456789abcdef",
+            display_index: 1,
+            label: "(Ascocid — Fermentation.docx, p. 4)",
+            record_id: "common:ascocid",
+            source_family: "ascocid_knowledge",
+            article_id: "ascocid",
+            title: "Fermentation.docx",
+            evidence: [
+              {
+                evidence_id: "common:ascocid:chunk:7",
+                snippet: "La gamme optimale se situe entre 6 et 10 °C.",
+                chunk_id: 7,
+                section: "Température",
+                page_start: 4,
+                page_end: 4,
+                section_path: null,
+                paragraph_start: null,
+                paragraph_end: null,
+                figure_label: null,
+              },
+            ],
+            local_pdf_url: "/api/corpus/ascocid/pdf",
+            source_url: null,
+          },
+        ],
+        warnings: [],
+        model: "argo",
+        local_result_count: 1,
+        external_result_count: 0,
+        external_enrichment_used: false,
+        prompt_tokens: 0,
+        completion_tokens: 0,
+        duration_seconds: 1,
+        interaction_mode: "research",
+        reused_previous_sources: false,
+      },
+    };
+
+    const markup = renderToStaticMarkup(createElement(ChatMessage, { message }));
+
+    expect(markup).toContain('aria-haspopup="dialog"');
+    expect(markup).toContain("Voir la preuve (Ascocid — Fermentation.docx, p. 4)");
+    expect(markup).toContain('aria-label="Copier la réponse"');
+    expect(markup).not.toContain('href="#citation-cite-0123456789abcdef"');
+  });
+
   it("keeps local PDFs and DOI destinations distinct in cited sources", () => {
     const message: ChatMessageValue = {
       id: "assistant-local-pdf",

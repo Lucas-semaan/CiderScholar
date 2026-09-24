@@ -51,6 +51,7 @@ from app.services.chatbot import (
 )
 from app.services.workflows import (
     _abstract_route_warning,
+    _cacheable_hybrid_retrieval,
     _chat_retrieval_corpus_fingerprint,
     _ChatRetrievalResources,
     _ChatRetrievalTraceCollector,
@@ -121,6 +122,28 @@ def test_balanced_first_wave_reduces_cold_candidates_without_reducing_final_limi
     assert candidate_articles >= budget.article_count * 3
     assert budget.abstract_result_limit == 15
     assert budget.evidence_record_limit == 16
+
+
+def test_chat_retrieval_resources_release_heavy_models_before_provider_stages() -> None:
+    closed: list[str] = []
+
+    class Resource:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        def close(self) -> None:
+            closed.append(self.name)
+
+    resources = _ChatRetrievalResources()
+    resources._embedding_backend = Resource("embedding")  # type: ignore[assignment]
+    resources._reranker = Resource("reranker")  # type: ignore[assignment]
+
+    resources.release_heavy_models()
+    resources.release_heavy_models()
+
+    assert closed == ["reranker", "embedding"]
+    assert resources._embedding_backend is None
+    assert resources._reranker is None
 
 
 def test_abstract_degradation_warning_reports_the_distinct_full_text_route() -> None:
@@ -2113,6 +2136,13 @@ def test_full_text_retrieval_cache_reuses_only_a_fully_validated_result(settings
     assert second_search.cache_hit_count == 1
     assert second_search.cache_miss_count == 0
     assert second_search.selected_article_count == len(second)
+
+
+def test_degraded_vector_retrieval_is_not_eligible_for_the_shared_cache() -> None:
+    """A memory fallback must be retried after capacity becomes available."""
+
+    assert _cacheable_hybrid_retrieval(vector_search_degraded=False) is True
+    assert _cacheable_hybrid_retrieval(vector_search_degraded=True) is False
 
 
 @pytest.fixture(autouse=True)

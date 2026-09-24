@@ -29,8 +29,10 @@ contrôle agit sur des plafonds cohérents de variantes de requête, d’article
 intra-article, de preuves et de tokens. Il règle le niveau de détail, pas le niveau de vérité : les
 contrôles de pertinence, de traçabilité, de nombres, de style et l’abstention restent identiques.
 
-- `concise` répond directement avec les affirmations indispensables et évite une seconde recherche
-  pour un axe seulement incomplet ;
+- `concise` répond directement avec les affirmations indispensables. Lorsque les documents Ascocid
+  classés A/B couvrent tous les besoins de vérification, il utilise uniquement ces documents ; sinon
+  le corpus scientifique général complète la réponse. Une source Ascocid est citée sous la forme
+  `Ascocid — <nom du fichier>` ;
 - `balanced` fournit la synthèse scientifique usuelle et bornée ;
 - `deep` élargit le contexte et développe les mécanismes, conditions, contradictions et limites quand
   les preuves le permettent, sans remplir artificiellement la réponse. Pour une demande réellement
@@ -290,6 +292,18 @@ Les citations utilisent le format auteur-date dans le texte. Une section `Réfé
 réponse contient les notices complètes au format APA 7. Le renderer applicatif, et non ARGO, produit
 les citations et la bibliographie.
 
+Chaque citation en ligne est aussi une ancre interactive construite par l'application depuis les
+`evidence_ids` validés de l'affirmation. Son panneau affiche uniquement les passages persistés qui
+soutiennent cette occurrence, avec leur page ou localisateur structurel exact. Le lien vers le PDF
+local est résolu côté serveur et pointe vers la première page citée lorsqu'elle existe ; aucun chemin
+local n'est exposé. La liste repliable sous la réponse contient seulement les sources effectivement
+citées. Les candidats retrouvés mais non cités restent des diagnostics internes et ne sont jamais
+présentés comme des références de la réponse.
+
+Les documents Ascocid persistés sont identifiés comme `Livre AsCoCid` sans perdre la distinction entre
+texte intégral et abstract. Le format auteur-date reste la règle des publications scientifiques ; la
+forme documentaire `Ascocid — <nom du fichier>` reste utilisée pour le Livre.
+
 ## Formulations interdites par défaut
 
 - « excellente question » ;
@@ -313,6 +327,9 @@ les citations et la bibliographie.
 - une réponse en liste est interdite si l'utilisateur demande explicitement de la prose ou l'absence
   de liste ; sinon elle reste une typologie qu'Argo peut choisir lorsqu'elle est la plus claire ;
 - les citations rendues correspondent aux identifiants de sources validés ;
+- chaque ancre interactive correspond aux mêmes `evidence_ids` que la citation rendue et ouvre un
+  passage persistant de cette source ;
+- aucune source seulement retrouvée, mais non citée, n'apparaît dans la liste des sources citées ;
 - chaque quantité générée correspond dans la preuve citée par sa valeur, son signe ou comparateur,
   son unité, son intervalle ou incertitude et son contexte scientifique ;
 - chaque page affichée provient du chunk full-text effectivement fourni à ARGO ;

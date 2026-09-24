@@ -11,6 +11,15 @@ import type {
   TableEvidenceView,
   IngestionReport,
   DurableJob,
+  ExpertActivationResponse,
+  ExpertCandidateSummary,
+  ExpertDistribution,
+  ExpertDistributionActivationResponse,
+  ExpertDistributionRollbackResponse,
+  ExpertMemoryReleasesResponse,
+  ExpertPilotResponse,
+  ExpertCorrectionResponse,
+  ExpertReviewResponse,
   LibraryRecordsResponse,
   LibraryReviewDecisionResponse,
   LibrarySummary,
@@ -49,8 +58,12 @@ async function fetchChecked(path: string, init?: RequestInit): Promise<Response>
   }
   const response = await fetch(path, { ...init, headers });
   if (!response.ok) {
-    const payload = (await response.json().catch(() => null)) as { detail?: string } | null;
-    throw new ApiError(payload?.detail ?? `Erreur HTTP ${response.status}`, response.status);
+    const payload = (await response.json().catch(() => null)) as {
+      detail?: string | { message?: string };
+    } | null;
+    const detail = payload?.detail;
+    const message = typeof detail === "string" ? detail : detail?.message;
+    throw new ApiError(message ?? `Erreur HTTP ${response.status}`, response.status);
   }
   return response;
 }
@@ -186,12 +199,161 @@ export const api = {
           body: JSON.stringify({ helpful }),
         },
       ),
+    submitExpertCorrection: (
+      messageId: string,
+      payload: {
+        client_request_id: string;
+        selected_text?: string;
+        problem: string;
+        proposed_correction: string;
+        scope: "this_answer" | "reusable_method";
+      },
+    ) =>
+      post<ExpertCorrectionResponse>(
+        `/api/chatbot/messages/${encodeURIComponent(messageId)}/expert-corrections`,
+        payload,
+      ),
     export: (conversationIds: string[], messageIds: string[], format: "markdown" | "pdf") =>
       download("/api/chatbot/exports", {
         conversation_ids: conversationIds,
         message_ids: messageIds,
         format,
       }),
+  },
+  expertMemory: {
+    releases: (cursor?: string, limit = 50) => {
+      const params = new URLSearchParams({ limit: String(limit) });
+      if (cursor) params.set("cursor", cursor);
+      return request<ExpertMemoryReleasesResponse>(
+        `/api/expert-memory/releases?${params.toString()}`,
+      );
+    },
+    candidates: (state?: string) => {
+      const query = state ? `?state=${encodeURIComponent(state)}` : "";
+      return request<{ candidates: ExpertCandidateSummary[] }>(
+        `/api/expert-memory/candidates${query}`,
+      );
+    },
+    reviewCandidate: (
+      candidateId: string,
+      payload: {
+        client_request_id: string;
+        candidate_sha256: string;
+        evaluation_sha256: string;
+        decision: "approve" | "reject" | "needs_changes";
+        reviewer_label: string;
+        reason: string;
+      },
+    ) =>
+      post<ExpertReviewResponse>(
+        `/api/expert-memory/candidates/${encodeURIComponent(candidateId)}/reviews`,
+        payload,
+      ),
+    activateCandidate: (
+      candidateId: string,
+      payload: {
+        client_request_id: string;
+        review_id: string;
+        candidate_sha256: string;
+        evaluation_sha256: string;
+        expected_active_generation: number;
+      },
+    ) =>
+      post<ExpertActivationResponse>(
+        `/api/expert-memory/candidates/${encodeURIComponent(candidateId)}/activation`,
+        payload,
+      ),
+    distributions: (state?: ExpertDistribution["state"]) => {
+      const query = state ? `?state=${encodeURIComponent(state)}` : "";
+      return request<{ distributions: ExpertDistribution[] }>(
+        `/api/expert-memory/distributions${query}`,
+      );
+    },
+    proposeDistribution: (distributionId: string) =>
+      post<ExpertDistribution>(
+        `/api/expert-memory/distributions/${encodeURIComponent(distributionId)}/proposal`,
+        {},
+      ),
+    approveDistribution: (
+      distributionId: string,
+      payload: { reviewer_label: string; reason: string },
+    ) =>
+      post<ExpertDistribution>(
+        `/api/expert-memory/distributions/${encodeURIComponent(distributionId)}/approval`,
+        payload,
+      ),
+    activateDistribution: (
+      distributionId: string,
+      payload: {
+        client_request_id: string;
+        expected_active_generation: number;
+        expected_active_release_id: string | null;
+      },
+    ) =>
+      post<ExpertDistributionActivationResponse>(
+        `/api/expert-memory/distributions/${encodeURIComponent(distributionId)}/activation`,
+        payload,
+      ),
+    rollbackDistribution: (
+      distributionId: string,
+      payload: {
+        client_request_id: string;
+        target_release_id: string;
+        target_release_sha256: string;
+        expected_active_generation: number;
+        expected_active_release_id: string;
+        reason: string;
+      },
+    ) =>
+      post<ExpertDistributionRollbackResponse>(
+        `/api/expert-memory/distributions/${encodeURIComponent(distributionId)}/rollback`,
+        payload,
+      ),
+    createPilotPlan: (evaluationId: string, pilotId: string) =>
+      post<ExpertPilotResponse>(
+        `/api/expert-memory/evaluations/${encodeURIComponent(evaluationId)}/pilot-plans`,
+        { pilot_id: pilotId },
+      ),
+    pilot: (pilotId: string) =>
+      request<ExpertPilotResponse>(`/api/expert-memory/pilots/${encodeURIComponent(pilotId)}`),
+    auditPilot: (pilotId: string) =>
+      post<ExpertPilotResponse>(
+        `/api/expert-memory/pilots/${encodeURIComponent(pilotId)}/audit`,
+        {},
+      ),
+    attestPilot: (
+      pilotId: string,
+      payload: {
+        attestation_id: string;
+        reviewer_label: string;
+        external_reference: string;
+        decision: "accept" | "reject";
+        reason: string;
+      },
+    ) =>
+      post<ExpertPilotResponse>(
+        `/api/expert-memory/pilots/${encodeURIComponent(pilotId)}/attestation`,
+        payload,
+      ),
+    recordPilotObservation: (
+      pilotId: string,
+      payload: {
+        observation_id: string;
+        case_sha256: string;
+        expert_time_seconds: number;
+        diagnosis_human_corrected: boolean;
+        useful_effect: "useful" | "neutral" | "harmful" | "unknown";
+        false_gain: boolean;
+        rollback_count: number;
+        prompt_tokens: number;
+        completion_tokens: number;
+        recorded_by: string;
+      },
+    ) =>
+      post<ExpertPilotResponse>(
+        `/api/expert-memory/pilots/${encodeURIComponent(pilotId)}/observations`,
+        payload,
+      ),
   },
   jobs: {
     enqueueEvaluation: (payload: {
@@ -297,7 +459,7 @@ export const api = {
         body: JSON.stringify({ path, confirm_unexpected_name: confirmUnexpectedName }),
       }),
     installCorpus: () => post<OnboardingStatus>("/api/onboarding/corpus", { confirmed: true }),
-    selectMemory: (profile: "8gb" | "16gb") =>
+    selectMemory: (profile: "8gb" | "16gb" | "32gb") =>
       request<OnboardingStatus>("/api/onboarding/memory", {
         method: "PUT",
         body: JSON.stringify({ profile }),

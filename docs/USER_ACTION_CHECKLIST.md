@@ -70,7 +70,29 @@ Les formats sont décrits dans [`ASSISTED_DISCOVERY_SCOPE.md`](ASSISTED_DISCOVER
 [`EXPERIMENTAL_DATA.md`](EXPERIMENTAL_DATA.md). Sans backend isolé, approbation ou vérité terrain,
 l’application refuse l’exécution au lieu de simuler une validation.
 
-## 5. Pilote et décisions conditionnelles
+## 5. Décision d’inférence visuelle GPU (`VIS-009`)
+
+- [ ] Choisir la machine cible, le GPU, la VRAM disponible et le système d’exploitation.
+- [ ] Choisir le modèle visuel et confirmer sa licence, sa révision et son mode de distribution.
+- [ ] Décider la résidence des images, du contexte associé, des journaux et de leur durée de rétention.
+- [ ] Définir l’authentification, les délais, les quotas, la concurrence GPU et le comportement en panne.
+- [ ] Valider que le service ne reçoit ni chemin Windows, ni SQLite, ni Qdrant, conformément à
+  [`VISUAL_SERVER_ARCHITECTURE.md`](VISUAL_SERVER_ARCHITECTURE.md).
+
+Rapport minimal :
+
+```text
+Date :
+Machine/GPU/VRAM :
+OS :
+Modèle/révision/licence :
+Résidence des données :
+Authentification et rétention :
+Concurrence/timeout/quotas :
+Décision d’activation : approuvée/refusée/reportée
+```
+
+## 6. Pilote et décisions conditionnelles
 
 - [ ] Nommer deux personnes pilotes et vérifier installation, clés personnelles, même version de RAG
   et isolation des espaces privés.

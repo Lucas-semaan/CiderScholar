@@ -108,6 +108,33 @@ class ExpertCorrectionCreate(ImmutableModel):
         return self
 
 
+class ExpertCorrectionUpdate(ImmutableModel):
+    expected_revision: PositiveInt
+    client_request_id: UUID
+    withdrawal: bool = False
+    manifest_id: UUID | None = None
+    claim_id: ShortText | None = None
+    selected_text: str = Field(default="", max_length=2000)
+    problem: CorrectionText
+    proposed_correction: CorrectionText
+    scope: Literal["this_answer", "reusable_method"]
+    evidence_refs: Annotated[tuple[EvidenceReference, ...], Field(max_length=10)] = ()
+    suggested_category: Cause | None = None
+
+    @model_validator(mode="after")
+    def identifiable_claim(self) -> ExpertCorrectionUpdate:
+        if self.claim_id is not None and self.manifest_id is None:
+            raise ValueError("claim_id requires a manifest")
+        unique(self.evidence_refs, "evidence references")
+        return self
+
+
+class ExpertDiagnosisJobRequest(ImmutableModel):
+    client_request_id: UUID
+    expected_revision: PositiveInt
+    max_llm_requests: Literal[0] = 0
+
+
 class Diagnosis(ImmutableModel):
     schema_version: Literal[1] = 1
     correction_id: UUID
@@ -187,6 +214,24 @@ class CandidatePatch(ImmutableModel):
         return self
 
 
+class ExpertCandidateJobRequest(ImmutableModel):
+    client_request_id: UUID
+    patch: CandidatePatch
+    max_llm_requests: Literal[0] = 0
+
+
+class ExpertEvaluationJobRequest(ImmutableModel):
+    client_request_id: UUID
+    base_state_path: ShortText
+    candidate_state_path: ShortText
+    max_llm_requests: Literal[0] = 0
+
+
+class ExpertEvaluationOrchestrationRequest(ImmutableModel):
+    client_request_id: UUID
+    campaign_pair_path: ShortText
+
+
 class ExpertReviewCreate(ImmutableModel):
     client_request_id: UUID
     candidate_sha256: Sha256
@@ -202,6 +247,59 @@ class ExpertActivationRequest(ImmutableModel):
     candidate_sha256: Sha256
     evaluation_sha256: Sha256
     expected_active_generation: int = Field(strict=True, ge=0)
+
+
+class ExpertRollbackRequest(ImmutableModel):
+    client_request_id: UUID
+    target_release_id: UUID
+    target_release_sha256: Sha256
+    expected_active_generation: int = Field(strict=True, ge=0)
+    reason: CorrectionText
+
+
+class ExpertDistributionApprovalRequest(ImmutableModel):
+    reviewer_label: ShortText
+    reason: CorrectionText
+
+
+class ExpertDistributionActivationRequest(ImmutableModel):
+    client_request_id: UUID
+    expected_active_generation: int = Field(strict=True, ge=0)
+    expected_active_release_id: UUID | None = None
+
+
+class ExpertDistributionRollbackRequest(ImmutableModel):
+    client_request_id: UUID
+    target_release_id: UUID
+    target_release_sha256: Sha256
+    expected_active_generation: int = Field(strict=True, ge=0)
+    expected_active_release_id: UUID
+    reason: CorrectionText
+
+
+class ExpertPilotPlanRequest(ImmutableModel):
+    pilot_id: UUID
+
+
+class ExpertPilotAttestationRequest(ImmutableModel):
+    attestation_id: UUID
+    reviewer_label: ShortText
+    external_reference: ShortText
+    decision: Literal["accept", "reject"]
+    reason: CorrectionText
+
+
+class ExpertPilotObservationCreate(ImmutableModel):
+    observation_id: UUID
+    case_sha256: Sha256
+    expert_time_seconds: int = Field(strict=True, ge=1, le=86_400)
+    diagnosis_human_corrected: bool
+    useful_effect: Literal["useful", "neutral", "harmful", "unknown"]
+    false_gain: bool
+    rollback_count: int = Field(strict=True, ge=0, le=10)
+    prompt_tokens: int = Field(strict=True, ge=0, le=100_000)
+    completion_tokens: int = Field(strict=True, ge=0, le=100_000)
+    recorded_by: ShortText
 
 
 class ImprovementBudget(ImmutableModel):

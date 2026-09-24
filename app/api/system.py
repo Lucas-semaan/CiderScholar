@@ -140,6 +140,7 @@ def runtime_payload(settings: Settings) -> dict[str, Any]:
             "available": settings.figure_analysis.enabled,
             "model": settings.figure_analysis.model,
             "max_figures": settings.figure_analysis.max_figures,
+            "max_concurrent_analyses": settings.figure_analysis.max_concurrent_analyses,
             "estimated_min_seconds": settings.figure_analysis.estimated_min_seconds,
             "estimated_max_seconds": settings.figure_analysis.estimated_max_seconds,
         },

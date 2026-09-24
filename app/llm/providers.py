@@ -104,6 +104,10 @@ class LlmProviderStore:
         if self.path == exports_dir or self.path.is_relative_to(exports_dir):
             raise ValueError("LLM provider preferences must remain outside exports")
 
+    def _ensure_allowed(self, provider: LlmProviderId) -> None:
+        if provider != "argo" and self.settings.app.generation_provider_policy == "argo_only":
+            raise ValueError("This CiderScholar edition permits ARGO only")
+
     def load_state(self) -> StoredProviderState:
         with _STATE_LOCK:
             if not self.path.exists():
@@ -154,6 +158,7 @@ class LlmProviderStore:
         return None
 
     def profile(self, provider: LlmProviderId) -> LlmProviderProfile:
+        self._ensure_allowed(provider)
         state = self.load_state()
         if provider == "argo":
             return LlmProviderProfile(
@@ -176,9 +181,14 @@ class LlmProviderStore:
         )
 
     def profiles(self) -> list[LlmProviderProfile]:
-        return [self.profile("argo"), self.profile("custom")]
+        profiles = [self.profile("argo")]
+        if self.settings.app.generation_provider_policy == "provider_selectable":
+            profiles.append(self.profile("custom"))
+        return profiles
 
     def active_provider(self) -> LlmProviderId:
+        if self.settings.app.generation_provider_policy == "argo_only":
+            return "argo"
         return self.load_state().active_provider
 
     def active_profile(self) -> LlmProviderProfile:
@@ -192,6 +202,7 @@ class LlmProviderStore:
         base_url: str | None = None,
         model: str | None = None,
     ) -> LlmProviderProfile:
+        self._ensure_allowed(provider)
         state = self.load_state()
         if provider == "argo":
             if base_url is not None and validate_custom_endpoint(base_url) != ARGO_BASE_URL:
@@ -210,6 +221,7 @@ class LlmProviderStore:
         return self.profile(provider)
 
     def delete(self, provider: LlmProviderId) -> LlmProviderProfile:
+        self._ensure_allowed(provider)
         self.key_store(provider).delete()
         state = self.load_state()
         if provider == "custom":
@@ -220,6 +232,7 @@ class LlmProviderStore:
         return self.profile(provider)
 
     def activate(self, provider: LlmProviderId) -> LlmProviderProfile:
+        self._ensure_allowed(provider)
         profile = self.profile(provider)
         if not profile.base_url or not profile.model or not profile.key_configured:
             raise ValueError("Selected LLM provider is not fully configured")

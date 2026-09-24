@@ -23,6 +23,7 @@ from app.jobs.background_handlers import CorpusIngestionHandler, LongSynthesisHa
 from app.jobs.chat_handler import ChatAnswerHandler
 from app.jobs.contracts import JobType
 from app.jobs.deep_research_handler import DeepResearchHandler, DeepResearchOperations
+from app.jobs.expert_improvement_handler import ExpertImprovementHandler
 from app.jobs.repository import JobRepository
 from app.jobs.worker import DurableJobWorker, JobHandler, JobHandlerRegistry
 from app.updates.watch_handler import BibliographicWatchHandler
@@ -90,6 +91,8 @@ def build_worker(
             corpus_settings,
             corpus_database,
         )
+    if JobType.EXPERT_IMPROVEMENT in requested_types:
+        handlers[JobType.EXPERT_IMPROVEMENT] = ExpertImprovementHandler(repository.database)
     if JobType.WEEKLY_MAINTENANCE in requested_types and load_local_profile() is LocalProfile.ADMIN:
         handlers[JobType.WEEKLY_MAINTENANCE] = WeeklyMaintenanceHandler(settings)
     if (

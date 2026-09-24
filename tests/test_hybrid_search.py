@@ -221,6 +221,34 @@ def test_hybrid_filters_are_applied_to_both_channels(settings) -> None:
         hybrid.close()
 
 
+def test_hybrid_traces_raw_candidates_omitted_by_fusion_limit(settings) -> None:
+    database = Database(settings.paths.database_path)
+    database.initialize()
+    _seed_hybrid_database(database)
+    hybrid = HybridSearchService(
+        settings,
+        database,
+        LexicalSearchService(settings, database),
+        RecordingVectorService(),
+    )
+    try:
+        response = hybrid.search(
+            "temperature",
+            limit=1,
+            candidate_limit=2,
+            max_vector_query_variants=0,
+        )
+    finally:
+        hybrid.close()
+
+    assert len(response.results) == 1
+    assert len(response.omitted_candidate_traces) == 1
+    omitted = response.omitted_candidate_traces[0]
+    assert omitted.chunk_id != response.results[0].chunk_id
+    assert omitted.reason == "fusion_limit"
+    assert len(omitted.text_sha256) == 64
+
+
 def test_hybrid_scopes_only_later_dense_variants_to_lexical_articles(settings) -> None:
     database = Database(settings.paths.database_path)
     database.initialize()

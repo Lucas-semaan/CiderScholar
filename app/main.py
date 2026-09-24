@@ -20,6 +20,8 @@ from app.api.chatbot import router as chatbot_router
 from app.api.corpus_updates import router as corpus_updates_router
 from app.api.diagnostics import router as diagnostics_router
 from app.api.errors import install_error_handlers
+from app.api.expert_feedback import memory_router as expert_memory_router
+from app.api.expert_feedback import router as expert_feedback_router
 from app.api.health import router as health_router
 from app.api.ingestion import router as ingestion_router
 from app.api.jobs import router as jobs_router
@@ -89,7 +91,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         CORSMiddleware,
         allow_origins=["http://127.0.0.1:5173", "http://localhost:5173"],
         allow_credentials=False,
-        allow_methods=["GET", "POST", "PUT", "DELETE"],
+        allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
         allow_headers=["Content-Type"],
     )
     install_error_handlers(application)
@@ -100,6 +102,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     application.include_router(chatbot_router)
     application.include_router(corpus_updates_router)
     application.include_router(diagnostics_router)
+    application.include_router(expert_feedback_router)
+    application.include_router(expert_memory_router)
     application.include_router(system_router)
     application.include_router(ingestion_router)
     application.include_router(jobs_router)

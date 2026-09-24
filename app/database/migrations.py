@@ -5,11 +5,70 @@ from __future__ import annotations
 import hashlib
 import sqlite3
 
+from app.database.expert_candidate_migration import EXPERT_CANDIDATE_MIGRATION
+from app.database.expert_diagnosis_migration import EXPERT_DIAGNOSIS_MIGRATION
+from app.database.expert_evaluation_migration import EXPERT_EVALUATION_MIGRATION
+from app.database.expert_feedback_migration import (
+    EXPERT_FEEDBACK_MIGRATION,
+    EXPERT_FEEDBACK_REVISIONS_MIGRATION,
+)
+from app.database.expert_memory_distribution_migration import (
+    EXPERT_MEMORY_DISTRIBUTION_MIGRATION,
+)
+from app.database.expert_memory_distribution_rollback_migration import (
+    EXPERT_MEMORY_DISTRIBUTION_ROLLBACK_MIGRATION,
+)
 from app.database.expert_memory_migration import EXPERT_MEMORY_MIGRATION
+from app.database.expert_pilot_migration import (
+    EXPERT_PILOT_MIGRATION,
+    EXPERT_PILOT_OBSERVATIONS_MIGRATION,
+)
+from app.database.expert_review_migration import EXPERT_REVIEW_MIGRATION
+from app.database.expert_rollback_migration import EXPERT_ROLLBACK_MIGRATION
+from app.database.expert_trace_migration import EXPERT_TRACE_MIGRATION
 
-CURRENT_SCHEMA_VERSION = 45
+CURRENT_SCHEMA_VERSION = 59
 
 MIGRATIONS: dict[int, str] = {
+    59: EXPERT_MEMORY_DISTRIBUTION_ROLLBACK_MIGRATION,
+    58: EXPERT_MEMORY_DISTRIBUTION_MIGRATION,
+    57: EXPERT_PILOT_OBSERVATIONS_MIGRATION,
+    56: EXPERT_PILOT_MIGRATION,
+    55: EXPERT_ROLLBACK_MIGRATION,
+    54: EXPERT_REVIEW_MIGRATION,
+    53: EXPERT_EVALUATION_MIGRATION,
+    52: EXPERT_CANDIDATE_MIGRATION,
+    51: "-- Rebuilt by add_expert_improvement_job_contract.",
+    50: EXPERT_DIAGNOSIS_MIGRATION,
+    49: EXPERT_FEEDBACK_REVISIONS_MIGRATION,
+    48: EXPERT_FEEDBACK_MIGRATION,
+    47: EXPERT_TRACE_MIGRATION,
+    46: """
+        CREATE TABLE IF NOT EXISTS ascocid_wiki_documents (
+            id TEXT PRIMARY KEY CHECK(length(trim(id)) BETWEEN 1 AND 128),
+            relative_path TEXT NOT NULL UNIQUE CHECK(length(trim(relative_path)) > 0),
+            filename TEXT NOT NULL CHECK(length(trim(filename)) > 0),
+            source_sha256 TEXT NOT NULL CHECK(
+                length(source_sha256) = 64
+                AND source_sha256 NOT GLOB '*[^0-9a-f]*'
+            ),
+            article_id TEXT NOT NULL REFERENCES articles(id) ON DELETE CASCADE,
+            indexed_file_path TEXT NOT NULL CHECK(length(trim(indexed_file_path)) > 0),
+            indexed_file_sha256 TEXT NOT NULL CHECK(
+                length(indexed_file_sha256) = 64
+                AND indexed_file_sha256 NOT GLOB '*[^0-9a-f]*'
+            ),
+            state TEXT NOT NULL CHECK(state IN ('indexed', 'review', 'failed')),
+            error_type TEXT,
+            error_message TEXT,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_ascocid_wiki_documents_article
+            ON ascocid_wiki_documents(article_id, state);
+        CREATE INDEX IF NOT EXISTS idx_ascocid_wiki_documents_sha
+            ON ascocid_wiki_documents(source_sha256);
+    """,
     45: """-- Rebuilt by _relax_evidence_locator_constraints.""",
     44: """-- Rebuilt by _relax_chunk_page_constraints.""",
     43: """
@@ -1237,6 +1296,23 @@ def ensure_current(connection: sqlite3.Connection) -> None:
         elif target_version == 45:
             connection.commit()
             _relax_evidence_locator_constraints(connection)
+        elif target_version == 51:
+            from app.database.expert_improvement_job_migration import (
+                add_expert_improvement_job_contract,
+            )
+
+            connection.commit()
+            add_expert_improvement_job_contract(connection)
+        elif target_version == 59:
+            columns = {
+                row[1]
+                for row in connection.execute("PRAGMA table_info(expert_memory_distributions)")
+            }
+            if "rolled_back_at" not in columns:
+                connection.execute(
+                    "ALTER TABLE expert_memory_distributions ADD COLUMN rolled_back_at TEXT"
+                )
+            connection.executescript(migration)
         else:
             connection.executescript(migration)
         connection.execute("INSERT INTO schema_version(version) VALUES (?)", (target_version,))

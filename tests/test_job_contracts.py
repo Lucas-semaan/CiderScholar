@@ -16,6 +16,7 @@ from app.jobs.contracts import (
     ChatAnswerPayload,
     CorpusIngestionPayload,
     DeepResearchPayload,
+    ExpertImprovementPayload,
     JobErrorDisposition,
     JobErrorKind,
     JobPublic,
@@ -37,16 +38,30 @@ def test_job_type_is_closed_and_reserves_future_names() -> None:
         JobType.DEEP_RESEARCH,
         JobType.LONG_SYNTHESIS,
         JobType.CORPUS_INGESTION,
+        JobType.EXPERT_IMPROVEMENT,
     )
     assert JobType("chat_answer") is JobType.CHAT_ANSWER
     assert JobType("weekly_maintenance") is JobType.WEEKLY_MAINTENANCE
     assert JobType("deep_research") is JobType.DEEP_RESEARCH
     assert JobType("long_synthesis") is JobType.LONG_SYNTHESIS
     assert JobType("corpus_ingestion") is JobType.CORPUS_INGESTION
+    assert JobType("expert_improvement") is JobType.EXPERT_IMPROVEMENT
     assert not RESERVED_FUTURE_JOB_TYPES
 
     with pytest.raises(ValueError):
         JobType("unknown")
+
+
+def test_expert_improvement_payload_rejects_campaign_data_for_diagnosis() -> None:
+    with pytest.raises(ValidationError, match="evaluation campaign data"):
+        ExpertImprovementPayload(
+            operation="diagnose",
+            correction_id=uuid4(),
+            expected_revision=1,
+            conversation_id=uuid4(),
+            client_request_id=uuid4(),
+            campaign_pair_path="evaluations/campaign_pair.json",
+        )
 
 
 def test_evaluation_chat_payload_is_fingerprinted_and_isolated() -> None:

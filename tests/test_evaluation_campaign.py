@@ -7,6 +7,7 @@ import pytest
 
 from app.evaluation.campaign import (
     CampaignExecutionError,
+    EvaluationCampaignPairCoordinator,
     EvaluationCampaignRunner,
     EvaluationCampaignSpec,
 )
@@ -95,6 +96,69 @@ def test_campaign_runs_cells_sequentially_and_persists_a_reliable_audit(tmp_path
     assert resumed.reliable is True
     with repository.database.connect() as connection:
         assert connection.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 2
+
+
+def test_campaign_can_advance_and_observe_one_cell_without_blocking(tmp_path) -> None:
+    repository = JobRepository(tmp_path / "queue.sqlite3")
+    repository.initialize()
+    worker = DurableJobWorker(
+        repository=repository,
+        registry=JobHandlerRegistry({JobType.CHAT_ANSWER: SuccessfulEvaluationHandler()}),
+        worker_id="campaign-worker",
+    )
+    runner = EvaluationCampaignRunner(repository, tmp_path / "campaign", poll_seconds=0)
+    spec = _spec("campaign-stepwise")
+
+    first = runner.advance_one(spec)
+    assert first is not None
+    assert first.state.value == "queued"
+    assert runner.advance_one(spec).id == first.id
+
+    completed = worker.run_once()
+    assert completed is not None
+    observed = runner.observe_one(spec, completed.id)
+    assert observed.state.value == "succeeded"
+
+    second = runner.advance_one(spec)
+    assert second is not None
+    assert second.id != first.id
+    completed_second = worker.run_once()
+    assert completed_second is not None
+    runner.observe_one(spec, completed_second.id)
+    assert json.loads((tmp_path / "campaign" / "state.json").read_text(encoding="utf-8"))[
+        "status"
+    ] == ("completed")
+    assert (tmp_path / "campaign" / "audit.json").is_file()
+
+
+def test_campaign_pair_coordinator_orders_base_then_candidate(tmp_path) -> None:
+    repository = JobRepository(tmp_path / "queue.sqlite3")
+    repository.initialize()
+    worker = DurableJobWorker(
+        repository=repository,
+        registry=JobHandlerRegistry({JobType.CHAT_ANSWER: SuccessfulEvaluationHandler()}),
+        worker_id="pair-worker",
+    )
+    base_runner = EvaluationCampaignRunner(repository, tmp_path / "base", poll_seconds=0)
+    candidate_runner = EvaluationCampaignRunner(repository, tmp_path / "candidate", poll_seconds=0)
+    coordinator = EvaluationCampaignPairCoordinator(base_runner, candidate_runner)
+    base = _spec("pair-base")
+    candidate = _spec("pair-candidate")
+
+    first = coordinator.advance_one(base, candidate)
+    assert first.phase == "base"
+    assert first.job_id is not None
+    worker.run_once()
+
+    second = coordinator.advance_one(base, candidate)
+    assert second.phase == "base"
+    assert second.job_id is not None
+    worker.run_once()
+
+    third = coordinator.advance_one(base, candidate)
+    assert third.phase == "candidate"
+    assert third.job_id is not None
+    assert not third.comparison_ready
 
 
 def test_campaign_cancels_a_queued_cell_instead_of_leaving_it_without_output(tmp_path) -> None:

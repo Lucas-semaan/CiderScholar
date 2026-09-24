@@ -10,7 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from app.api.dependencies import get_database
 from app.api.schemas import JobRetryRequest
 from app.database.sqlite import Database
-from app.jobs.contracts import JobPublic, JobState
+from app.jobs.contracts import ExpertImprovementPayload, JobPublic, JobState
 from app.jobs.repository import (
     ActiveJobLimitError,
     EvaluationConversationIsolationError,
@@ -50,7 +50,9 @@ def cancel_job(
     job = repository.get(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Travail introuvable.")
-    if job.state is JobState.QUEUED:
+    if isinstance(job.payload, ExpertImprovementPayload) and job.payload.operation == "orchestrate":
+        cancelled = repository.cancel_orchestrator(job_id)
+    elif job.state is JobState.QUEUED:
         cancelled = repository.cancel_queued(job_id)
     elif job.state is JobState.RUNNING:
         cancelled = repository.request_cancellation(job_id)

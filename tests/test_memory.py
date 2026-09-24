@@ -9,6 +9,7 @@ from app.memory import MemoryGuard, MemoryLimitError, MemorySnapshot
 from app.memory_profiles import (
     EIGHT_GB_PROFILE,
     SIXTEEN_GB_PROFILE,
+    THIRTY_TWO_GB_PROFILE,
     apply_memory_profile,
     recommend_memory_profile,
 )
@@ -18,8 +19,8 @@ def test_memory_guard_warns_without_stopping(monkeypatch, caplog) -> None:
     guard = MemoryGuard(MemoryConfig())
     snapshot = MemorySnapshot(
         process_rss_gb=0.5,
-        system_used_gb=13.1,
-        system_available_gb=2.0,
+        system_used_gb=24.1,
+        system_available_gb=7.0,
     )
     monkeypatch.setattr(guard, "snapshot", lambda: snapshot)
 
@@ -28,17 +29,17 @@ def test_memory_guard_warns_without_stopping(monkeypatch, caplog) -> None:
 
     assert result == snapshot
     assert "synthetic operation" in caplog.text
-    assert "system_available_gb=2.00" in caplog.text
-    assert "system_used_gb=13.10" in caplog.text
+    assert "system_available_gb=7.00" in caplog.text
+    assert "system_used_gb=24.10" in caplog.text
 
 
 @pytest.mark.parametrize(
     "snapshot",
     [
         MemorySnapshot(
-            process_rss_gb=14.0,
-            system_used_gb=14.5,
-            system_available_gb=1.0,
+            process_rss_gb=20.0,
+            system_used_gb=24.5,
+            system_available_gb=7.0,
         ),
         MemorySnapshot(
             process_rss_gb=0.5,
@@ -69,7 +70,7 @@ def test_eight_gb_profile_uses_bounded_batches_and_machine_thresholds(settings) 
     assert profiled.reranker.candidate_limit == 40
     assert profiled.deep_research.rrf_candidate_limit == 40
     assert profiled.deep_research.cross_encoder_candidate_limit == 40
-    assert settings.memory.profile == "custom"
+    assert settings.memory.profile == "32gb"
 
 
 def test_sixteen_gb_profile_increases_batch_with_safe_headroom(settings) -> None:
@@ -88,14 +89,25 @@ def test_sixteen_gb_profile_increases_batch_with_safe_headroom(settings) -> None
     assert sixteen.deep_research.cross_encoder_candidate_limit == 40
 
 
+def test_thirty_two_gb_profile_reserves_system_and_page_cache_headroom(settings) -> None:
+    profiled = apply_memory_profile(settings, THIRTY_TWO_GB_PROFILE)
+
+    assert profiled.memory.profile == "32gb"
+    assert profiled.memory.warning_used_gb == 24.0
+    assert profiled.memory.hard_process_limit_gb == 20.0
+    assert profiled.memory.minimum_available_mb == 6144
+    assert profiled.embeddings.batch_size == 8
+    assert profiled.reranker.batch_size == 4
+
+
 @pytest.mark.parametrize(
     ("total_gb", "expected"),
-    [(7.8, "8gb"), (8.0, "8gb"), (15.7, "16gb"), (32.0, "16gb")],
+    [(7.8, "8gb"), (8.0, "8gb"), (15.7, "16gb"), (24.0, "16gb"), (32.0, "32gb")],
 )
 def test_memory_detection_recommends_without_applying(settings, total_gb, expected) -> None:
     recommendation = recommend_memory_profile(settings, detected_total_gb=total_gb)
 
     assert recommendation.recommended_profile == expected
-    assert recommendation.active_profile == "custom"
+    assert recommendation.active_profile == "32gb"
     assert recommendation.applied_automatically is False
-    assert settings.memory.profile == "custom"
+    assert settings.memory.profile == "32gb"

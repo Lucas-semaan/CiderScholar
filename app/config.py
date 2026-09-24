@@ -23,7 +23,10 @@ class AppConfig(BaseModel):
     allow_bibliographic_apis: bool = False
     allow_publisher_automation: bool = False
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
-    chat_worker_concurrency: int = Field(default=20, ge=1, le=20)
+    generation_provider_policy: Literal["argo_only", "provider_selectable"] = "argo_only"
+    # ARGO's request quota is not a safe worker-count proxy: contexts and
+    # provider-bound stages can coexist after serialized local retrieval.
+    chat_worker_concurrency: int = Field(default=2, ge=1, le=20)
     experimental_chat_profile: Literal["p0", "p1", "p2"] = "p0"
 
     @model_validator(mode="after")
@@ -368,10 +371,12 @@ class FigureAnalysisConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    enabled: bool = True
+    # The internal edition is ARGO-only and its VM has no GPU.
+    enabled: bool = False
     base_url: str = "http://127.0.0.1:11434"
     model: str = "qwen3-vl:8b-instruct"
     max_figures: int = Field(default=5, ge=1, le=10)
+    max_concurrent_analyses: int = Field(default=1, ge=1, le=4)
     relevance_threshold: float = Field(default=0.80, ge=0.5, le=1.0)
     readability_threshold: float = Field(default=0.70, ge=0.5, le=1.0)
     render_scale: float = Field(default=2.0, ge=1.0, le=4.0)
@@ -822,10 +827,10 @@ class SynthesisConfig(BaseModel):
 class MemoryConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    profile: Literal["custom", "8gb", "16gb"] = "custom"
-    warning_used_gb: float = Field(default=13.0, gt=0)
-    hard_process_limit_gb: float = Field(default=14.0, gt=0)
-    minimum_available_mb: int = Field(default=512, ge=128)
+    profile: Literal["custom", "8gb", "16gb", "32gb"] = "32gb"
+    warning_used_gb: float = Field(default=24.0, gt=0)
+    hard_process_limit_gb: float = Field(default=20.0, gt=0)
+    minimum_available_mb: int = Field(default=6144, ge=128)
 
 
 class CorpusDistributionConfig(BaseModel):

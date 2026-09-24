@@ -145,10 +145,17 @@ def test_offline_mode_forbids_bibliographic_network() -> None:
         AppConfig(offline_mode=True, allow_bibliographic_apis=True)
 
 
-def test_chat_worker_concurrency_matches_the_argo_minute_capacity() -> None:
-    assert AppConfig().chat_worker_concurrency == 20
+def test_chat_worker_concurrency_defaults_to_the_bounded_vm_capacity() -> None:
+    assert AppConfig().chat_worker_concurrency == 2
     with pytest.raises(ValidationError):
         AppConfig(chat_worker_concurrency=21)
+
+
+def test_internal_defaults_disable_the_legacy_local_visual_model() -> None:
+    defaults = Settings()
+
+    assert defaults.figure_analysis.enabled is False
+    assert defaults.app.generation_provider_policy == "argo_only"
 
 
 def test_paths_cannot_escape_data_directory(tmp_path: Path) -> None:

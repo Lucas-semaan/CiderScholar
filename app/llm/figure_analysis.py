@@ -30,10 +30,27 @@ from app.ingestion.visual_contracts import (
     VisualModelIdentity,
 )
 from app.models.chatbot import ChatEvidencePassage, ChatEvidenceRecord
+from app.retrieval.chat_checkpoint import (
+    FigureAnalysisCheckpoint,
+    FigureAnalysisCheckpointItem,
+)
 
 _TERM = re.compile(r"[\wÀ-ÿ-]{3,}", re.UNICODE)
-_FIGURE_ANALYSIS_LOCK = threading.Lock()
+_CAPACITY_REGISTRY_LOCK = threading.Lock()
+_CAPACITY_REGISTRY: dict[tuple[str, str, int], threading.BoundedSemaphore] = {}
 _PROMPT_VERSION = "scientific-figure-analysis-v1"
+
+
+def _figure_analysis_capacity(config: Any) -> threading.BoundedSemaphore:
+    """Share one bounded local-model queue across workers using the same profile."""
+
+    key = (config.base_url, config.model, config.max_concurrent_analyses)
+    with _CAPACITY_REGISTRY_LOCK:
+        semaphore = _CAPACITY_REGISTRY.get(key)
+        if semaphore is None:
+            semaphore = threading.BoundedSemaphore(config.max_concurrent_analyses)
+            _CAPACITY_REGISTRY[key] = semaphore
+        return semaphore
 
 
 class FigureAnalysisUnavailable(RuntimeError):
@@ -351,7 +368,11 @@ class OllamaFigureAnalysisService:
         references: Sequence[FigureSourceReference],
         *,
         on_analysis_started: Callable[[], None] | None = None,
+        checkpoint: FigureAnalysisCheckpoint | None = None,
+        on_checkpoint: Callable[[FigureAnalysisCheckpoint], None] | None = None,
     ) -> FigureAnalysisBatch:
+        """Analyze bounded candidates with a safe boundary before every figure."""
+
         started = perf_counter()
         if not self.config.enabled:
             raise FigureAnalysisUnavailable("L’analyse locale des figures est désactivée.")
@@ -365,15 +386,24 @@ class OllamaFigureAnalysisService:
                 model_name=self.config.model,
             )
         identity = self.gateway.identity()
-        if on_analysis_started is not None:
-            on_analysis_started()
         admitted: list[FigureEvidence] = []
         warnings: list[str] = []
         processed = 0
-        with _FIGURE_ANALYSIS_LOCK:
+        current_checkpoint = checkpoint
+        with _figure_analysis_capacity(self.config):
             for candidate in candidates[: self.config.max_figures]:
+                # The durable chat handler uses this callback to publish progress and
+                # acknowledge cancellation. It is intentionally per figure so a
+                # cancellation cannot wait for the whole visual batch to finish.
+                if on_analysis_started is not None:
+                    on_analysis_started()
                 try:
-                    evidence = self._analyze_candidate(question, candidate, identity)
+                    evidence, checkpoint_item = self._analyze_candidate(
+                        question,
+                        candidate,
+                        identity,
+                        checkpoint=current_checkpoint,
+                    )
                 except (OSError, RuntimeError, ValidationError, fitz.FileDataError) as error:
                     warnings.append(
                         f"Une figure de la page {candidate.element['page_number']} "
@@ -381,6 +411,10 @@ class OllamaFigureAnalysisService:
                     )
                     continue
                 processed += 1
+                if current_checkpoint is not None:
+                    current_checkpoint = current_checkpoint.with_item(checkpoint_item)
+                    if on_checkpoint is not None:
+                        on_checkpoint(current_checkpoint)
                 if evidence is not None:
                     admitted.append(evidence)
         if processed and not admitted:
@@ -507,7 +541,9 @@ class OllamaFigureAnalysisService:
         question: str,
         candidate: _Candidate,
         model_identity: VisualModelIdentity,
-    ) -> FigureEvidence | None:
+        *,
+        checkpoint: FigureAnalysisCheckpoint | None = None,
+    ) -> tuple[FigureEvidence | None, FigureAnalysisCheckpointItem]:
         crop = self._render(candidate)
         image_sha256 = hashlib.sha256(crop.image).hexdigest()
         cleaned_question = " ".join(question.split())
@@ -552,8 +588,37 @@ class OllamaFigureAnalysisService:
             model_name=model_identity.model_id,
             model_revision=model_identity.model_revision,
         )
+        checkpoint_item = next(
+            (
+                item
+                for item in (checkpoint.items if checkpoint is not None else [])
+                if (
+                    item.element_id == str(candidate.element["id"])
+                    and item.image_sha256 == image_sha256
+                    and item.analysis_contract_sha256 == request.idempotency_key
+                    and item.model_name == model_identity.model_id
+                    and item.model_revision == model_identity.model_revision
+                )
+            ),
+            None,
+        )
+        if (
+            checkpoint_item is not None
+            and cached is not None
+            and checkpoint_item.analysis_id == str(cached["id"])
+            and checkpoint_item.admitted == bool(cached["admitted"])
+        ):
+            return (
+                self._evidence(candidate, cached) if cached["admitted"] else None,
+                checkpoint_item,
+            )
+            # The checkpoint is only a hint; SQLite remains authoritative when
+            # an interrupted or manually altered checkpoint disagrees with it.
         if cached is not None:
-            return self._evidence(candidate, cached) if cached["admitted"] else None
+            return (
+                self._evidence(candidate, cached) if cached["admitted"] else None,
+                self._checkpoint_item(candidate, request, cached),
+            )
 
         request_started = perf_counter()
         response = self.gateway.analyze(request, image=crop.image)
@@ -610,7 +675,26 @@ class OllamaFigureAnalysisService:
                 "duration_seconds": duration,
             }
         )
-        return self._evidence(candidate, stored) if validated else None
+        return (
+            self._evidence(candidate, stored) if validated else None,
+            self._checkpoint_item(candidate, request, stored),
+        )
+
+    @staticmethod
+    def _checkpoint_item(
+        candidate: _Candidate,
+        request: ScientificFigureAnalysisRequest,
+        stored: dict[str, Any],
+    ) -> FigureAnalysisCheckpointItem:
+        return FigureAnalysisCheckpointItem(
+            element_id=str(candidate.element["id"]),
+            image_sha256=request.artifact.image_sha256,
+            analysis_contract_sha256=request.idempotency_key,
+            model_name=str(stored["model_name"]),
+            model_revision=str(stored["model_revision"]),
+            analysis_id=str(stored["id"]),
+            admitted=bool(stored["admitted"]),
+        )
 
     @staticmethod
     def _observation_text(

@@ -227,6 +227,11 @@ def chatbot_sources(
             origin=(
                 "external_api" if record.record_id.startswith(EXTERNAL_PREFIX) else "local_rag"
             ),
+            source_family=(
+                "ascocid_knowledge"
+                if "ascocid_wiki" in record.sources
+                else "scientific_publication"
+            ),
             evidence_level="abstract",
             scope=_record_scope(record.record_id),
             title=record.title,
@@ -300,6 +305,11 @@ def chatbot_sources_from_evidence(
             ChatbotSource(
                 record_id=record.record_id,
                 origin=record.origin,
+                source_family=(
+                    "ascocid_knowledge"
+                    if "ascocid_wiki" in record.providers
+                    else "scientific_publication"
+                ),
                 evidence_level=record.evidence_level,
                 scope=record.scope,
                 article_id=record.article_id,

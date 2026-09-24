@@ -127,6 +127,7 @@ class ChatbotSource(BaseModel):
 
     record_id: str
     origin: Literal["local_rag", "external_api"]
+    source_family: Literal["scientific_publication", "ascocid_knowledge"] = "scientific_publication"
     evidence_level: Literal["abstract", "full_text"] = "abstract"
     scope: CorpusScope | None = None
     article_id: str | None = None
@@ -145,6 +146,66 @@ class ChatbotSource(BaseModel):
     # It is emitted only after the authoritative local file check succeeds.
     local_pdf_url: str | None = None
     snippet: str = Field(max_length=800)
+
+
+class ChatbotCitationEvidence(BaseModel):
+    """Exact persisted passage supporting one visible inline citation."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    evidence_id: str = Field(min_length=1, max_length=300)
+    snippet: str = Field(min_length=1, max_length=1_200)
+    chunk_id: int | None = Field(default=None, gt=0)
+    section: str | None = Field(default=None, max_length=200)
+    page_start: int | None = Field(default=None, ge=1)
+    page_end: int | None = Field(default=None, ge=1)
+    section_path: str | None = Field(default=None, max_length=2_000)
+    paragraph_start: int | None = Field(default=None, ge=0)
+    paragraph_end: int | None = Field(default=None, ge=0)
+    figure_label: str | None = Field(default=None, max_length=500)
+    source_text_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    presented_text_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+
+    @model_validator(mode="after")
+    def validate_locator(self) -> ChatbotCitationEvidence:
+        if (self.page_start is None) != (self.page_end is None):
+            raise ValueError("citation evidence pages must be both present or both absent")
+        if (
+            self.page_start is not None
+            and self.page_end is not None
+            and self.page_end < self.page_start
+        ):
+            raise ValueError("citation evidence page range is invalid")
+        structural = (self.section_path, self.paragraph_start, self.paragraph_end)
+        if any(value is not None for value in structural) and not all(
+            value is not None for value in structural
+        ):
+            raise ValueError("citation structural locator must be complete")
+        return self
+
+
+class ChatbotCitationAnchor(BaseModel):
+    """Safe UI target for one claim-to-source citation rendered in the answer."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    citation_id: str = Field(pattern=r"^cite-[0-9a-f]{16}$")
+    display_index: int = Field(ge=1)
+    label: str = Field(min_length=1, max_length=700)
+    record_id: str = Field(min_length=1, max_length=300)
+    source_family: Literal["scientific_publication", "ascocid_knowledge"]
+    article_id: str | None = None
+    title: str = Field(min_length=1, max_length=1_000)
+    evidence: list[ChatbotCitationEvidence] = Field(min_length=1, max_length=8)
+    local_pdf_url: str | None = None
+    source_url: str | None = None
+
+    @model_validator(mode="after")
+    def validate_evidence_identity(self) -> ChatbotCitationAnchor:
+        evidence_ids = [item.evidence_id for item in self.evidence]
+        if len(evidence_ids) != len(set(evidence_ids)):
+            raise ValueError("citation anchor evidence ids must be unique")
+        return self
 
 
 class ChatbotFacetDraft(BaseModel):
@@ -258,6 +319,21 @@ class ChatbotRetrievalTrace(BaseModel):
         return self
 
 
+class ChatbotTraceCandidate(BaseModel):
+    """Private, content-free candidate identity carried into the durable manifest."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    item_id: str = Field(min_length=1, max_length=300)
+    revision: int = Field(default=1, ge=1)
+    content_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    stage: Literal["retrieval", "fusion", "semantic_filter", "final_context"]
+    rank: int = Field(ge=0)
+    score: float | None = Field(default=None, ge=0.0, le=1.0)
+    decision: Literal["retained", "rejected", "omitted"]
+    reason: str | None = Field(default=None, pattern=r"^[a-z0-9_]{1,100}$")
+
+
 class ScientificGenerationTrace(BaseModel):
     """Non-textual measurements for one bounded scientific generation phase."""
 
@@ -332,6 +408,7 @@ class ChatbotResult(BaseModel):
     retrieval_query: str
     answer_markdown: str
     sources: list[ChatbotSource]
+    citation_anchors: list[ChatbotCitationAnchor] = Field(default_factory=list, max_length=80)
     warnings: list[str]
     model: str
     local_result_count: int = Field(ge=0)
@@ -360,6 +437,21 @@ class ChatbotResult(BaseModel):
     answer_effort: AnswerEffort = AnswerEffort.BALANCED
     timings: list[ChatbotTiming] = Field(default_factory=list, max_length=40)
     retrieval_traces: list[ChatbotRetrievalTrace] = Field(default_factory=list, max_length=40)
+    retrieval_trace_candidates: list[ChatbotTraceCandidate] = Field(
+        default_factory=list,
+        max_length=300,
+        exclude=True,
+    )
+    trace_corpus_fingerprint_before: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+        exclude=True,
+    )
+    trace_corpus_fingerprint_after: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+        exclude=True,
+    )
     generation_traces: list[ScientificGenerationTrace] = Field(default_factory=list, max_length=5)
     evaluation: ChatbotEvaluationTrace | None = None
 

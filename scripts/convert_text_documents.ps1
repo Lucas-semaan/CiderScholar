@@ -14,7 +14,7 @@ param(
 $ErrorActionPreference = "Stop"
 $wordExtensions = @(".doc", ".docx", ".htm", ".html", ".mht", ".odt", ".rtf", ".txt")
 $powerPointExtensions = @(".pps", ".ppt", ".pptx")
-$excelExtensions = @(".csv", ".xls", ".xlsx")
+$excelExtensions = @(".csv", ".xls", ".xlsx", ".xlsm")
 $supportedExtensions = $wordExtensions + $powerPointExtensions + $excelExtensions
 $sourceRoot = (Resolve-Path -LiteralPath $SourceDirectory).Path
 $outputRoot = [System.IO.Path]::GetFullPath($OutputDirectory)

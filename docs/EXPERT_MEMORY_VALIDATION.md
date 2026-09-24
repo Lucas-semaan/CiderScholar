@@ -1,7 +1,17 @@
 # Mémoire experte — validation, exploitation et consigne d’agent
 
 Plan proposé du 7 septembre 2026. Lire avec la [roadmap](EXPERT_MEMORY_ROADMAP.md) et les
-[contrats](EXPERT_MEMORY_CONTRACTS.md). Les tests `expert_*` décrits ci-dessous restent à écrire.
+[contrats](EXPERT_MEMORY_CONTRACTS.md). Les matrices ci-dessous restent la référence de couverture ;
+une partie importante des tests `expert_*` est maintenant implémentée et son état courant est suivi
+dans [EXPERT_MEMORY_PROGRESS.md](EXPERT_MEMORY_PROGRESS.md).
+
+## État technique courant — 24 septembre 2026
+
+Le dépôt passe les contrôles obligatoires avec 1 582 tests backend, Ruff sur 586 fichiers et la CI
+frontend (108 tests et build de production). Cette réussite est technique uniquement : elle ne constitue
+ni un pilote scientifique, ni une adjudication experte, ni une signature d'autorité. Les tests
+utilisent des bases temporaires et des fixtures synthétiques ; aucune activation réelle n'est
+autorisée par cette preuve.
 
 ## V0. Validation à chaque lot
 

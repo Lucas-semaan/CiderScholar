@@ -22,6 +22,7 @@ from app.jobs.repository import (
     EvaluationRunBusyError,
     JobRepository,
 )
+from app.knowledge.trace import ExpertRunManifest, TraceCost, TraceOutput
 
 
 def _seed_user_message(repository: JobRepository) -> tuple[UUID, UUID]:
@@ -69,6 +70,26 @@ def _seed_empty_conversation(repository: JobRepository) -> UUID:
     return conversation_id
 
 
+def _running_trace(job, now: datetime) -> ExpertRunManifest:
+    digest = "a" * 64
+    return ExpertRunManifest(
+        run_id=uuid4(),
+        job_id=job.id,
+        attempt=job.attempt,
+        code_revision="test",
+        question_sha256=digest,
+        user_context_sha256=digest,
+        answer_effort="balanced",
+        interaction_mode="research",
+        configuration_sha256=digest,
+        sql_schema_version=47,
+        output=TraceOutput(state="running"),
+        cost=TraceCost(),
+        created_at=now,
+        updated_at=now,
+    )
+
+
 def test_job_repository_uses_a_temporary_sqlite_file(tmp_path) -> None:
     database_path = tmp_path / "queue.sqlite3"
     repository = JobRepository(database_path)
@@ -107,6 +128,232 @@ def test_enqueue_atomically_persists_job_and_initial_event(tmp_path) -> None:
             (str(job.id),),
         ).fetchone()
     assert tuple(event) == ("queued", "waiting", "job.enqueued")
+
+
+def test_trace_checkpoint_requires_current_lease_and_links_on_success(tmp_path) -> None:
+    repository = JobRepository(tmp_path / "queue.sqlite3")
+    repository.initialize()
+    conversation_id, message_id = _seed_user_message(repository)
+    payload = ChatAnswerPayload(
+        message="Question tracée",
+        conversation_id=conversation_id,
+        client_request_id=uuid4(),
+    )
+    now = datetime(2026, 9, 23, 12, tzinfo=UTC)
+    repository.enqueue(payload, user_message_id=message_id, now=now)
+    job = repository.claim_next(
+        worker_id="worker-trace",
+        lease_duration=timedelta(minutes=5),
+        now=now,
+    )
+    assert job is not None
+    digest = "a" * 64
+    manifest = ExpertRunManifest(
+        run_id=uuid4(),
+        job_id=job.id,
+        attempt=job.attempt,
+        code_revision="test",
+        question_sha256=digest,
+        user_context_sha256=digest,
+        answer_effort="balanced",
+        interaction_mode="research",
+        configuration_sha256=digest,
+        sql_schema_version=47,
+        output=TraceOutput(state="running"),
+        cost=TraceCost(),
+        created_at=now,
+        updated_at=now,
+    )
+
+    assert repository.save_trace_checkpoint(
+        job.id,
+        worker_id="worker-trace",
+        manifest=manifest,
+        now=now,
+    )
+    assert not repository.save_trace_checkpoint(
+        job.id,
+        worker_id="stale-worker",
+        manifest=manifest,
+        now=now,
+    )
+    final_manifest = manifest.model_copy(
+        update={
+            "state": "succeeded",
+            "output": TraceOutput(state="succeeded", response_sha256=digest),
+            "updated_at": now + timedelta(seconds=1),
+        }
+    )
+    completed = repository.persist_result_and_succeed(
+        job.id,
+        worker_id="worker-trace",
+        assistant_content="Réponse tracée",
+        assistant_response={"answer": "Réponse tracée"},
+        response_time_milliseconds=10,
+        trace_manifest=final_manifest,
+        now=now + timedelta(seconds=1),
+    )
+    assert completed is not None
+    with repository.database.connect() as connection:
+        row = connection.execute(
+            """
+            SELECT state, result_message_id, manifest_sha256
+            FROM expert_run_manifests WHERE job_id = ? AND attempt = ?
+            """,
+            (str(job.id), job.attempt),
+        ).fetchone()
+    assert row["state"] == "succeeded"
+    assert row["result_message_id"] == str(completed.result_message_id)
+    assert row["manifest_sha256"] == final_manifest.manifest_sha256()
+
+
+def test_failure_and_cancellation_close_the_trace_in_the_same_transition(tmp_path) -> None:
+    repository = JobRepository(tmp_path / "queue.sqlite3")
+    repository.initialize()
+    now = datetime(2026, 9, 23, 12, tzinfo=UTC)
+
+    conversation_id, message_id = _seed_user_message(repository)
+    repository.enqueue(
+        ChatAnswerPayload(
+            message="Question en échec",
+            conversation_id=conversation_id,
+            client_request_id=uuid4(),
+        ),
+        user_message_id=message_id,
+        now=now,
+    )
+    failed_job = repository.claim_next(
+        worker_id="worker-terminal",
+        lease_duration=timedelta(minutes=5),
+        now=now,
+    )
+    assert failed_job is not None
+    failed_trace = _running_trace(failed_job, now)
+    assert repository.save_trace_checkpoint(
+        failed_job.id,
+        worker_id="worker-terminal",
+        manifest=failed_trace,
+        now=now,
+    )
+    failed = repository.fail_attempt(
+        failed_job.id,
+        worker_id="worker-terminal",
+        error_code=JobErrorKind.AUTHENTICATION,
+        safe_message="La génération a échoué.",
+        now=now + timedelta(seconds=1),
+    )
+    assert failed is not None and failed.state is JobState.FAILED
+    with repository.database.connect() as connection:
+        failed_row = connection.execute(
+            "SELECT payload_json, state, result_message_id FROM expert_run_manifests "
+            "WHERE job_id = ? AND attempt = ?",
+            (str(failed_job.id), failed_job.attempt),
+        ).fetchone()
+    assert failed_row["state"] == "failed"
+    assert failed_row["result_message_id"] == str(failed.result_message_id)
+    assert (
+        ExpertRunManifest.model_validate_json(failed_row["payload_json"]).output.state == "failed"
+    )
+
+    cancel_conversation, cancel_message = _seed_user_message(repository)
+    repository.enqueue(
+        ChatAnswerPayload(
+            message="Question annulée",
+            conversation_id=cancel_conversation,
+            client_request_id=uuid4(),
+        ),
+        user_message_id=cancel_message,
+        now=now + timedelta(seconds=2),
+    )
+    cancel_job = repository.claim_next(
+        worker_id="worker-terminal",
+        lease_duration=timedelta(minutes=5),
+        now=now + timedelta(seconds=2),
+    )
+    assert cancel_job is not None
+    requested = repository.request_cancellation(
+        cancel_job.id,
+        now=now + timedelta(seconds=3),
+    )
+    assert requested is not None
+    cancel_trace = _running_trace(cancel_job, now + timedelta(seconds=2))
+    assert repository.save_trace_checkpoint(
+        cancel_job.id,
+        worker_id="worker-terminal",
+        manifest=cancel_trace,
+        now=now + timedelta(seconds=3),
+    )
+    cancelled = repository.acknowledge_cancellation(
+        cancel_job.id,
+        worker_id="worker-terminal",
+        now=now + timedelta(seconds=4),
+    )
+    assert cancelled is not None and cancelled.state is JobState.CANCELLED
+    with repository.database.connect() as connection:
+        cancel_row = connection.execute(
+            "SELECT payload_json, state, result_message_id FROM expert_run_manifests "
+            "WHERE job_id = ? AND attempt = ?",
+            (str(cancel_job.id), cancel_job.attempt),
+        ).fetchone()
+    assert cancel_row["state"] == "cancelled"
+    assert cancel_row["result_message_id"] == str(cancelled.result_message_id)
+    assert (
+        ExpertRunManifest.model_validate_json(cancel_row["payload_json"]).output.state
+        == "cancelled"
+    )
+
+
+def test_enqueue_pins_the_current_eligible_expert_release(tmp_path) -> None:
+    repository = JobRepository(tmp_path / "queue.sqlite3")
+    repository.initialize()
+    now = datetime(2026, 9, 23, 12, tzinfo=UTC)
+    release_id = uuid4()
+    package_sha256 = "b" * 64
+    recipe_sha256 = "c" * 64
+    with repository.database.transaction() as connection:
+        connection.execute(
+            """
+            INSERT INTO expert_releases(
+                id, package_sha256, schema_version, app_min_version, created_at,
+                manifest_json, state
+            ) VALUES (?, ?, 1, '0.2.11', ?, '{}', 'eligible')
+            """,
+            (str(release_id), package_sha256, now.isoformat()),
+        )
+        connection.execute(
+            """
+            INSERT INTO expert_release_items(
+                release_id, item_id, revision, kind, content_sha256, payload_json
+            ) VALUES (?, 'recipe.chat', 1, 'recipe', ?, ?)
+            """,
+            (
+                str(release_id),
+                recipe_sha256,
+                '{"data":{"recipe_version":"1.0.0"}}',
+            ),
+        )
+        connection.execute(
+            "UPDATE expert_active_release SET release_id = ?, generation = 1 WHERE singleton = 1",
+            (str(release_id),),
+        )
+    pin = repository.resolve_expert_memory_pin(mode="shadow")
+    assert pin.release_id == release_id
+    assert pin.release_sha256 == package_sha256
+    assert pin.recipe_version == "1.0.0"
+    assert pin.recipe_sha256 == recipe_sha256
+
+    conversation_id, message_id = _seed_user_message(repository)
+    queued = repository.enqueue(
+        ChatAnswerPayload(
+            message="Question épinglée",
+            conversation_id=conversation_id,
+            client_request_id=uuid4(),
+            expert_memory_pin=pin,
+        ),
+        user_message_id=message_id,
+        now=now,
+    )
+    assert queued.payload.expert_memory_pin == pin
 
 
 def test_enqueue_rolls_back_job_when_initial_event_fails(tmp_path, monkeypatch) -> None:
@@ -278,6 +525,37 @@ def test_evaluation_retry_preserves_global_single_job_execution(tmp_path) -> Non
     assert retried.payload.evaluation_question_sha256 == (
         original.job.payload.evaluation_question_sha256
     )
+
+
+def test_evaluation_cell_replay_rejects_changed_immutable_request(tmp_path) -> None:
+    repository = JobRepository(tmp_path / "queue.sqlite3")
+    repository.initialize()
+    request_id = uuid4()
+    original = repository.enqueue_evaluation_question(
+        run_id="run-idempotent",
+        question_id="Q1",
+        profile="p0",
+        message="Question immuable",
+        client_request_id=request_id,
+    )
+
+    replay = repository.enqueue_evaluation_question(
+        run_id="run-idempotent",
+        question_id="Q1",
+        profile="p0",
+        message="Question immuable",
+        client_request_id=request_id,
+    )
+    assert replay.job.id == original.job.id
+
+    with pytest.raises(EvaluationQuestionAlreadySubmittedError, match="immutable request"):
+        repository.enqueue_evaluation_question(
+            run_id="run-idempotent",
+            question_id="Q1",
+            profile="p0",
+            message="Question modifiée",
+            client_request_id=request_id,
+        )
 
 
 def test_enqueue_retry_returns_the_existing_job(tmp_path) -> None:

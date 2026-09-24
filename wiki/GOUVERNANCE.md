@@ -4,7 +4,9 @@
 
 Une information entre dans le wiki lorsqu'elle sert fréquemment à cadrer une question, distinguer deux concepts, choisir les observations nécessaires, comparer des options ou rendre visible une contrepartie. Une dose, un seuil, un protocole d'appareil, un résultat particulier, une spécification, une réglementation ou une décision historique reste dans le RAG et n'est chargé que lorsque la question le justifie.
 
-Le wiki ne doit jamais servir de citation scientifique. Le chatbot peut s'en servir pour formuler des hypothèses et structurer une réponse, mais chaque affirmation affichée doit être soutenue par les preuves persistées du RAG. En cas de contradiction, la preuve scientifique contextualisée prime dans la réponse et la contradiction déclenche une revue du wiki.
+Le cœur Markdown distillé ne doit jamais servir seul de citation scientifique. Le chatbot peut s'en servir pour formuler des hypothèses et structurer une réponse, mais chaque affirmation affichée doit être soutenue par une preuve persistée. Les documents sources du dossier `wiki/` deviennent des preuves Ascocid lorsqu'ils ont été extraits, reliés à leur empreinte et persistés dans SQLite ; ils sont alors cités sous la forme `Ascocid — <nom du fichier>`. En cas de contradiction, la preuve contextualisée prime dans la réponse et la contradiction déclenche une revue du cœur distillé.
+
+En mode concis, une couverture A/B de tous les besoins de vérification par les seuls documents Ascocid ferme la réponse sur cette collection. Une couverture partielle déclenche le complément du corpus scientifique général. Les modes équilibré et approfondi peuvent combiner les deux collections, sans attribuer au cœur Markdown une autorité que seuls les documents persistés possèdent.
 
 ## Autorité
 
@@ -28,4 +30,3 @@ Les suppressions restent visibles dans l'historique Git. Une source modifiée ne
 ## Budgets d'attention
 
 Le cœur est chargé pour toute question scientifique cidricole acceptée. Au plus deux pages thématiques sont ajoutées par correspondance lexicale déterministe. Le texte injecté est borné à 12 000 caractères. Une absence de correspondance conserve le cœur seul et n'empêche jamais le RAG de rechercher la question.
-

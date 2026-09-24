@@ -12,6 +12,7 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.chat_effort import AnswerEffort, migrate_legacy_answer_effort
+from app.expert_feedback.models import CandidatePatch
 
 
 class JobType(StrEnum):
@@ -23,6 +24,7 @@ class JobType(StrEnum):
     DEEP_RESEARCH = "deep_research"
     LONG_SYNTHESIS = "long_synthesis"
     CORPUS_INGESTION = "corpus_ingestion"
+    EXPERT_IMPROVEMENT = "expert_improvement"
 
 
 # These names are documented and unavailable until their own roadmap task adds
@@ -159,6 +161,39 @@ def retry_delay_after(attempt: int) -> timedelta | None:
     return JOB_RETRY_DELAYS[attempt - 1]
 
 
+class ExpertMemoryPin(BaseModel):
+    """Internal immutable identity of the expert-memory release used by a job."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal[1] = 1
+    mode: Literal["off", "shadow", "active"] = "off"
+    release_id: UUID | None = None
+    release_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    recipe_version: str | None = Field(default=None, max_length=80)
+    recipe_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+
+    @model_validator(mode="after")
+    def coherent_release_identity(self) -> ExpertMemoryPin:
+        if (self.release_id is None) != (self.release_sha256 is None):
+            raise ValueError("expert memory release identity must include ID and hash")
+        if self.mode == "off" and any(
+            value is not None
+            for value in (
+                self.release_id,
+                self.release_sha256,
+                self.recipe_version,
+                self.recipe_sha256,
+            )
+        ):
+            raise ValueError("off expert memory jobs cannot carry a release pin")
+        if (self.recipe_version is None) != (self.recipe_sha256 is None):
+            raise ValueError("expert memory recipe identity must include version and hash")
+        if self.mode != "off" and self.release_id is None:
+            raise ValueError("shadow and active expert memory jobs require a release pin")
+        return self
+
+
 class ChatAnswerPayload(BaseModel):
     """Versioned internal input for a durable chat-answer job."""
 
@@ -172,6 +207,7 @@ class ChatAnswerPayload(BaseModel):
     analyze_figures: bool = False
     interaction_mode: Literal["auto", "research", "conversation"] = "auto"
     answer_effort: AnswerEffort = AnswerEffort.BALANCED
+    expert_memory_pin: ExpertMemoryPin = Field(default_factory=ExpertMemoryPin)
     evaluation_run_id: str | None = Field(
         default=None,
         pattern=r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,79}$",
@@ -185,6 +221,7 @@ class ChatAnswerPayload(BaseModel):
         default=None,
         pattern=r"^[0-9a-f]{64}$",
     )
+    orchestrator_parent_job_id: UUID | None = None
 
     @model_validator(mode="before")
     @classmethod
@@ -217,6 +254,8 @@ class ChatAnswerPayload(BaseModel):
         if not any(metadata):
             if self.evaluation_question_sha256 is not None:
                 raise ValueError("an evaluation fingerprint requires complete evaluation metadata")
+            if self.orchestrator_parent_job_id is not None:
+                raise ValueError("an orchestrator parent requires complete evaluation metadata")
             return self
         if not all(metadata):
             raise ValueError("evaluation run, question and profile must be supplied together")
@@ -329,6 +368,71 @@ class CorpusIngestionPayload(BaseModel):
         return cleaned
 
 
+class ExpertImprovementPayload(BaseModel):
+    """Versioned private input for diagnosis, compilation, evaluation, or orchestration."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    version: Literal[1] = 1
+    operation: Literal["diagnose", "compile", "evaluate", "orchestrate"] = "diagnose"
+    correction_id: UUID | None = None
+    expected_revision: int | None = Field(default=None, strict=True, ge=1)
+    max_llm_requests: int = Field(default=0, strict=True, ge=0, le=0)
+    conversation_id: UUID
+    client_request_id: UUID
+    diagnosis_id: UUID | None = None
+    candidate_patch: CandidatePatch | None = None
+    evaluation_id: UUID | None = None
+    base_state_path: str | None = Field(default=None, min_length=1, max_length=400)
+    candidate_state_path: str | None = Field(default=None, min_length=1, max_length=400)
+    campaign_pair_path: str | None = Field(default=None, min_length=1, max_length=400)
+
+    @model_validator(mode="after")
+    def exact_operation_shape(self) -> ExpertImprovementPayload:
+        if self.operation in {"diagnose", "compile"} and (
+            self.correction_id is None or self.expected_revision is None
+        ):
+            raise ValueError("diagnosis and compilation jobs require correction identity")
+        if self.operation == "compile" and (
+            self.diagnosis_id is None or self.candidate_patch is None
+        ):
+            raise ValueError("candidate compilation requires diagnosis_id and candidate_patch")
+        if self.operation == "diagnose" and (
+            self.diagnosis_id is not None or self.candidate_patch is not None
+        ):
+            raise ValueError("diagnosis jobs cannot carry candidate compilation data")
+        if self.operation == "evaluate" and (
+            self.evaluation_id is None
+            or self.base_state_path is None
+            or self.candidate_state_path is None
+            or self.correction_id is not None
+            or self.expected_revision is not None
+            or self.diagnosis_id is not None
+            or self.candidate_patch is not None
+            or self.campaign_pair_path is not None
+        ):
+            raise ValueError("evaluation jobs require only evaluation and campaign identities")
+        if self.operation == "orchestrate" and (
+            self.evaluation_id is None
+            or self.campaign_pair_path is None
+            or self.correction_id is not None
+            or self.expected_revision is not None
+            or self.diagnosis_id is not None
+            or self.candidate_patch is not None
+            or self.base_state_path is not None
+            or self.candidate_state_path is not None
+        ):
+            raise ValueError("orchestration jobs require only evaluation and campaign identity")
+        if self.operation not in {"evaluate", "orchestrate"} and (
+            self.evaluation_id is not None
+            or self.base_state_path is not None
+            or self.candidate_state_path is not None
+            or self.campaign_pair_path is not None
+        ):
+            raise ValueError("evaluation campaign data is only valid for evaluation jobs")
+        return self
+
+
 JobPayload = (
     ChatAnswerPayload
     | WeeklyMaintenancePayload
@@ -336,6 +440,7 @@ JobPayload = (
     | DeepResearchPayload
     | LongSynthesisPayload
     | CorpusIngestionPayload
+    | ExpertImprovementPayload
 )
 
 

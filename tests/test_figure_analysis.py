@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import hashlib
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from io import BytesIO
 
 import fitz
+import pytest
 from PIL import Image
 
 from app.corpora import CorpusScope, corpus_paths, settings_for_corpus
@@ -15,12 +19,14 @@ from app.ingestion.visual_contracts import (
     ScientificFigureAnalysisResponse,
     VisualModelIdentity,
 )
+from app.jobs.worker import JobLeaseLostError
 from app.llm.figure_analysis import (
     OllamaFigureAnalysisService,
     attach_figure_evidence,
     figure_references_from_chat_records,
 )
 from app.models.chatbot import ChatEvidencePassage, ChatEvidenceRecord
+from app.retrieval.chat_checkpoint import FigureAnalysisCheckpoint
 
 
 class _Gateway:
@@ -108,23 +114,54 @@ def _seed_figure(settings) -> tuple[ChatEvidenceRecord, Database]:
 
 
 def test_local_figure_gateway_receives_only_crop_bytes_and_versioned_contract(settings) -> None:
+    settings.figure_analysis.enabled = True
     record, database = _seed_figure(settings)
     gateway = _Gateway()
     service = OllamaFigureAnalysisService(settings, gateway=gateway)
+    checkpoint_events: list[FigureAnalysisCheckpoint] = []
+    checkpoint = FigureAnalysisCheckpoint.empty("a" * 64)
 
     first = service.analyze(
         "Quel effet du traitement la figure montre-t-elle ?",
         figure_references_from_chat_records([record]),
+        checkpoint=checkpoint,
+        on_checkpoint=checkpoint_events.append,
     )
+    first_checkpoint = checkpoint_events[0]
     second = service.analyze(
         "Quel effet du traitement la figure montre-t-elle ?",
         figure_references_from_chat_records([record]),
+        checkpoint=first_checkpoint,
+        on_checkpoint=checkpoint_events.append,
     )
 
     assert first.processed_count == 1
     assert len(first.admitted) == 1
     assert len(gateway.requests) == 1
+    assert len(checkpoint_events) == 2
+    assert checkpoint_events[0].items[0].analysis_id == first.admitted[0].analysis_id
+    assert checkpoint_events[1].items[0].analysis_id == first.admitted[0].analysis_id
+    assert checkpoint_events[0].items[0].admitted is True
     assert second.admitted[0].analysis_id == first.admitted[0].analysis_id
+    corrupted = first_checkpoint.model_copy(
+        update={
+            "items": [
+                first_checkpoint.items[0].model_copy(
+                    update={"analysis_id": "figure-analysis-" + "e" * 24}
+                )
+            ]
+        }
+    )
+    repaired_events: list[FigureAnalysisCheckpoint] = []
+    repaired = service.analyze(
+        "Quel effet du traitement la figure montre-t-elle ?",
+        figure_references_from_chat_records([record]),
+        checkpoint=corrupted,
+        on_checkpoint=repaired_events.append,
+    )
+    assert repaired.admitted[0].analysis_id == first.admitted[0].analysis_id
+    assert repaired_events[0].items[0].analysis_id == first.admitted[0].analysis_id
+    assert len(gateway.requests) == 1
     request = gateway.requests[0]
     assert request.version == 1
     assert request.prompt_version == "scientific-figure-analysis-v1"
@@ -140,6 +177,7 @@ def test_local_figure_gateway_receives_only_crop_bytes_and_versioned_contract(se
 
 
 def test_low_relevance_figure_is_persisted_but_not_admitted(settings) -> None:
+    settings.figure_analysis.enabled = True
     record, database = _seed_figure(settings)
     service = OllamaFigureAnalysisService(
         settings,
@@ -159,3 +197,64 @@ def test_low_relevance_figure_is_persisted_but_not_admitted(settings) -> None:
         ).fetchone()
     assert row["status"] == "rejected"
     assert row["validation_reason"] == "insufficient_relevance_readability_or_support"
+
+
+def test_figure_analysis_boundary_stops_after_lease_loss(settings, monkeypatch) -> None:
+    settings.figure_analysis.enabled = True
+    _record, _database = _seed_figure(settings)
+    service = OllamaFigureAnalysisService(settings, gateway=_Gateway())
+    monkeypatch.setattr(
+        service,
+        "_candidates",
+        lambda _question, _references: [object(), object()],
+    )
+    monkeypatch.setattr(
+        service,
+        "_analyze_candidate",
+        lambda _question, _candidate, _identity, **_kwargs: (None, object()),
+    )
+    calls = 0
+
+    def cancel_at_second_figure() -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise JobLeaseLostError("visual job lease lost")
+
+    with pytest.raises(JobLeaseLostError, match="visual job lease lost"):
+        service.analyze("Question visuelle", [], on_analysis_started=cancel_at_second_figure)
+    assert calls == 2
+
+
+def test_figure_analysis_capacity_is_shared_by_same_local_model(settings, monkeypatch) -> None:
+    settings.figure_analysis.enabled = True
+    settings.figure_analysis.max_concurrent_analyses = 1
+    services = [
+        OllamaFigureAnalysisService(settings, gateway=_Gateway()),
+        OllamaFigureAnalysisService(settings, gateway=_Gateway()),
+    ]
+    active = 0
+    maximum = 0
+    guard = threading.Lock()
+
+    def analyze(_question, _candidate, _identity, **_kwargs):
+        nonlocal active, maximum
+        with guard:
+            active += 1
+            maximum = max(maximum, active)
+        time.sleep(0.04)
+        with guard:
+            active -= 1
+        return None, object()
+
+    for service in services:
+        monkeypatch.setattr(service, "_candidates", lambda _question, _references: [object()])
+        monkeypatch.setattr(service, "_analyze_candidate", analyze)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [
+            executor.submit(service.analyze, "Question visuelle", []) for service in services
+        ]
+        [future.result() for future in futures]
+
+    assert maximum == 1

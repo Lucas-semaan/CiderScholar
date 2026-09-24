@@ -5,8 +5,9 @@ app:
   allow_bibliographic_apis: false
   allow_publisher_automation: false
   log_level: INFO
-  # La file reste illimitée; jusqu'à 20 réponses complètes peuvent être actives.
-  chat_worker_concurrency: 20
+  generation_provider_policy: argo_only
+  # Profil initial de la VM interne 32 Go ; augmenter seulement après un test de charge.
+  chat_worker_concurrency: 2
 
 expert_memory:
   # Instructions expertes optionnelles. Aucun apprentissage ni activation implicite.
@@ -40,8 +41,8 @@ notifications:
   enabled: false
 
 ingestion:
-  target_tokens: 500
-  max_tokens: 750
+  target_tokens: 420
+  max_tokens: 512
   overlap_tokens: 80
   min_page_text_characters: 25
   min_text_page_ratio: 0.15
@@ -98,11 +99,13 @@ argo:
   verify_tls: true
 
 figure_analysis:
-  # Analyse locale optionnelle, déclenchée depuis le bouton + du chatbot.
-  enabled: true
+  # Désactivé : l'édition interne est ARGO-only et la VM ne possède pas de GPU.
+  enabled: false
   base_url: http://127.0.0.1:11434
   model: qwen3-vl:8b-instruct
   max_figures: 5
+  # Capacité simultanée du modèle local ; 1 reste le profil CPU sûr par défaut.
+  max_concurrent_analyses: 1
   relevance_threshold: 0.80
   readability_threshold: 0.70
   render_scale: 2.0
@@ -291,6 +294,7 @@ synthesis:
   invalid_json_retries: 1
 
 memory:
-  warning_used_gb: 13.0
-  hard_process_limit_gb: 14.0
-  minimum_available_mb: 512
+  profile: 32gb
+  warning_used_gb: 24.0
+  hard_process_limit_gb: 20.0
+  minimum_available_mb: 6144

@@ -1,36 +1,49 @@
 # Modèle d’accès et de distribution
 
-Statut : accepté pour le pilote.
+Statut : cible interne acceptée le 24 septembre 2026. Cette décision remplace le pilote distribué sur
+postes Windows.
 
-## Installation
+## Déploiement interne
 
-- chaque membre de l’équipe installe CiderScholar sur son poste Windows 11 personnel ;
-- l’application écoute uniquement sur `127.0.0.1` ;
-- aucun compte ou écran de connexion CiderScholar n’est requis ;
-- le compte Windows et le profil local constituent la frontière de confidentialité ;
-- les conversations, travaux et clé ARGO restent sur le poste utilisateur.
+- une VM Linux unique héberge React, FastAPI, les workers, SQLite, Qdrant, E5, les PDF et les caches ;
+- la VM possède 32 Go de RAM, un CPU sans GPU et environ 200 Go de stockage ;
+- FastAPI reste sur `127.0.0.1` derrière un reverse proxy TLS authentifié ;
+- les membres de l'équipe accèdent au service partagé selon des identités et droits définis au proxy ;
+- les conversations, travaux, corpus et journaux restent sur la VM et suivent une politique de
+  sauvegarde et de rétention explicite.
 
-## Clé ARGO
+## Clé et fournisseur IA
 
-- chaque utilisateur fournit sa propre clé ;
-- la clé est saisie dans l’application et chiffrée avec Windows DPAPI ;
-- elle n’est jamais écrite dans `.env`, YAML, SharePoint, SQLite en clair ou les logs ;
-- elle reste disponible au worker local après fermeture du navigateur ;
+- ARGO avec `chat-gpt-oss-120b` est l'unique fournisseur de génération de l'édition interne ;
+- aucune API payante, aucun modèle local et aucun repli automatique ne sont autorisés ;
+- la clé est injectée comme secret Linux au processus worker et n'est jamais écrite dans YAML,
+  SQLite, les exports ou les logs ;
+- les permissions du secret, sa rotation et le redémarrage associé relèvent de l'administrateur VM ;
 - les quotas sont comptabilisés localement pour éviter les refus ARGO.
 
 ## Corpus commun
 
-- la machine administrateur conserve la copie principale modifiable ;
-- une sauvegarde est conservée sur un drive protégé ;
-- les versions publiées du RAG commun sont déposées dans un espace SharePoint protégé ;
-- chaque poste installe la même version validée du corpus commun ;
-- une mise à jour est téléchargée, vérifiée puis activée atomiquement au redémarrage ;
-- le corpus commun est traité comme non modifiable sur les postes utilisateurs.
+- SQLite sur la VM reste l'autorité scientifique ; Qdrant ne contient que vecteurs, identifiants et
+  scores nécessaires ;
+- les PDF, extractions, modèles locaux et index restent sur la VM ;
+- une sauvegarde hors VM, chiffrée et restaurée périodiquement en test, est obligatoire ;
+- les mises à jour du corpus restent versionnées, vérifiées et activées atomiquement ;
+- les utilisateurs ordinaires n'exécutent ni collecte, ni réindexation, ni suppression destructive.
 
 ## Administration
 
-- le rôle administrateur est activé uniquement par la configuration locale de la machine principale ;
-- les clés bibliographiques dédiées à l’outil restent uniquement sur cette machine ;
-- la collecte et la publication du corpus commun ne s’exécutent pas sur les postes utilisateurs ;
-- au premier lancement administrateur après l’échéance hebdomadaire, l’application propose la collecte ;
-- le lancement peut être accepté ou reporté ; aucune machine nocturne permanente n’est requise.
+- les rôles API, chat et ingestion/maintenance sont des unités d'exploitation séparées ;
+- le chat démarre avec une concurrence de deux, l'ingestion et la maintenance avec une concurrence de
+  un ; toute hausse exige un test de charge Linux 32 Go ;
+- les clés bibliographiques restent dans le coffre d'exploitation et ne sont accessibles qu'aux jobs
+  administratifs autorisés ;
+- collecte, OCR, réindexation et maintenance sont planifiés hors pic et sont reprenables ;
+- l'audit et le gate de capacité sont définis dans
+  [`LINUX_VM_32GB_ARCHITECTURE_AND_MEMORY_AUDIT.md`](LINUX_VM_32GB_ARCHITECTURE_AND_MEMORY_AUDIT.md).
+
+## Édition producteurs ultérieure
+
+Cette édition n'est pas implémentée. Elle utilisera un sous-corpus et son fournisseur de génération
+reste à décider entre API payante et modèle hébergé. Les contrats scientifiques et l'interface de
+fournisseur restent séparés pour éviter un verrou architectural, sans exposer ce choix dans l'édition
+interne ARGO-only.

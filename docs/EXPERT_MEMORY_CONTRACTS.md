@@ -346,11 +346,19 @@ checkpoint et le report sont atomiques. Ce n’est ni un échec ni un nouveau jo
 ne régressent pas. Chaque passage enfile/retrouve au plus une cellule idempotente puis rend le slot.
 Tester `chat_worker_concurrency=1`. À l’annulation, annuler les enfants actifs, attendre leur
 terminalité via les mêmes reports bornés et conserver leurs rapports ; aucun enfant orphelin.
-Étendre aussi `app/api/jobs.py` et le service d’annulation : un parent momentanément `queued` ne
-doit pas emprunter la suppression immédiate ordinaire sans propager l’annulation aux enfants.
+Le repository et `app/api/jobs.py` propagent désormais l’annulation d’un parent `orchestrate` aux
+cellules enfants identifiées par `orchestrator_parent_job_id` : une cellule en attente est clôturée
+immédiatement, une cellule en cours reçoit une demande coopérative, et le chemin parent `queued`
+ne passe jamais par la suppression immédiate ordinaire sans cette propagation.
 L’exclusivité des cellules CiderQA distingue le parent orchestrateur de ses propres cellules ;
 elle continue de refuser une autre campagne concurrente. Extraire de `EvaluationCampaignRunner`
 une primitive commune « avancer une cellule sans attendre », appelée par la CLI et le handler.
+
+Le payload `expert_improvement` accepte aussi l'opération `orchestrate` : le parent recharge le
+manifeste de deux campagnes, déferre sans consommer d'essai pendant qu'une cellule enfant est active,
+exclut uniquement son propre job de la gate d'exclusivité, puis enfile idempotemment le comparateur
+quand les deux campagnes sont terminales. Chaque cellule enfant conserve l'identifiant du parent
+pour rendre l'annulation de l'arbre déterministe et auditable.
 
 ## C6. CLI réutilisant les mêmes services
 
@@ -363,10 +371,10 @@ pour les artefacts privés. Les tests peuvent utiliser un répertoire temporaire
 | `lint_expert_knowledge` | `--knowledge-dir`, `--output` | Lecture seule ; pas de réseau ni accès aux bases. |
 | `import_expert_knowledge` | `--knowledge-dir`, `--config`, `--apply`, `--output` | Dry-run par défaut ; importe une candidate validée, jamais activation. |
 | `diagnose_expert_feedback` | `--correction-id`, `--expected-revision`, `--config`, `--run-dir`, `--max-llm-requests` | Crée/reprend le même travail ; défaut 0 appels, diagnostic déterministe. |
-| `compile_expert_candidate` | `--diagnosis-id`, `--config`, `--run-dir`, `--max-llm-requests` | 0 par défaut ; patch fourni/revu ou génération explicitement budgétée. |
-| `run_expert_memory_evaluation` | `--manifest`, `--config`, `--run-dir` | Planifie/reprend les cellules ; le manifest fixe autorisation/budget et snapshots. |
-| `promote_expert_memory` | `--candidate-id`, `--review-id`, `--expected-active-generation`, `--config`, `--apply`, `--output` | Dry-run par défaut ; mêmes gates que l’API, aucune auto-approbation. |
-| `rollback_expert_memory` | `--release-id`, `--expected-active-generation`, `--reason`, `--config`, `--apply`, `--output` | Dry-run puis bascule atomique explicite. |
+| `compile_expert_candidate` | `--diagnosis-id`, `--patch`, `--config`, `--run-dir`, `--max-llm-requests` | 0 par défaut ; patch fourni/revu, compilation isolée et reprenable ; aucune génération implicite. |
+| `run_expert_memory_evaluation` | `--manifest`, `--cases`, `--run-id-prefix`, `--config`, `--run-dir`, `--advance`/`--advance-pair`/`--observe-job-id`, `--enqueue-orchestrator`, `--evaluation-id`, `--client-request-id`, `--arm` | Prépare, fait progresser une campagne isolée base/candidate ou enfile le parent durable ; les hashes du manifeste fixent les cas et les releases, sans réponse attendue ni appel LLM implicite. L'arm candidate est refusé tant que base n'est pas terminale. |
+| `promote_expert_memory` | `--candidate-id`, `--review-id`, `--expected-active-generation`, `--config`, `--apply`, `--output` | Profil administrateur obligatoire ; dry-run par défaut avec les mêmes gates que l’API, aucune auto-approbation. |
+| `rollback_expert_memory` | `--release-id`, `--expected-active-generation`, `--reason`, `--config`, `--apply`, `--output` | Profil administrateur obligatoire ; dry-run puis bascule atomique explicite avec la même prévalidation que l’API. |
 
 `--run-dir` contient `manifest.json`, `checkpoint.json`, `report.json` et un diff sans données privées
 quand applicable ; fichiers écrits atomiquement. Une reprise avec entrées/hashes différents échoue

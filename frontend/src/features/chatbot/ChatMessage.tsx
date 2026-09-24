@@ -1,22 +1,29 @@
 import {
   Bot,
   ChartNoAxesCombined,
+  Check,
   Cloud,
+  Copy,
   ExternalLink,
   FileText,
   LibraryBig,
   MessageCircleMore,
+  MessageSquarePlus,
   ThumbsDown,
   ThumbsUp,
   Timer,
   UserRound,
 } from "lucide-react";
+import { useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
 import { Badge } from "@/components/ui/Badge";
 import { cn, formatNumber } from "@/lib/cn";
+import type { ChatbotCitationAnchor } from "@/types/chat";
 
+import { CitationEvidenceDialog } from "./CitationEvidenceDialog";
+import { ExpertCorrectionDialog } from "./ExpertCorrectionDialog";
 import { formatResponseTime, type ChatMessage as ChatMessageValue } from "./chatSession";
 import { sourceEvidenceLabel, sourceOriginLabel } from "./sourcePresentation";
 
@@ -75,6 +82,17 @@ export function ChatMessage({
   const assistant = message.role === "assistant";
   const terminalNotice = message.terminalNotice;
   const response = message.response;
+  const [selectedCitation, setSelectedCitation] = useState<ChatbotCitationAnchor | null>(null);
+  const [copied, setCopied] = useState(false);
+  const [correctionOpen, setCorrectionOpen] = useState(false);
+  const citationTriggerRef = useRef<HTMLElement | null>(null);
+  const citationById = useMemo(
+    () =>
+      new Map(
+        (response?.citation_anchors ?? []).map((citation) => [citation.citation_id, citation]),
+      ),
+    [response?.citation_anchors],
+  );
   const llmContextTrace = response?.retrieval_traces
     ?.slice()
     .reverse()
@@ -100,7 +118,40 @@ export function ChatMessage({
       >
         {assistant ? (
           <div className="space-y-3 text-sm leading-7 [&_a]:font-semibold [&_a]:text-forest-700 [&_h2]:text-base [&_h2]:font-bold [&_h3]:font-bold [&_li]:ml-5 [&_li]:list-disc [&_strong]:text-slate-900">
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>
+            <ReactMarkdown
+              components={{
+                a: ({ href, children }) => {
+                  const citationId = href?.startsWith("#citation-")
+                    ? href.slice("#citation-".length)
+                    : null;
+                  const citation = citationId ? citationById.get(citationId) : undefined;
+                  if (!citation) {
+                    return (
+                      <a href={href} rel="noreferrer" target="_blank">
+                        {children}
+                      </a>
+                    );
+                  }
+                  return (
+                    <button
+                      aria-haspopup="dialog"
+                      aria-label={`Voir la preuve ${citation.label}`}
+                      className="mx-0.5 inline-flex rounded-md border border-forest-200 bg-forest-50 px-1.5 py-0.5 align-baseline text-[11px] font-bold leading-5 text-forest-800 transition hover:border-forest-400 hover:bg-forest-100 focus-visible:ring-2 focus-visible:ring-forest-600"
+                      onClick={(event) => {
+                        citationTriggerRef.current = event.currentTarget;
+                        setSelectedCitation(citation);
+                      }}
+                      type="button"
+                    >
+                      {children}
+                    </button>
+                  );
+                },
+              }}
+              remarkPlugins={[remarkGfm]}
+            >
+              {message.content}
+            </ReactMarkdown>
           </div>
         ) : (
           <p className="whitespace-pre-wrap text-sm leading-6">{message.content}</p>
@@ -312,34 +363,81 @@ export function ChatMessage({
             )}
           </>
         )}
-        {assistant && onFeedback && message.id !== "welcome" && (
+        {assistant && message.id !== "welcome" && (
           <div className="mt-3 flex items-center gap-1 border-t border-slate-100 pt-2">
-            <span className="mr-1 text-[10px] text-slate-400">Cette réponse vous aide ?</span>
+            {onFeedback && (
+              <>
+                <span className="mr-1 text-[10px] text-slate-400">Cette réponse vous aide ?</span>
+                <button
+                  aria-label="Réponse utile"
+                  className={cn(
+                    "grid size-7 place-items-center rounded-lg text-slate-400 hover:bg-forest-50 hover:text-forest-700",
+                    message.helpful === true && "bg-forest-100 text-forest-700",
+                  )}
+                  onClick={() => onFeedback(message.id, true)}
+                  type="button"
+                >
+                  <ThumbsUp aria-hidden="true" className="size-3.5" />
+                </button>
+                <button
+                  aria-label="Réponse pas utile"
+                  className={cn(
+                    "grid size-7 place-items-center rounded-lg text-slate-400 hover:bg-red-50 hover:text-red-700",
+                    message.helpful === false && "bg-red-50 text-red-700",
+                  )}
+                  onClick={() => onFeedback(message.id, false)}
+                  type="button"
+                >
+                  <ThumbsDown aria-hidden="true" className="size-3.5" />
+                </button>
+              </>
+            )}
             <button
-              aria-label="Réponse utile"
-              className={cn(
-                "grid size-7 place-items-center rounded-lg text-slate-400 hover:bg-forest-50 hover:text-forest-700",
-                message.helpful === true && "bg-forest-100 text-forest-700",
-              )}
-              onClick={() => onFeedback(message.id, true)}
+              aria-label="Proposer une correction"
+              className="grid size-7 place-items-center rounded-lg text-slate-400 hover:bg-amber-50 hover:text-amber-700"
+              onClick={() => setCorrectionOpen(true)}
               type="button"
             >
-              <ThumbsUp aria-hidden="true" className="size-3.5" />
+              <MessageSquarePlus aria-hidden="true" className="size-3.5" />
             </button>
             <button
-              aria-label="Réponse pas utile"
-              className={cn(
-                "grid size-7 place-items-center rounded-lg text-slate-400 hover:bg-red-50 hover:text-red-700",
-                message.helpful === false && "bg-red-50 text-red-700",
-              )}
-              onClick={() => onFeedback(message.id, false)}
+              aria-label={copied ? "Réponse copiée" : "Copier la réponse"}
+              className="ml-auto grid size-7 place-items-center rounded-lg text-slate-400 hover:bg-slate-100 hover:text-slate-700"
+              onClick={() => {
+                if (!navigator.clipboard) return;
+                void navigator.clipboard
+                  .writeText(message.content)
+                  .then(() => {
+                    setCopied(true);
+                    window.setTimeout(() => setCopied(false), 1_600);
+                  })
+                  .catch(() => undefined);
+              }}
               type="button"
             >
-              <ThumbsDown aria-hidden="true" className="size-3.5" />
+              {copied ? (
+                <Check aria-hidden="true" className="size-3.5 text-forest-700" />
+              ) : (
+                <Copy aria-hidden="true" className="size-3.5" />
+              )}
             </button>
           </div>
         )}
       </div>
+      {selectedCitation && (
+        <CitationEvidenceDialog
+          anchor={selectedCitation}
+          onClose={() => setSelectedCitation(null)}
+          returnFocus={citationTriggerRef.current}
+        />
+      )}
+      {correctionOpen && (
+        <ExpertCorrectionDialog
+          messageContent={message.content}
+          messageId={message.id}
+          onClose={() => setCorrectionOpen(false)}
+        />
+      )}
       {!assistant && (
         <span className="grid size-9 shrink-0 place-items-center rounded-xl bg-cider-500 text-white shadow-soft">
           <UserRound aria-hidden="true" className="size-4" />

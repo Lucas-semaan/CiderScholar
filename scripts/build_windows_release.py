@@ -208,12 +208,26 @@ def _smoke_test_runtime(runtime: Path, application: Path) -> None:
 def _copy_application(staging: Path) -> None:
     application = staging / "application"
     application.mkdir()
-    for directory in ("app", "scripts", "wiki"):
+    for directory in ("app", "scripts"):
         shutil.copytree(
             PROJECT_ROOT / directory,
             application / directory,
             ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
         )
+    shutil.copytree(
+        PROJECT_ROOT / "wiki",
+        application / "wiki",
+        ignore=shutil.ignore_patterns(
+            "__pycache__",
+            "*.pyc",
+            "*.docx",
+            "*.pptx",
+            "*.xlsx",
+            "*.png",
+            "*.jpg",
+            "*.jpeg",
+        ),
+    )
     shutil.copytree(PROJECT_ROOT / "frontend" / "dist", application / "frontend" / "dist")
     for filename in ("LICENSE", "requirements-runtime.txt"):
         shutil.copy2(PROJECT_ROOT / filename, application / filename)

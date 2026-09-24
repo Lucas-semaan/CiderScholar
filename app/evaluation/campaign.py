@@ -14,7 +14,7 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.evaluation.chat_finetuning import EvaluationRunAudit, audit_evaluation_run
-from app.jobs.contracts import ACTIVE_JOB_STATES, JobErrorKind, JobState
+from app.jobs.contracts import ACTIVE_JOB_STATES, ExpertMemoryPin, JobErrorKind, JobState
 from app.jobs.repository import (
     EvaluationQuestionAlreadySubmittedError,
     EvaluationRunBusyError,
@@ -45,6 +45,7 @@ class EvaluationCampaignSpec(BaseModel):
 
     run_id: str = Field(pattern=r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,79}$")
     cells: list[EvaluationCellSpec] = Field(min_length=1, max_length=500)
+    expert_memory_pin: ExpertMemoryPin = Field(default_factory=ExpertMemoryPin)
 
     @model_validator(mode="after")
     def unique_cells(self) -> EvaluationCampaignSpec:
@@ -69,6 +70,138 @@ class EvaluationCampaignResult(BaseModel):
     complete: bool
     reliable: bool
     audit: EvaluationRunAudit
+
+
+class EvaluationPairProgress(BaseModel):
+    """Content-free progress projection for the ordered base/candidate arms."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    phase: Literal["base", "candidate", "ready"]
+    job_id: UUID | None = None
+    job_state: JobState | None = None
+    base_complete: bool
+    candidate_complete: bool
+    comparison_ready: bool
+
+
+class EvaluationCampaignPairCoordinator:
+    """Advance base first, then candidate, without starting a worker implicitly."""
+
+    def __init__(
+        self,
+        base_runner: EvaluationCampaignRunner,
+        candidate_runner: EvaluationCampaignRunner,
+    ) -> None:
+        self.base_runner = base_runner
+        self.candidate_runner = candidate_runner
+
+    def advance_one(
+        self,
+        base_spec: EvaluationCampaignSpec,
+        candidate_spec: EvaluationCampaignSpec,
+        *,
+        exclude_active_job_id: UUID | None = None,
+    ) -> EvaluationPairProgress:
+        self._observe_terminal_cells(self.base_runner, base_spec)
+        base_job = self.base_runner.advance_one(
+            base_spec, exclude_active_job_id=exclude_active_job_id
+        )
+        if base_job is not None:
+            return EvaluationPairProgress(
+                phase="base",
+                job_id=base_job.id,
+                job_state=base_job.state,
+                base_complete=False,
+                candidate_complete=False,
+                comparison_ready=False,
+            )
+        base_result = self.base_runner.finalize(base_spec)
+        if base_result is None and not self._is_completed(self.base_runner):
+            raise CampaignExecutionError("base campaign cannot be finalized")
+        self._observe_terminal_cells(self.candidate_runner, candidate_spec)
+        candidate_job = self.candidate_runner.advance_one(
+            candidate_spec, exclude_active_job_id=exclude_active_job_id
+        )
+        if candidate_job is not None:
+            return EvaluationPairProgress(
+                phase="candidate",
+                job_id=candidate_job.id,
+                job_state=candidate_job.state,
+                base_complete=True,
+                candidate_complete=False,
+                comparison_ready=False,
+            )
+        candidate_result = self.candidate_runner.finalize(candidate_spec)
+        if candidate_result is None and not self._is_completed(self.candidate_runner):
+            raise CampaignExecutionError("candidate campaign cannot be finalized")
+        return EvaluationPairProgress(
+            phase="ready",
+            base_complete=True,
+            candidate_complete=True,
+            comparison_ready=True,
+        )
+
+    def enqueue_comparison(
+        self,
+        *,
+        evaluation_id: UUID,
+        conversation_id: UUID,
+        user_message_id: UUID,
+        client_request_id: UUID,
+    ) -> JobRecord:
+        """Enqueue the comparison only after both runners report completed state files."""
+
+        if not self._is_completed(self.base_runner) or not self._is_completed(
+            self.candidate_runner
+        ):
+            raise CampaignExecutionError("both campaigns must be completed before comparison")
+        from app.evaluation.expert_memory import enqueue_evaluation_comparison_job
+
+        return enqueue_evaluation_comparison_job(
+            self.base_runner.repository.database,
+            evaluation_id=evaluation_id,
+            base_state_path=self.base_runner.state_path,
+            candidate_state_path=self.candidate_runner.state_path,
+            conversation_id=conversation_id,
+            user_message_id=user_message_id,
+            client_request_id=client_request_id,
+        )
+
+    @staticmethod
+    def _is_completed(runner: EvaluationCampaignRunner) -> bool:
+        if not runner.state_path.is_file():
+            return False
+        try:
+            state = json.loads(runner.state_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            return False
+        return state.get("status") == "completed"
+
+    @staticmethod
+    def _observe_terminal_cells(
+        runner: EvaluationCampaignRunner,
+        spec: EvaluationCampaignSpec,
+    ) -> None:
+        if not runner.state_path.is_file():
+            return
+        try:
+            state = json.loads(runner.state_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            return
+        cells = state.get("cells")
+        if not isinstance(cells, dict):
+            return
+        for raw in cells.values():
+            if not isinstance(raw, dict) or not isinstance(raw.get("job_id"), str):
+                continue
+            try:
+                job_id = UUID(raw["job_id"])
+            except ValueError:
+                continue
+            job = runner.repository.get(job_id)
+            if job is not None and job.state not in ACTIVE_JOB_STATES:
+                runner.observe_one(spec, job_id)
 
 
 class CampaignExecutionError(RuntimeError):
@@ -124,7 +257,12 @@ class EvaluationCampaignRunner:
                     JobState.CANCELLED.value,
                 }:
                     continue
-                job = self._restore_or_submit(spec.run_id, cell, cell_state)
+                job = self._restore_or_submit(
+                    spec.run_id,
+                    cell,
+                    cell_state,
+                    expert_memory_pin=spec.expert_memory_pin,
+                )
                 state["cells"][cell.key] = {
                     "question_id": cell.question_id,
                     "profile": cell.profile,
@@ -191,11 +329,133 @@ class EvaluationCampaignRunner:
         self._event("campaign_completed", spec.run_id, result=result)
         return result
 
+    def advance_one(
+        self,
+        spec: EvaluationCampaignSpec,
+        *,
+        exclude_active_job_id: UUID | None = None,
+    ) -> JobRecord | None:
+        """Submit or recover one cell without waiting for a worker to finish it."""
+
+        self.repository.initialize()
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        state = self._load_or_create_state(spec)
+        cells = state["cells"]
+        assert isinstance(cells, dict)
+        for cell in spec.cells:
+            cell_state = cells.get(cell.key, {})
+            if isinstance(cell_state, dict) and cell_state.get("state") in {
+                JobState.SUCCEEDED.value,
+                JobState.FAILED.value,
+                JobState.CANCELLED.value,
+            }:
+                continue
+            previous = cell_state if isinstance(cell_state, dict) else {}
+            job = self._restore_or_submit(
+                spec.run_id,
+                cell,
+                previous,
+                expert_memory_pin=spec.expert_memory_pin,
+                exclude_active_job_id=exclude_active_job_id,
+            )
+            cells[cell.key] = {
+                "question_id": cell.question_id,
+                "profile": cell.profile,
+                "question_sha256": sha256(cell.message.encode("utf-8")).hexdigest(),
+                "job_id": str(job.id),
+                "conversation_id": str(job.conversation_id),
+                "state": job.state.value,
+            }
+            self._save_state(state)
+            return job
+        return None
+
+    def observe_one(self, spec: EvaluationCampaignSpec, job_id: UUID) -> JobRecord:
+        """Record one terminal cell outcome without blocking or starting another cell."""
+
+        job = self.repository.get(job_id)
+        if job is None:
+            raise CampaignExecutionError("evaluation job disappeared")
+        if job.state in ACTIVE_JOB_STATES:
+            return job
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        state = self._load_or_create_state(spec)
+        cells = state["cells"]
+        assert isinstance(cells, dict)
+        key = next(
+            (
+                candidate_key
+                for candidate_key, raw in cells.items()
+                if isinstance(raw, dict) and raw.get("job_id") == str(job_id)
+            ),
+            None,
+        )
+        if key is None:
+            raise CampaignExecutionError("evaluation job is not part of the campaign")
+        visible = self._visible_outcome(job)
+        entry = cells[key]
+        assert isinstance(entry, dict)
+        entry.update(visible)
+        entry["state"] = job.state.value
+        self._save_state(state)
+        self._event("cell_terminal", spec.run_id, job=job, outcome=visible)
+        self.finalize(spec)
+        return job
+
+    def finalize(self, spec: EvaluationCampaignSpec) -> EvaluationCampaignResult | None:
+        """Close a non-blocking campaign once every submitted cell is terminal."""
+
+        self.repository.initialize()
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        state = self._load_or_create_state(spec)
+        if state.get("status") == "completed":
+            return None
+        cells = state.get("cells")
+        if not isinstance(cells, dict) or len(cells) != len(spec.cells):
+            return None
+        terminal_states = {
+            JobState.SUCCEEDED.value,
+            JobState.FAILED.value,
+            JobState.CANCELLED.value,
+        }
+        if not all(
+            isinstance(cell, dict) and cell.get("state") in terminal_states
+            for cell in cells.values()
+        ):
+            return None
+        audit = audit_evaluation_run(self.repository.path, spec.run_id)
+        terminal_cells = len(cells)
+        succeeded_cells = sum(
+            cell.get("state") == JobState.SUCCEEDED.value
+            for cell in cells.values()
+            if isinstance(cell, dict)
+        )
+        result = EvaluationCampaignResult(
+            run_id=spec.run_id,
+            expected_cells=len(spec.cells),
+            terminal_cells=terminal_cells,
+            succeeded_cells=succeeded_cells,
+            stopped_early=False,
+            complete=True,
+            reliable=audit.reliable,
+            audit=audit,
+        )
+        state["status"] = "completed"
+        state["stop_reason"] = None
+        self._save_state(state)
+        self._atomic_write(self.audit_path, audit.model_dump_json(indent=2) + "\n")
+        self._write_report(spec, state, result=result)
+        self._event("campaign_completed", spec.run_id, result=result)
+        return result
+
     def _restore_or_submit(
         self,
         run_id: str,
         cell: EvaluationCellSpec,
         cell_state: dict[str, object],
+        *,
+        expert_memory_pin: ExpertMemoryPin,
+        exclude_active_job_id: UUID | None = None,
     ) -> JobRecord:
         existing_id = cell_state.get("job_id")
         if isinstance(existing_id, str):
@@ -211,6 +471,9 @@ class EvaluationCampaignRunner:
                 profile=cell.profile,
                 message=cell.message,
                 client_request_id=client_request_id,
+                expert_memory_pin=expert_memory_pin,
+                exclude_active_job_id=exclude_active_job_id,
+                orchestrator_parent_job_id=exclude_active_job_id,
             )
         except EvaluationRunBusyError as exc:
             raise CampaignExecutionError(

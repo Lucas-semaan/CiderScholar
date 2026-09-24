@@ -30,6 +30,12 @@ describe("sourceOriginLabel", () => {
     expect(sourceOriginLabel(source("external_api"))).toBe("API en direct");
   });
 
+  it("identifies a cited Ascocid knowledge document", () => {
+    expect(sourceOriginLabel({ ...source("local_rag"), source_family: "ascocid_knowledge" })).toBe(
+      "Livre AsCoCid",
+    );
+  });
+
   it("labels abstract and full-text evidence without ambiguity", () => {
     const abstractSource = source("local_rag");
     const fullTextSource = { ...abstractSource, evidence_level: "full_text" as const };

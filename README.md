@@ -6,15 +6,18 @@ L’interface est une SPA React/TypeScript entièrement bâtie avec Tailwind CSS
 
 ## État actuel et cible pilote
 
-Le dépôt se lance actuellement comme un projet de développement. La cible pilote est une application
-Windows installable sans terminal sur une dizaine de postes personnels. Chaque utilisateur conservera
-ses conversations, ses travaux et ses documents privés sur son poste. Le corpus commun sera préparé
-sur la machine administrateur, versionné, puis distribué par SharePoint.
+Le dépôt se lance actuellement comme un projet de développement. La cible pilote est désormais un
+service partagé par une équipe restreinte, déployé sur une VM Linux de 32 Go de RAM, CPU sans GPU et
+environ 200 Go de stockage. Toute l'application, E5, SQLite, Qdrant et les PDF résident sur cette VM ;
+seule la génération sort de la machine, exclusivement vers INRAE ARGO avec
+`chat-gpt-oss-120b`. L'ancienne cible de postes Windows distribués est historique.
 
 La cible complète et son découpage atomique sont décrits dans
 [`docs/ROADMAP.md`](docs/ROADMAP.md). Les décisions d’accès et de stockage sont dans
 [`docs/ACCESS_MODEL.md`](docs/ACCESS_MODEL.md). Le futur parcours utilisateur pour enregistrer une clé
 ARGO sans modifier de fichier est défini dans [`docs/ARGO_KEY_SETUP.md`](docs/ARGO_KEY_SETUP.md).
+L'audit de compatibilité et de mémoire est dans
+[`docs/LINUX_VM_32GB_ARCHITECTURE_AND_MEMORY_AUDIT.md`](docs/LINUX_VM_32GB_ARCHITECTURE_AND_MEMORY_AUDIT.md).
 
 ## Fonctionnalités
 
@@ -55,7 +58,9 @@ Le détail de l’arborescence est dans [`docs/PROJECT_TREE.md`](docs/PROJECT_TR
 
 ## Prérequis de développement
 
-- Windows 11 et Python 3.12 64 bits ;
+- Linux pour la cible de déploiement ; Windows 11 reste pris en charge pour le développement et les
+  artefacts historiques de l'installeur ;
+- Python 3.12 64 bits ;
 - Node.js 20 ou plus récent ;
 - environ 12 à 20 Go libres avec les modèles et les données.
 
@@ -71,7 +76,9 @@ npm.cmd --prefix frontend ci
 Copy-Item config.example.yaml config.yaml
 ```
 
-`config.example.yaml` est le profil sûr : écoute sur `127.0.0.1`, génération ARGO et API bibliographiques désactivées. Seuls les passages bornés nécessaires sont envoyés à ARGO.
+`config.example.yaml` est le profil sûr de la VM 32 Go : écoute sur `127.0.0.1`, deux workflows chat,
+analyse visuelle/Ollama désactivée et API bibliographiques désactivées. Seuls les passages bornés
+nécessaires sont envoyés à ARGO.
 
 ## Lancer l’application
 
@@ -93,6 +100,11 @@ npm.cmd --prefix frontend run dev
 Vite ouvre l’interface sur `http://127.0.0.1:5173` et relaie `/api` et `/health` vers FastAPI.
 
 ## Configuration actuelle d’ARGO et des sources bibliographiques
+
+Sur la VM Linux, la clé ARGO est injectée au processus par le gestionnaire de secrets de l'unité
+systemd dans `LOCAL_SCIENCE_RAG_ARGO_API_KEY`. Elle n'est ni écrite dans YAML, ni passée sur la ligne
+de commande, ni journalisée. Le coffre DPAPI et les commandes PowerShell ci-dessous sont conservés
+uniquement pour le développement Windows historique.
 
 Dans l’état actuel du dépôt, les secrets ne sont jamais écrits dans YAML. Ils sont lus depuis les
 variables utilisateur Windows :
@@ -125,7 +137,8 @@ ARGO ne reçoit que la question et les passages bornés nécessaires à la gén�
 La page d’accueil est l’interface conversationnelle principale. Pour chaque message, CiderScholar :
 
 1. charge le cœur du wiki et jusqu'à deux pages thématiques pour cadrer les distinctions et les
-   compromis, sans les traiter comme des preuves scientifiques ;
+   compromis, puis recherche les documents Ascocid persistés ; en mode concis, une couverture
+   Ascocid complète ferme la réponse sur ces documents, cités `Ascocid — <nom du fichier>` ;
 2. complète la requête de recherche avec les deux dernières questions utilisateur lorsque la
    conversation contient une relance ;
 3. recherche dans les chunks des articles complets avec FTS5, agrège les résultats par article et
@@ -173,6 +186,8 @@ disponibles :
 ```powershell
 .\.venv\Scripts\python.exe -m scripts.ingest_folder "C:\chemin\vers\les\PDF" --recursive
 .\.venv\Scripts\python.exe -m scripts.ingest_folder "C:\chemin\vers\les\PDF" --recursive --ocr --skip-known --wait-for-memory
+.\scripts\convert_text_documents.ps1 -SourceDirectory .\wiki -OutputDirectory .\data\common\ascocid-wiki-converted -Recursive
+.\.venv\Scripts\python.exe -m scripts.index_ascocid_wiki
 .\.venv\Scripts\python.exe -m scripts.rebuild_index
 .\.venv\Scripts\python.exe -m scripts.rebuild_bibliographic_abstract_index --recreate
 .\.venv\Scripts\python.exe -m scripts.rebuild_bibliographic_abstract_index --verify

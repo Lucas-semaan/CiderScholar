@@ -15,6 +15,7 @@ from app.corpora import CorpusScope
 from app.models.chatbot import (
     ChatbotRetrievalTrace,
     ChatbotTiming,
+    ChatbotTraceCandidate,
     ChatEvidencePassage,
     ChatEvidenceRecord,
 )
@@ -186,6 +187,10 @@ class ChatRetrievalCheckpoint(BaseModel):
     warnings: list[str] = Field(default_factory=list, max_length=64)
     timings: list[ChatbotTiming] = Field(default_factory=list, max_length=40)
     retrieval_traces: list[ChatbotRetrievalTrace] = Field(default_factory=list, max_length=40)
+    retrieval_trace_candidates: list[ChatbotTraceCandidate] = Field(
+        default_factory=list,
+        max_length=300,
+    )
 
     @classmethod
     def capture(
@@ -199,6 +204,7 @@ class ChatRetrievalCheckpoint(BaseModel):
         warnings: list[str],
         timings: list[ChatbotTiming],
         retrieval_traces: list[ChatbotRetrievalTrace],
+        retrieval_trace_candidates: list[ChatbotTraceCandidate] | None = None,
     ) -> ChatRetrievalCheckpoint:
         return cls(
             retrieval_query=retrieval_query,
@@ -209,6 +215,7 @@ class ChatRetrievalCheckpoint(BaseModel):
             warnings=warnings,
             timings=timings,
             retrieval_traces=retrieval_traces,
+            retrieval_trace_candidates=list(retrieval_trace_candidates or []),
         )
 
     def rehydrate(self, settings: Settings) -> list[ChatEvidenceRecord]:
@@ -216,6 +223,97 @@ class ChatRetrievalCheckpoint(BaseModel):
             settings,
             [record.as_rehydration_record() for record in self.evidence],
         )
+
+
+class FigureAnalysisCheckpointItem(BaseModel):
+    """Text-free identity of one completed visual candidate."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    element_id: str = Field(min_length=1, max_length=500)
+    image_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    analysis_contract_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    model_name: str = Field(min_length=1, max_length=200)
+    model_revision: str = Field(min_length=1, max_length=200)
+    analysis_id: str = Field(pattern=r"^figure-analysis-[0-9a-f]{24}$")
+    admitted: bool
+
+
+class FigureAnalysisCheckpoint(BaseModel):
+    """Bounded, replayable visual progress without image or observation text."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal[1] = 1
+    request_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+    items: list[FigureAnalysisCheckpointItem] = Field(default_factory=list, max_length=10)
+
+    @classmethod
+    def empty(cls, request_fingerprint: str) -> FigureAnalysisCheckpoint:
+        return cls(request_fingerprint=request_fingerprint)
+
+    def with_item(self, item: FigureAnalysisCheckpointItem) -> FigureAnalysisCheckpoint:
+        kept = [
+            existing
+            for existing in self.items
+            if (
+                existing.element_id,
+                existing.image_sha256,
+                existing.analysis_contract_sha256,
+                existing.model_name,
+                existing.model_revision,
+            )
+            != (
+                item.element_id,
+                item.image_sha256,
+                item.analysis_contract_sha256,
+                item.model_name,
+                item.model_revision,
+            )
+        ]
+        return self.model_copy(update={"items": [*kept, item][-10:]})
+
+
+class FigureAnalysisCheckpointStore:
+    """Atomically persist one visual checkpoint under a chat message identity."""
+
+    def __init__(self, root: Path) -> None:
+        self.root = root
+
+    def _path(self, user_message_id: UUID) -> Path:
+        return self.root / str(user_message_id) / "figure_analysis.json"
+
+    def load(
+        self,
+        user_message_id: UUID,
+        *,
+        request_fingerprint: str,
+    ) -> FigureAnalysisCheckpoint | None:
+        path = self._path(user_message_id)
+        if not path.is_file():
+            return None
+        try:
+            checkpoint = FigureAnalysisCheckpoint.model_validate_json(
+                path.read_text(encoding="utf-8")
+            )
+        except (OSError, UnicodeError, ValidationError):
+            return None
+        return checkpoint if checkpoint.request_fingerprint == request_fingerprint else None
+
+    def save(
+        self,
+        user_message_id: UUID,
+        *,
+        checkpoint: FigureAnalysisCheckpoint,
+    ) -> None:
+        path = self._path(user_message_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_suffix(".tmp")
+        temporary.write_text(
+            checkpoint.model_dump_json(indent=2) + "\n",
+            encoding="utf-8",
+        )
+        temporary.replace(path)
 
 
 class _CheckpointEnvelope(BaseModel):

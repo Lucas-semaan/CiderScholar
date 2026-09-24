@@ -24,6 +24,7 @@ from app.jobs.contracts import (
 from app.jobs.repository import JobRepository
 from app.jobs.worker import (
     DurableJobWorker,
+    JobHandlerDeferred,
     JobHandlerRegistry,
     JobHandlerResult,
     JobProgressContext,
@@ -53,11 +54,52 @@ from app.retrieval.hypothesis_planning import deterministic_hypothesis_plan
 from app.services.chatbot import ChatbotNoSourcesError
 
 
+def test_handler_deferred_wait_releases_lease_without_consuming_attempt(tmp_path) -> None:
+    repository = JobRepository(tmp_path / "queue.sqlite3")
+    repository.initialize()
+    now = datetime(2026, 9, 23, 12, tzinfo=UTC)
+    job = _claimed_job(repository, now)
+    resumption_time = now + timedelta(minutes=5)
+    repository.defer_without_attempt(
+        job.id,
+        worker_id="worker-test",
+        retry_at=resumption_time,
+        technical_message="test.requeue",
+        now=now,
+    )
+    retry_at = datetime.now(UTC) + timedelta(minutes=5)
+
+    class DeferredHandler:
+        def handle(self, _job, _context):
+            raise JobHandlerDeferred(retry_at, "evaluation.waiting_for_cell")
+
+    worker = DurableJobWorker(
+        repository=repository,
+        registry=JobHandlerRegistry({JobType.CHAT_ANSWER: DeferredHandler()}),
+        worker_id="defer-test",
+        clock=lambda: resumption_time,
+    )
+
+    deferred = worker.run_once()
+
+    assert deferred is not None
+    assert deferred.state is JobState.QUEUED
+    assert deferred.attempt == 0
+    assert deferred.available_at == retry_at
+    with repository.database.connect() as connection:
+        event = connection.execute(
+            "SELECT technical_message FROM job_events WHERE job_id = ? ORDER BY id DESC LIMIT 1",
+            (str(job.id),),
+        ).fetchone()
+    assert event[0] == "evaluation.waiting_for_cell"
+
+
 def _claimed_job(
     repository: JobRepository,
     now: datetime,
     *,
     use_external_sources: bool = False,
+    analyze_figures: bool = False,
 ):
     conversation_id = uuid4()
     message_id = uuid4()
@@ -79,6 +121,7 @@ def _claimed_job(
             conversation_id=conversation_id,
             client_request_id=uuid4(),
             use_external_sources=use_external_sources,
+            analyze_figures=analyze_figures,
         ),
         user_message_id=message_id,
         now=now,
@@ -625,10 +668,25 @@ def test_chat_handler_reloads_retrieval_checkpoint_for_the_same_durable_message(
 
     with pytest.raises(ArgoUnavailableError, match="semantic timeout"):
         handler.handle(job, context)
+    with repository.database.connect() as connection:
+        first_trace = connection.execute(
+            "SELECT id, state FROM expert_run_manifests WHERE job_id = ? AND attempt = ?",
+            (str(job.id), job.attempt),
+        ).fetchone()
+    assert first_trace["state"] == "running"
     result = handler.handle(job, context)
 
     assert received == [None, checkpoint]
     assert result.assistant_content == "Réponse reprise."
+    with repository.database.connect() as connection:
+        final_trace = connection.execute(
+            "SELECT id, state, result_message_id FROM expert_run_manifests "
+            "WHERE job_id = ? AND attempt = ?",
+            (str(job.id), job.attempt),
+        ).fetchone()
+    assert final_trace["id"] == first_trace["id"]
+    assert final_trace["state"] == "running"
+    assert final_trace["result_message_id"] is None
     checkpoint_path = (
         settings.paths.cache_dir
         / "chat_job_checkpoints"
@@ -636,6 +694,50 @@ def test_chat_handler_reloads_retrieval_checkpoint_for_the_same_durable_message(
         / "retrieval.json"
     )
     assert checkpoint_path.is_file()
+
+
+def test_worker_cancels_chat_between_visual_figures_after_lease_boundary(
+    settings, tmp_path
+) -> None:
+    repository = JobRepository(tmp_path / "queue.sqlite3")
+    repository.initialize()
+    now = datetime(2026, 7, 22, 12, tzinfo=UTC)
+    job = _claimed_job(repository, now, analyze_figures=True)
+    with repository.database.transaction() as connection:
+        connection.execute(
+            """
+            UPDATE jobs
+            SET state = 'queued', worker_id = NULL, lease_expires_at = NULL,
+                heartbeat_at = NULL, available_at = ?
+            WHERE id = ?
+            """,
+            (now.isoformat(), str(job.id)),
+        )
+    callbacks = 0
+
+    def fake_answer(_settings, _database, *, on_figure_analysis, **_options) -> ChatbotResult:
+        nonlocal callbacks
+        on_figure_analysis()
+        callbacks += 1
+        assert repository.request_cancellation(job.id, now=now + timedelta(seconds=1)) is not None
+        on_figure_analysis()
+        raise AssertionError("the visual workflow continued after lease cancellation")
+
+    worker = DurableJobWorker(
+        repository=repository,
+        registry=JobHandlerRegistry(
+            {JobType.CHAT_ANSWER: ChatAnswerHandler(settings, repository.database, fake_answer)}
+        ),
+        worker_id="visual-lease-test",
+        clock=lambda: now + timedelta(seconds=1),
+    )
+
+    cancelled = worker.run_once()
+
+    assert cancelled is not None
+    assert cancelled.state is JobState.CANCELLED
+    assert callbacks == 1
+    assert repository.get(job.id).result_message_id is not None
 
 
 def test_evaluation_job_pins_profile_and_persists_cell_identity(settings, tmp_path) -> None:
@@ -769,6 +871,14 @@ def test_evaluation_job_rejects_a_contaminated_conversation_before_generation(
     assert persisted is not None
     notice = persisted["messages"][-1]["response"]
     assert notice["diagnostic_code"] == "question_integrity"
+    with repository.database.connect() as connection:
+        trace = connection.execute(
+            "SELECT payload_json, state FROM expert_run_manifests WHERE job_id = ? AND attempt = ?",
+            (str(enqueued.job.id), failed.attempt),
+        ).fetchone()
+    assert trace is not None
+    assert trace["state"] == "failed"
+    assert '"state":"failed"' in trace["payload_json"]
 
 
 def test_evaluation_retry_excludes_terminal_notice_from_generation_history(

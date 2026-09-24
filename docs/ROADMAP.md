@@ -1,9 +1,16 @@
 # Roadmap d’exécution CiderScholar
 
-Version consolidée du 2026-07-27, étendue avec les jalons de validation scientifique, de recherche
-full-text approfondie et de découverte assistée. Cette roadmap remplace les hypothèses de serveur
-central et de connexion LDAP. Elle décrit une application locale distribuée sur les postes
-personnels de l’équipe.
+Version consolidée du 2026-09-24, étendue avec les jalons de validation scientifique, de recherche
+full-text approfondie et de découverte assistée. La décision du 24 septembre remplace la distribution
+sur postes personnels : la cible interne est une VM Linux partagée de 32 Go, CPU sans GPU, environ
+200 Go de stockage, E5 local et ARGO `chat-gpt-oss-120b` comme unique IA.
+
+Le plan priorisé de migration, l'audit mémoire et les gates de capacité sont dans
+[`LINUX_VM_32GB_ARCHITECTURE_AND_MEMORY_AUDIT.md`](LINUX_VM_32GB_ARCHITECTURE_AND_MEMORY_AUDIT.md).
+Les P0 sont : secret Linux, OCR Linux, politique ARGO-only, concurrence/profil 32 Go et benchmark de
+capacité. Les P1 sont : ingestion segmentée, séparation des rôles, accès TLS authentifié, sauvegarde
+restaurable et décision Qdrant embarqué/service. Les travaux ci-dessous restent valides quand ils ne
+dépendent pas de l'ancien mode Windows distribué ; ces dépendances sont historiques jusqu'à reclassement.
 
 Proposition complémentaire du 7 septembre 2026 :
 [`EXPERT_MEMORY_ROADMAP.md`](EXPERT_MEMORY_ROADMAP.md) décrit l’ajout d’une mémoire de méthode
@@ -37,11 +44,12 @@ Le contrat rédactionnel est dans
 [`ACCESS_MODEL.md`](ACCESS_MODEL.md). Le parcours de clé ARGO est dans
 [`ARGO_KEY_SETUP.md`](ARGO_KEY_SETUP.md).
 
-## État actuel et responsabilités — 2026-08-05
+## État actuel et responsabilités — 2026-09-24
 
-Le dépôt contient 458 tâches : 400 sont terminées, une est en cours, 19 sont bloquées ou partielles
-et 38 restent en attente d’actions réelles. La priorité en cours est la stabilisation du chatbot ; les
-évolutions de forme du Corpus restent en attente de sa validation. Les autres blocages correspondent
+Le dépôt contient 415 tâches suivies par identifiant : 363 sont terminées, 19 sont bloquées et 33
+restent ouvertes. La priorité de code autonome est techniquement couverte jusqu'à la distribution
+locale de la mémoire experte ; les tâches restantes concernent principalement des actions réelles,
+des validations scientifiques ou des choix d'environnement. Les autres blocages correspondent
 à des observations CiderQA/expert, un exécuteur système isolé, des postes physiques, SharePoint,
 ARGO réel ou des décisions conditionnelles d’architecture.
 
@@ -50,11 +58,11 @@ désormais réalisé derrière le drapeau d’activation inactif, sans attendre 
 tâche de validation ou de promotion reste néanmoins non cochée tant que son critère réel n’est pas
 observable.
 
-Validation consolidée du même état :
+Validation consolidée de l'état courant :
 
-- Ruff format et lint : 365 fichiers conformes ;
-- Pytest : 663 tests réussis ;
-- frontend : format, ESLint, TypeScript, 19 fichiers/61 tests Vitest et build Vite réussis ;
+- Ruff format et lint : 586 fichiers conformes ;
+- Pytest : 1 586 tests réussis ;
+- frontend : format, ESLint, TypeScript, 31 fichiers/108 tests Vitest et build Vite réussis ;
 - installeur Windows 0.2.3 : compilation, réinstallation locale et smoke test réussis, manifeste de
   13 011 fichiers, SHA-256
   `3f1a3519352d0dc65f8534572c54f1b3597365fb62223b4de60ac3b315bea58a`.
@@ -64,6 +72,24 @@ SharePoint réel, profils Windows distincts, matériel physique, experts et donn
 réelles. La colonne **Code** regroupe les changements que Codex peut poursuivre dans le dépôt. Les
 tâches présentes dans les deux colonnes sont mixtes : votre entrée ou validation débloque ensuite une
 implémentation ou une correction.
+
+### Mise à jour de suivi — 24 septembre 2026
+
+La boucle de mémoire experte décrite dans [EXPERT_MEMORY_ROADMAP.md](EXPERT_MEMORY_ROADMAP.md) est
+techniquement avancée jusqu'au lot 13 : contrats bornés, stockage candidat, diagnostic, évaluation,
+revue, pilote validation-only, paquet signé, distribution locale, activation CAS, rollback et écran
+de reprise sont présents et testés. La progression détaillée, les limites et les hashes sont suivis
+dans [EXPERT_MEMORY_PROGRESS.md](EXPERT_MEMORY_PROGRESS.md).
+
+Les contrôles locaux actuels passent avec 1 586 tests backend, Ruff sur 586 fichiers et la CI
+frontend complète (108 tests et build de production). Ces résultats ne valent pas validation
+scientifique : aucune activation réelle n'a été effectuée et les tests de mémoire utilisent des
+bases temporaires et des fixtures synthétiques.
+
+Les blocages actuels sont externes au dépôt : pilote shadow réel, observations et adjudication
+expertes, CiderQA réel, ARGO réel, SharePoint et profils Windows 8/16 Go. Les lots 14–15 de la
+mémoire experte restent conditionnels à ces résultats et à une décision de méthode ; aucun contenu
+scientifique, avis d'expert ou signature ne doit être inventé pour les débloquer.
 
 ### Vue exhaustive du reste à faire
 
@@ -117,13 +143,16 @@ La checklist consolidée et ses champs de rapport prêts à remplir sont dans
 
 ### Ce qu’il reste à coder en priorité
 
-1. **Aucun chantier fonctionnel autonome identifié** : les formats, commandes, gates, migrations,
+1. **Tranche visuelle locale presque achevée** : `VIS-007` dispose maintenant d’un checkpoint
+   text-free par figure, d’une capacité locale bornée et partagée, d’une annulation entre figures
+   et d’un test worker de perte de lease. La file GPU dédiée reste conditionnée par `VIS-009`.
+2. **Aucun autre chantier fonctionnel autonome identifié** : les formats, commandes, gates, migrations,
    interfaces et tests de `DRS-010`, `EVL-016`, `EVL-018`, `DRS-024` à `DRS-026`, M12 et
    `NEXT-001` à `NEXT-008` sont présents.
-2. **Intégration préparée mais dépendante d’un choix d’environnement** : `DSC-011` attend un backend
+3. **Intégration préparée mais dépendante d’un choix d’environnement** : `DSC-011` attend un backend
    d’exécution réellement isolé ; le manifeste, l’interface d’exécution et le refus par défaut sont
    prêts afin de le brancher sans modifier les contrats scientifiques.
-3. **Code ultérieur uniquement après observation** : exécuter les validations réelles puis corriger
+4. **Code ultérieur uniquement après observation** : exécuter les validations réelles puis corriger
    les défauts qu’elles révèlent (`DEM-017`, `DEM-018`, `ROL-007` et éventuelles régressions).
    Deep Research reste désactivé jusqu’aux baselines, ablations, promotion et profils physiques.
 
@@ -1603,10 +1632,16 @@ Architecture cible et conditions de déclenchement :
   Ollama sans modifier la sélection des figures ni la persistance scientifique.
 - [!] `VIS-007` Isoler la capacité visuelle dans l’exécution durable.
   Avancement partiel : `analyze_figures` est versionné dans les payloads chat/deep research, traverse
-  API et types TypeScript et publie une progression dans le job existant. L’inférence visuelle n’a
-  pas encore son checkpoint ni sa file logique orientée GPU.
+  API et types TypeScript et publie désormais une progression à chaque figure dans le job existant ;
+  cette frontière permet aussi l’annulation entre deux figures et est couverte par test. Un
+  checkpoint text-free par figure est maintenant persisté sous l'identité du message utilisateur,
+  avec validation de l'identité SQLite au replay. Il reste à ajouter le routage vers le backend GPU,
+  la file logique orientée GPU dédiée. La perte de lease est maintenant couverte de bout en bout par le
+  worker : une annulation entre deux figures clôt le job sans génération résiduelle. La capacité locale est
+  désormais explicite et partagée par modèle/end-point, avec une valeur séquentielle par défaut ;
+  deux workers ne peuvent pas dépasser cette borne.
   Dépendances : `VIS-005`, `VIS-006`. Fini lorsque : reprise par figure, annulation entre figures,
-  routage par capacité, concurrence GPU bornée et tests de perte de lease sont validés ensemble.
+  routage GPU par capacité, concurrence GPU bornée et tests de perte de lease sont validés ensemble.
 - [!] `VIS-008` Valider scientifiquement la lecture des figures avant toute utilisation comme preuve.
   Avancement partiel : l’admission automatique exige `supports_answer=true`, pertinence ≥ 0,80 et
   lisibilité ≥ 0,70 ; SQLite conserve `validation_reason=automatic_thresholds_met` et les légendes
@@ -1621,7 +1656,8 @@ Architecture cible et conditions de déclenchement :
   franchissent le seuil adopté sans confondre observation visuelle et texte source.
 - [ ] `VIS-009` Décider la machine GPU, le modèle, sa licence et la politique de confidentialité.
   Dépendances : `VIS-003`, `VIS-008`. Fini lorsque : GPU/VRAM, modèle, résidence des données,
-  authentification, rétention, sauvegarde et responsabilité d’exploitation sont approuvés.
+  authentification, rétention, sauvegarde et responsabilité d’exploitation sont approuvés. La
+  grille de décision et le rapport minimal sont préparés dans `USER_ACTION_CHECKLIST.md`, section 5.
 - [ ] `VIS-010` Implémenter le service GPU distant et son adaptateur HTTP.
   Dépendances : `VIS-007`, `VIS-009`. Ne pas commencer avant la décision serveur. Fini lorsque :
   multipart borné, TLS, authentification de service, idempotence, healthcheck, délais, reprises,

@@ -64,6 +64,30 @@ CREATE TABLE IF NOT EXISTS chunks (
 CREATE INDEX IF NOT EXISTS idx_chunks_article ON chunks(article_id);
 CREATE INDEX IF NOT EXISTS idx_chunks_embedding_status ON chunks(embedding_status);
 
+CREATE TABLE IF NOT EXISTS ascocid_wiki_documents (
+    id TEXT PRIMARY KEY CHECK(length(trim(id)) BETWEEN 1 AND 128),
+    relative_path TEXT NOT NULL UNIQUE CHECK(length(trim(relative_path)) > 0),
+    filename TEXT NOT NULL CHECK(length(trim(filename)) > 0),
+    source_sha256 TEXT NOT NULL CHECK(
+        length(source_sha256) = 64 AND source_sha256 NOT GLOB '*[^0-9a-f]*'
+    ),
+    article_id TEXT NOT NULL REFERENCES articles(id) ON DELETE CASCADE,
+    indexed_file_path TEXT NOT NULL CHECK(length(trim(indexed_file_path)) > 0),
+    indexed_file_sha256 TEXT NOT NULL CHECK(
+        length(indexed_file_sha256) = 64 AND indexed_file_sha256 NOT GLOB '*[^0-9a-f]*'
+    ),
+    state TEXT NOT NULL CHECK(state IN ('indexed', 'review', 'failed')),
+    error_type TEXT,
+    error_message TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_ascocid_wiki_documents_article
+    ON ascocid_wiki_documents(article_id, state);
+CREATE INDEX IF NOT EXISTS idx_ascocid_wiki_documents_sha
+    ON ascocid_wiki_documents(source_sha256);
+
 CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
     chunk_id UNINDEXED,
     article_id UNINDEXED,

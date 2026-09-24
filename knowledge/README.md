@@ -70,6 +70,26 @@ Le linter accepte facultativement `--output data/exports/expert-memory-lint.json
 rapport JSON atomiquement et refuse d'écraser une fiche. Le script d'import et le routeur écrivent
 uniquement sur stdout et n'acceptent pas `--output`.
 
+## Reprendre les observations d'un pilote
+
+Les observations humaines peuvent être préparées dans un JSON sans texte de conversation ni contenu
+scientifique. Le fichier doit contenir le `pilot_id` exact et une liste bornée de mesures :
+`observation_id`, `case_sha256`, `expert_time_seconds`, `diagnosis_human_corrected`, `useful_effect`,
+`false_gain`, `rollback_count`, `prompt_tokens`, `completion_tokens` et `recorded_by`. Le protocole
+est repris depuis le plan SQLite ; il ne doit pas être copié manuellement dans le fichier.
+
+La validation est sans écriture par défaut :
+
+```powershell
+.\.venv\Scripts\python.exe -m scripts.import_expert_pilot_observations `
+  --input "C:\chemin\observations.json" --pilot-id "00000000-0000-0000-0000-000000000000" `
+  --config "C:\chemin\configuration-locale-validee.yaml"
+```
+
+Après vérification du rapport et de la cible, `--apply` persiste chaque observation dans une
+transaction séparée. Un arrêt peut donc être repris avec le même fichier : les cas déjà enregistrés
+sont rejoués sans créer de doublon. Cette commande ne lance ni LLM, ni recherche, ni activation.
+
 ## Modifier une fiche
 
 1. Partir d'une copie candidate ; conserver l'original et la différence lisible.

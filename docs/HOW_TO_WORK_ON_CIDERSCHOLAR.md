@@ -408,6 +408,17 @@ comme une absence du corpus. Pour les fiches AsCoCid, conserver l'empreinte du d
 dans l'original et les réserves documentaires ; ne pas présenter une distillation éditoriale comme une
 validation experte sans événement de revue lié à la version exacte.
 
+Instruction utilisateur explicite et durable du 22 septembre 2026 : les documents textuels déposés
+dans le dossier `wiki/` sont aussi des sources Ascocid interrogeables. Ils sont extraits localement,
+persistés dans le corpus SQLite et reliés à leur chemin et empreinte d'origine ; un fichier déjà présent
+dans le corpus reçoit un alias Ascocid sans duplication du contenu. En mode `concise`, lorsque les
+documents Ascocid classés A/B couvrent l'ensemble des besoins de vérification de la question, la réponse
+utilise exclusivement ces documents. Si cette couverture est incomplète, ou en mode `balanced`/`deep`,
+le RAG scientifique complète les documents Ascocid. Chaque citation issue de cette collection est rendue
+exactement sous la forme `Ascocid — <nom du fichier>` ; les pages éventuelles peuvent être ajoutées sans
+remplacer cette mention. Le cœur Markdown distillé reste un cadre organisationnel non citable tant
+qu'une affirmation n'est pas reliée à un document Ascocid persisté.
+
 ## 4. Rechercher et classer les preuves pour une question
 
 ### 4.1 Comprendre l’intention avant le retrieval
@@ -724,6 +735,14 @@ Le chemin de production suit désormais ce contrat vérifiable :
    un filtre explicite déjà fourni ou une seule requête dense désactive cette optimisation : toutes les
    requêtes restent globales. Le filtre est tracé, borne des candidats et ne constitue jamais une
    décision de pertinence ni une raison d'exclure une preuve A/B.
+
+   Lorsqu'une entité scientifique nommée possède des synonymes, traductions ou sigles non ambigus
+   dans son contexte, la vague lexicale conserve aussi une requête contrôlée avec son libellé
+   canonique. Une planification générée ne peut donc pas reconnaître l'entité puis perdre sa forme
+   canonique avant le retrieval. Ces candidats ne sont pas des preuves automatiques : ils restent
+   soumis au classement et au filtre scientifique A–D. Cas de non-régression : dans un contexte
+   boissons/défaut de bouchon, `TCA`, `trichloroanisole` et `goût de bouchon` conduisent à la forme
+   canonique `2,4,6-trichloroanisole`.
 4. Le contexte intra-article utilise un index logique `article -> section -> chunk` construit sur les
    colonnes SQLite persistées. Il part des chunks d'ancrage, lit leurs voisins bornés, puis seulement
    quelques chunks des mêmes sections ou de `Results`, `Discussion`, `Conclusion`, `Abstract` et,
@@ -826,7 +845,10 @@ d'un DOI dans les articles du corpus ne suffit pas à supprimer un abstract retr
 preuves effectivement disponibles. Le plan de secours conserve la question originale jusqu'à la
 borne autorisée de 4 000 caractères ; les champs générés par le planificateur restent plus courts.
 Toute évolution de sélection invalide le cache retrieval, dont la signature inclut aussi les réglages
-de classement des articles et de sélection des passages.
+de classement des articles et de sélection des passages. Instruction utilisateur explicite du 22
+septembre 2026 : un repli lexical causé par une marge mémoire insuffisante n'est pas un résultat
+hybride complet et ne doit jamais être réutilisé depuis ce cache ; une demande ultérieure réessaie
+la recherche vectorielle lorsque les ressources sont redevenues disponibles.
 
 Le rapport `RAG_SCIENTIFIC_AUDIT_2026-09-11.md` distingue les contre-exemples synthétiques reproductibles
 des futures mesures CiderQA sur preuves expertes. Un test synthétique réussi ne démontre ni une
@@ -861,6 +883,15 @@ Les règles ci-dessus proviennent notamment des conversations suivantes :
   illisibles.
 
 ## 8. Checklist de livraison
+
+Instruction utilisateur explicite et durable du 24 septembre 2026 : l'édition interne cible une VM
+Linux unique de 32 Go de RAM, CPU sans GPU et environ 200 Go de stockage. Toute l'application, les
+PDF, SQLite, Qdrant et E5 restent sur cette VM ; E5 s'exécute localement sur CPU. La seule IA de cette
+édition est l'API INRAE ARGO avec `chat-gpt-oss-120b` : aucun autre LLM local, payant ou de repli ne
+doit être activé. La fiabilité mémoire prime sur le débit ; modèles, lots, contextes, caches et
+concurrence restent bornés, mesurés et libérés explicitement. Une future édition producteurs utilisera
+un sous-corpus et un fournisseur encore indécis ; elle n'est pas à construire avant décision, mais les
+contrats scientifiques ne doivent pas dépendre directement d'ARGO.
 
 Avant de conclure une tâche concernée par ce guide, vérifier :
 

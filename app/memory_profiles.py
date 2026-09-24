@@ -11,6 +11,7 @@ from app.config import Settings
 class MemoryProfileName(StrEnum):
     EIGHT_GB = "8gb"
     SIXTEEN_GB = "16gb"
+    THIRTY_TWO_GB = "32gb"
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,7 +62,23 @@ SIXTEEN_GB_PROFILE = MemoryProfile(
     reranker_candidate_limit=80,
 )
 
-MEMORY_PROFILES = {profile.name: profile for profile in (EIGHT_GB_PROFILE, SIXTEEN_GB_PROFILE)}
+THIRTY_TWO_GB_PROFILE = MemoryProfile(
+    name=MemoryProfileName.THIRTY_TWO_GB,
+    total_memory_gb=32,
+    warning_used_gb=24.0,
+    hard_process_limit_gb=20.0,
+    minimum_available_mb=6144,
+    embedding_batch_size=8,
+    hybrid_candidate_limit=200,
+    evidence_candidate_chunks=100,
+    reranker_batch_size=4,
+    reranker_candidate_limit=80,
+)
+
+MEMORY_PROFILES = {
+    profile.name: profile
+    for profile in (EIGHT_GB_PROFILE, SIXTEEN_GB_PROFILE, THIRTY_TWO_GB_PROFILE)
+}
 
 
 def apply_memory_profile(settings: Settings, profile: MemoryProfile) -> Settings:
@@ -107,9 +124,12 @@ def recommend_memory_profile(
     detected = detect_total_memory_gb() if detected_total_gb is None else detected_total_gb
     recommended = None
     if detected is not None:
-        recommended = (
-            MemoryProfileName.EIGHT_GB if detected <= 12.0 else MemoryProfileName.SIXTEEN_GB
-        )
+        if detected <= 12.0:
+            recommended = MemoryProfileName.EIGHT_GB
+        elif detected <= 24.0:
+            recommended = MemoryProfileName.SIXTEEN_GB
+        else:
+            recommended = MemoryProfileName.THIRTY_TWO_GB
     return MemoryProfileRecommendation(
         detected_total_gb=detected,
         recommended_profile=recommended,

@@ -2,6 +2,249 @@ import type { DurableJob, JobState, JobStep, JobType } from "./chat";
 
 export type * from "./chat";
 
+export interface ExpertCorrectionPayload {
+  client_request_id: string;
+  manifest_id?: string | null;
+  claim_id?: string | null;
+  selected_text: string;
+  problem: string;
+  proposed_correction: string;
+  scope: "this_answer" | "reusable_method";
+  evidence_refs: Array<Record<string, unknown>>;
+  suggested_category?: string | null;
+}
+
+export interface ExpertCorrectionResponse {
+  id: string;
+  message_id: string;
+  manifest_id: string | null;
+  status: string;
+  revision: number;
+  payload: ExpertCorrectionPayload;
+  created_at: string;
+  updated_at: string;
+}
+
+export type ExpertCandidateState =
+  | "draft"
+  | "structurally_valid"
+  | "evaluating"
+  | "awaiting_review"
+  | "approved"
+  | "activated"
+  | "needs_expert"
+  | "evaluation_failed"
+  | "rejected"
+  | "superseded"
+  | "inconclusive";
+
+export interface ExpertCandidateSummary {
+  id: string;
+  state: ExpertCandidateState;
+  base_release_id: string;
+  candidate_release_id: string;
+  candidate_sha256: string;
+  diff_sha256: string;
+  evaluation_id: string | null;
+  evaluation_state: string | null;
+  evaluation_sha256: string | null;
+  pilot_id: string | null;
+  pilot_state: ExpertPilotState | null;
+  active_generation: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ExpertReviewResponse {
+  id: string;
+  candidate_id: string;
+  evaluation_id: string;
+  client_request_id: string;
+  candidate_sha256: string;
+  evaluation_sha256: string;
+  decision: "approve" | "reject" | "needs_changes";
+  reviewer_label: string;
+  reason: string;
+  created_at: string;
+}
+
+export interface ExpertActivationResponse {
+  id: string;
+  candidate_id: string;
+  review_id: string;
+  from_release_id: string | null;
+  to_release_id: string;
+  previous_generation: number;
+  generation: number;
+  client_request_id: string;
+  candidate_sha256: string;
+  evaluation_sha256: string;
+  created_at: string;
+}
+
+export type ExpertDistributionState =
+  "imported" | "proposed" | "approved" | "rejected" | "activated" | "rolled_back";
+
+export interface ExpertDistribution {
+  id: string;
+  release_id: string;
+  package_sha256: string;
+  package_manifest_sha256: string;
+  approved_review_sha256: string;
+  state: ExpertDistributionState;
+  reviewer_label: string | null;
+  reason: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ExpertDistributionActivationResponse {
+  id: string;
+  distribution_id: string;
+  from_release_id: string | null;
+  to_release_id: string;
+  previous_generation: number;
+  generation: number;
+  client_request_id: string;
+  package_sha256: string;
+  created_at: string;
+}
+
+export interface ExpertDistributionRollbackResponse {
+  id: string;
+  distribution_id: string;
+  from_release_id: string;
+  to_release_id: string;
+  previous_generation: number;
+  generation: number;
+  client_request_id: string;
+  from_sha256: string;
+  to_sha256: string;
+  reason: string;
+  created_at: string;
+}
+
+export type ExpertMemoryReleaseState = "candidate" | "eligible" | "retired" | "revoked";
+
+export interface ExpertMemoryRelease {
+  id: string;
+  package_sha256: string;
+  state: ExpertMemoryReleaseState;
+  base_release_id: string | null;
+  created_at: string;
+  active: boolean;
+  active_generation: number | null;
+}
+
+export interface ExpertMemoryReleasesResponse {
+  releases: ExpertMemoryRelease[];
+  active_release_id: string | null;
+  active_generation: number;
+  next_cursor: string | null;
+}
+
+export type ExpertPilotState = "planned" | "ready" | "blocked" | "attested";
+
+export interface ExpertPilotPlan {
+  schema_version: 1;
+  pilot_id: string;
+  candidate_id: string;
+  evaluation_id: string;
+  manifest_sha256: string;
+  candidate_sha256: string;
+  question_hashes: string[];
+  control_question_hashes: string[];
+  max_llm_requests: number;
+  mode: "shadow";
+  activation_allowed: false;
+  human_approval_required: true;
+  plan_sha256: string;
+}
+
+export interface ExpertPilotAudit {
+  schema_version: 1;
+  pilot_id: string;
+  plan_sha256: string;
+  manifest_sha256: string;
+  candidate_id: string;
+  evaluation_id: string;
+  candidate_state: string;
+  evaluation_state: string;
+  report_sha256: string | null;
+  state: "ready" | "blocked";
+  blockers: string[];
+  activation_allowed: false;
+  human_approval_required: true;
+  audit_sha256: string;
+}
+
+export interface ExpertPilotAttestation {
+  schema_version: 1;
+  attestation_id: string;
+  pilot_id: string;
+  audit_sha256: string;
+  reviewer_label: string;
+  external_reference: string;
+  decision: "accept" | "reject";
+  reason: string;
+  activation_allowed: false;
+  attestation_sha256: string;
+}
+
+export interface ExpertPilotResponse {
+  id: string;
+  candidate_id: string;
+  evaluation_id: string;
+  plan: ExpertPilotPlan;
+  plan_sha256: string;
+  audit: ExpertPilotAudit | null;
+  audit_sha256: string | null;
+  attestation: ExpertPilotAttestation | null;
+  attestation_sha256: string | null;
+  observations: ExpertPilotObservation[];
+  metrics: ExpertPilotMetrics;
+  metrics_sha256: string;
+  state: ExpertPilotState;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ExpertPilotObservation {
+  schema_version: 1;
+  observation_id: string;
+  pilot_id: string;
+  case_sha256: string;
+  protocol_sha256: string;
+  expert_time_seconds: number;
+  diagnosis_human_corrected: boolean;
+  useful_effect: "useful" | "neutral" | "harmful" | "unknown";
+  false_gain: boolean;
+  rollback_count: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  recorded_by: string;
+  observation_sha256: string;
+}
+
+export interface ExpertPilotMetrics {
+  schema_version: 1;
+  pilot_id: string;
+  protocol_sha256: string;
+  observation_count: number;
+  minimum_observations: 10;
+  maximum_observations: 20;
+  complete: boolean;
+  p50_expert_time_seconds: number | null;
+  p95_expert_time_seconds: number | null;
+  p50_total_tokens: number | null;
+  p95_total_tokens: number | null;
+  diagnosis_human_corrected_count: number;
+  useful_effect_count: number;
+  false_gain_count: number;
+  rollback_count: number;
+  metrics_sha256?: string;
+}
+
 export interface RuntimeSettings {
   offline_mode: boolean;
   bibliographic_apis: boolean;
@@ -17,8 +260,8 @@ export interface RuntimeSettings {
   administrator: boolean;
   memory: {
     detected_total_gb: number | null;
-    recommended_profile: "8gb" | "16gb" | null;
-    active_profile: "custom" | "8gb" | "16gb";
+    recommended_profile: "8gb" | "16gb" | "32gb" | null;
+    active_profile: "custom" | "8gb" | "16gb" | "32gb";
     applied_automatically: false;
   };
   deep_research: {
@@ -37,6 +280,7 @@ export interface RuntimeSettings {
     available: boolean;
     model: string;
     max_figures: number;
+    max_concurrent_analyses: number;
     estimated_min_seconds: number;
     estimated_max_seconds: number;
   };
@@ -159,8 +403,8 @@ export interface OnboardingStatus {
   installed_corpus_version: string | null;
   memory: {
     detected_total_gb: number | null;
-    recommended_profile: "8gb" | "16gb" | null;
-    active_profile: "custom" | "8gb" | "16gb";
+    recommended_profile: "8gb" | "16gb" | "32gb" | null;
+    active_profile: "custom" | "8gb" | "16gb" | "32gb";
     applied_automatically: false;
   };
 }

@@ -1,5 +1,9 @@
 # Préparation de la lecture d’image pour une exécution serveur
 
+> Statut au 24 septembre 2026 : architecture préparatoire inactive. La cible interne est une VM Linux
+> sans GPU et ARGO est son unique IA. Ollama/Qwen est désactivé par défaut ; aucune analyse visuelle
+> générative ne doit être activée tant qu'un contrat compatible avec cette politique n'est pas décidé.
+
 ## Décision
 
 La migration serveur ne doit pas déplacer tout CiderScholar uniquement pour accélérer la lecture
@@ -56,6 +60,11 @@ figures, la résolution du PDF, le rendu et la persistance SQLite restent dans l
 la passerelle ne voit que `ScientificFigureAnalysisRequest` et les octets PNG. Une implémentation GPU
 distante pourra donc remplacer Ollama sans recevoir de chemin, de connexion SQLite ou de client
 Qdrant.
+
+L’exécution locale applique déjà une capacité bornée et partagée entre workers qui ciblent le même
+endpoint et le même modèle (`figure_analysis.max_concurrent_analyses`, séquentiel par défaut). Le
+checkpoint text-free par figure et la frontière de lease sont durables côté job ; cette capacité
+locale ne préjuge pas du nombre de workers GPU qui sera retenu après `VIS-009`.
 
 ## Ce qui reste local tant qu’aucun serveur n’est décidé
 

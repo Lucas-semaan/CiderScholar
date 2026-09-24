@@ -6,6 +6,7 @@ import logging
 import unicodedata
 from collections.abc import Sequence
 from dataclasses import dataclass
+from hashlib import sha256
 from time import perf_counter
 from typing import Any, Literal
 
@@ -126,12 +127,28 @@ class HybridChunkResult(BaseModel):
     scope: CorpusScope = CorpusScope.COMMON
 
 
+class HybridOmittedCandidateTrace(BaseModel):
+    """Identity of a bounded raw candidate removed before the fused result pool."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    article_id: str = Field(min_length=1, max_length=300)
+    chunk_id: int = Field(gt=0)
+    rank: int = Field(ge=0)
+    score: float = Field(ge=0.0)
+    text_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    reason: Literal["fusion_limit"]
+
+
 class HybridSearchResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     original_query: str
     queries: list[str]
     results: list[HybridChunkResult]
+    omitted_candidate_traces: list[HybridOmittedCandidateTrace] = Field(
+        default_factory=list, max_length=1000
+    )
     lexical_candidates: int = Field(ge=0)
     vector_candidates: int = Field(ge=0)
     vector_query_count: int = Field(default=0, ge=0)
@@ -290,6 +307,7 @@ class HybridSearchService:
         lexical_scores: dict[int, float] = {}
         vector_scores: dict[int, float] = {}
         matched_queries: dict[int, list[str]] = {}
+        raw_candidates: dict[int, tuple[str, int, float, str]] = {}
         per_query_lexical_weight = self.settings.retrieval.lexical_weight / len(queries)
         per_query_vector_weight = (
             self.settings.retrieval.vector_weight / vector_query_limit
@@ -374,6 +392,15 @@ class HybridSearchService:
                 )
             )
             for result in lexical_results:
+                previous = raw_candidates.get(result.chunk_id)
+                raw_candidates[result.chunk_id] = (
+                    result.article_id,
+                    min(previous[1], result.rank) if previous is not None else result.rank,
+                    max(previous[2], max(result.relevance_score, 0.0))
+                    if previous is not None
+                    else max(result.relevance_score, 0.0),
+                    result.text,
+                )
                 lexical_ranks[result.chunk_id] = min(
                     lexical_ranks.get(result.chunk_id, result.rank), result.rank
                 )
@@ -393,6 +420,15 @@ class HybridSearchService:
                 )
             )
             for rank, result in enumerate(vector_results, start=1):
+                previous = raw_candidates.get(result.chunk_id)
+                raw_candidates[result.chunk_id] = (
+                    result.article_id,
+                    min(previous[1], rank) if previous is not None else rank,
+                    max(previous[2], max(result.score, 0.0))
+                    if previous is not None
+                    else max(result.score, 0.0),
+                    result.text,
+                )
                 vector_ranks[result.chunk_id] = min(vector_ranks.get(result.chunk_id, rank), rank)
                 vector_scores[result.chunk_id] = max(
                     vector_scores.get(result.chunk_id, float("-inf")), result.score
@@ -468,10 +504,26 @@ class HybridSearchService:
                     matched_queries=matched_queries.get(candidate.chunk_id, []),
                 )
             )
+        fused_ids = {candidate.chunk_id for candidate in fused}
+        omitted_candidate_traces = [
+            HybridOmittedCandidateTrace(
+                article_id=article_id,
+                chunk_id=chunk_id,
+                rank=max(rank - 1, 0),
+                score=score,
+                text_sha256=sha256(text.encode("utf-8")).hexdigest(),
+                reason="fusion_limit",
+            )
+            for chunk_id, (article_id, rank, score, text) in sorted(
+                raw_candidates.items(), key=lambda item: (item[1][1], item[0])
+            )
+            if chunk_id not in fused_ids
+        ][:1000]
         return HybridSearchResponse(
             original_query=query.strip(),
             queries=queries,
             results=results,
+            omitted_candidate_traces=omitted_candidate_traces,
             lexical_candidates=lexical_candidates,
             vector_candidates=vector_candidates,
             vector_search_degraded=self._vector_disabled_by_memory,

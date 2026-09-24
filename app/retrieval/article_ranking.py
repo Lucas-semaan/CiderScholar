@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import unicodedata
 from collections import defaultdict
@@ -71,6 +72,20 @@ class RankedArticle(BaseModel):
         return f"[{corpus_scope_label(self.scope)} · {self.article_id}]"
 
 
+class ArticleRankingCandidateTrace(BaseModel):
+    """Content-free identity of one hybrid chunk entering article selection."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    article_id: str = Field(min_length=1, max_length=300)
+    chunk_id: int = Field(gt=0)
+    rank: int = Field(ge=0)
+    score: float = Field(ge=0.0)
+    text_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    decision: Literal["retained", "rejected", "omitted"]
+    reason: str | None = Field(default=None, pattern=r"^[a-z0-9_]{1,100}$")
+
+
 class ArticleRankingResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -93,6 +108,10 @@ class ArticleRankingResponse(BaseModel):
     rrf_unique_candidate_count: int = Field(default=0, ge=0)
     vector_search_degraded: bool = False
     articles: list[RankedArticle]
+    candidate_traces: list[ArticleRankingCandidateTrace] = Field(
+        default_factory=list,
+        max_length=1000,
+    )
     duration_seconds: float = Field(ge=0.0)
 
 
@@ -403,6 +422,7 @@ class ArticleRankingService:
         )
         candidates = self._build_candidates(cleaned_query, eligible_chunks, concepts)
         articles = self._diversify(candidates, requested_count, mode)
+        selected_article_ids = {article.article_id for article in articles}
         return ArticleRankingResponse(
             query=cleaned_query,
             query_terms=query_terms,
@@ -419,6 +439,24 @@ class ArticleRankingService:
             dense_candidate_count=sum(chunk.vector_rank is not None for chunk in eligible_chunks),
             rrf_unique_candidate_count=len(eligible_chunks),
             articles=articles,
+            candidate_traces=[
+                ArticleRankingCandidateTrace(
+                    article_id=chunk.article_id,
+                    chunk_id=chunk.chunk_id,
+                    rank=max(chunk.rank - 1, 0),
+                    score=chunk.hybrid_score,
+                    text_sha256=hashlib.sha256(chunk.text.encode("utf-8")).hexdigest(),
+                    decision=(
+                        "retained" if chunk.article_id in selected_article_ids else "rejected"
+                    ),
+                    reason=(
+                        None
+                        if chunk.article_id in selected_article_ids
+                        else "not_selected_after_article_ranking"
+                    ),
+                )
+                for chunk in eligible_chunks
+            ],
             duration_seconds=perf_counter() - started,
         )
 
@@ -481,8 +519,24 @@ class ArticleRankingService:
             central_concepts=central_concepts,
             exclude_article_ids=exclude_article_ids,
         )
+        omitted_candidates = [
+            ArticleRankingCandidateTrace(
+                article_id=item.article_id,
+                chunk_id=item.chunk_id,
+                rank=item.rank,
+                score=item.score,
+                text_sha256=item.text_sha256,
+                decision="omitted",
+                reason=item.reason,
+            )
+            for item in hybrid_response.omitted_candidate_traces
+        ]
         return response.model_copy(
             update={
+                "candidate_traces": [
+                    *response.candidate_traces,
+                    *omitted_candidates,
+                ][:1000],
                 "duration_seconds": perf_counter() - started,
                 "query_variant_count": len(hybrid_response.queries),
                 "lexical_candidate_count": hybrid_response.lexical_candidates,

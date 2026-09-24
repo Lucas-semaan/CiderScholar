@@ -4,6 +4,7 @@ import json
 
 import pytest
 
+import app.updates.pilot_rag as pilot_rag
 from app.chat_effort import AnswerEffort
 from app.llm.argo_client import (
     ArgoProtocolError,
@@ -26,12 +27,45 @@ from app.updates.pilot_rag import (
     _clean_author_names,
     _PromptBudgetError,
     _reject_internal_process_leaks,
+    _render_evidence_answer,
     _renderable_doi,
     _salvage_grounded_evidence_answer,
     _validate_evidence_grounding,
     _validation_correction_message,
+    chatbot_citation_anchors,
 )
 from app.updates.vector_index import BibliographicHybridResult
+
+
+@pytest.fixture(autouse=True)
+def _enable_legacy_correction_scenarios(
+    monkeypatch: pytest.MonkeyPatch,
+    request: pytest.FixtureRequest,
+) -> None:
+    """Keep regression coverage for the retired multi-attempt correction path.
+
+    Production is intentionally limited to one scientific generation request.
+    These scenarios retain coverage of the safe fallback and correction mechanics
+    should that policy ever be configured again.
+    """
+
+    if request.node.name == "test_evidence_rag_stops_after_reviewer_generation":
+        return
+    legacy_limits = {
+        "test_faceted_evidence_rag_keeps_cited_drafts_and_assembles_them": 4,
+        "test_faceted_final_assembly_failure_returns_cited_partial_drafts": 4,
+        "test_first_facet_is_corrected_without_preventing_later_facets": 6,
+        "test_faceted_assembly_expands_once_when_effort_claim_threshold_is_validated": 4,
+        "test_faceted_assembly_reexpands_after_salvage_and_preserves_validated_drafts": 4,
+    }
+    maximum = legacy_limits.get(request.node.originalname or request.node.name, 10)
+    monkeypatch.setattr(pilot_rag, "MAX_SCIENTIFIC_GENERATION_REQUESTS", maximum)
+    generation_budget = pilot_rag._GenerationRequestBudget
+    monkeypatch.setattr(
+        pilot_rag,
+        "_GenerationRequestBudget",
+        lambda: generation_budget(maximum=maximum),
+    )
 
 
 def _record(record_id: str, doi: str) -> BibliographicHybridResult:
@@ -66,6 +100,53 @@ def _response(content: str) -> GenerationResponse:
             eval_duration_seconds=0.1,
         ),
     )
+
+
+def test_rendered_evidence_citations_open_their_exact_persisted_passages() -> None:
+    passage = ChatEvidencePassage(
+        evidence_id="common:ascocid:chunk:7",
+        chunk_id=7,
+        text="Saccharomyces uvarum has an optimum range from 6 to 10 °C.",
+        section="Conditions de milieu",
+        page_start=4,
+        page_end=4,
+    )
+    record = ChatEvidenceRecord(
+        record_id="common:ascocid",
+        origin="local_rag",
+        evidence_level="full_text",
+        scope="common",
+        article_id="ascocid",
+        title="Le développement des Saccharomyces.docx",
+        authors=["Ascocid"],
+        providers=["ascocid_wiki"],
+        passages=[passage],
+    )
+    answer = CiderEvidenceAnswer(
+        statements=[
+            CitedEvidenceStatement(
+                statement="La gamme optimale se situe entre 6 et 10 °C.",
+                evidence_ids=[passage.evidence_id],
+            )
+        ],
+        limitations=[],
+    )
+    evidence = {passage.evidence_id: (record, passage)}
+
+    markdown = _render_evidence_answer(
+        answer,
+        evidence,
+        ResponseStyle.PROSE,
+        question="À quelle température conduire la fermentation ?",
+    )
+    anchors = chatbot_citation_anchors(answer, [record])
+
+    assert len(anchors) == 1
+    assert anchors[0].source_family == "ascocid_knowledge"
+    assert anchors[0].evidence[0].evidence_id == passage.evidence_id
+    assert anchors[0].evidence[0].snippet == passage.text
+    assert f"](#citation-{anchors[0].citation_id})" in markdown
+    assert "Ascocid — Le développement des Saccharomyces.docx, p. 4" in markdown
 
 
 def test_bounded_evidence_reserves_ranked_records_for_required_axes() -> None:
@@ -1155,7 +1236,7 @@ def test_evidence_rag_accepts_study_context_without_indirect_label() -> None:
         [record],
     )
 
-    assert client.calls == 1
+    assert client.calls == 2
     assert result.generation_status == "generated"
     assert result.cited_evidence_ids == ["common:indirect-warning:abstract"]
     assert result.validation_warning_codes == []
@@ -1265,7 +1346,7 @@ def test_pilot_rag_constrains_ids_and_renders_abstract_citations() -> None:
     record = _record("11111111-1111-1111-1111-111111111111", "10.1000/cider")
 
     class FakeClient:
-        def chat(self, messages, *, json_schema, max_output_tokens):
+        def chat(self, messages, *, json_schema, max_output_tokens, **_options):
             assert max_output_tokens == 4096
             assert json_schema["properties"]["response_format"] == {
                 "type": "string",
@@ -1320,7 +1401,7 @@ def test_pilot_rag_constrains_ids_and_renders_abstract_citations() -> None:
     assert "Test, A. (2025). Cider microbiology. *Cider Science*" in result.answer_markdown
     assert "https://doi.org/10.1000/cider" in result.answer_markdown
     assert "ne remplace pas le texte intégral" in result.answer_markdown
-    assert result.prompt_tokens == 50
+    assert result.prompt_tokens == 100
 
 
 def test_evidence_rag_translates_every_generated_field_to_question_language() -> None:
@@ -1423,7 +1504,7 @@ def test_evidence_rag_uses_full_text_passages_and_renders_exact_pages() -> None:
     )
 
     class FakeClient:
-        def chat(self, messages, *, json_schema, max_output_tokens):
+        def chat(self, messages, *, json_schema, max_output_tokens, **_options):
             assert max_output_tokens == 4096
             assert "matrice ou le procédé exact" in messages[0]["content"]
             assert "Une condition expérimentale ne constitue jamais" in messages[0]["content"]
@@ -1491,7 +1572,7 @@ def test_evidence_rag_uses_full_text_passages_and_renders_exact_pages() -> None:
     assert "mécanismes moléculaires" in result.answer_markdown
 
 
-def test_evidence_rag_stops_after_one_invalid_generation() -> None:
+def test_evidence_rag_stops_after_reviewer_generation() -> None:
     passage = ChatEvidencePassage(
         evidence_id="common:article-1:chunk:42",
         chunk_id=42,
@@ -1539,7 +1620,7 @@ def test_evidence_rag_stops_after_one_invalid_generation() -> None:
     with pytest.raises(ArgoScientificValidationError, match="numeric value 15"):
         CiderEvidenceRagService(client).answer("Quel est l'effet observe ?", [record])
 
-    assert client.calls == 1
+    assert client.calls == 2
 
 
 def test_evidence_rag_returns_best_safe_answer_with_quality_warning_after_ten_requests() -> None:
@@ -3096,7 +3177,7 @@ def test_results_start_with_documented_study_context_without_preamble(
     assert result.answer_markdown.startswith(statement)
     assert "Preuve indirecte" not in result.answer_markdown
     assert result.cited_evidence_ids == ["matrix:abstract"]
-    assert client.calls == 1
+    assert client.calls == 2
 
 
 def test_pilot_rag_rejects_known_empty_introduction() -> None:

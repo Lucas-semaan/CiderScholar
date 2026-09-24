@@ -55,6 +55,7 @@ def test_schema_creates_required_tables_and_fts(settings) -> None:
         "rejected_bibliographic_archive",
         "rejected_bibliographic_record_sources",
         "article_retrieval_exclusions",
+        "ascocid_wiki_documents",
         "chat_conversations",
         "chat_messages",
         "argo_request_events",

@@ -52,6 +52,25 @@ describe("API client", () => {
     await expect(api.system.overview()).rejects.toEqual(new ApiError("Requête invalide", 422));
   });
 
+  it("extracts stable messages from structured backend errors", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            detail: { code: "invalid_correction", message: "Correction invalide" },
+          }),
+          {
+            status: 422,
+            headers: { "Content-Type": "application/json" },
+          },
+        ),
+      ),
+    );
+
+    await expect(api.system.overview()).rejects.toEqual(new ApiError("Correction invalide", 422));
+  });
+
   it("loads local runtime diagnostics from the dedicated system route", async () => {
     const fetchMock = vi.fn().mockResolvedValue(
       new Response(JSON.stringify({ active_jobs: 0, worker: {}, process: {}, warnings: [] }), {
@@ -64,6 +83,28 @@ describe("API client", () => {
     await api.system.diagnostics();
 
     expect(fetchMock).toHaveBeenCalledWith("/api/system/diagnostics", expect.anything());
+  });
+
+  it("loads expert-memory release history with a resumable cursor", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          releases: [],
+          active_release_id: null,
+          active_generation: 0,
+          next_cursor: null,
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await api.expertMemory.releases("2026-09-24T12:00:00+00:00|release/id", 10);
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/expert-memory/releases?limit=10&cursor=2026-09-24T12%3A00%3A00%2B00%3A00%7Crelease%2Fid",
+      expect.anything(),
+    );
   });
 
   it("sends review rejections without a second confirmation payload", async () => {
@@ -88,6 +129,38 @@ describe("API client", () => {
       expect.objectContaining({
         method: "POST",
         body: JSON.stringify({ decision: "rejected" }),
+      }),
+    );
+  });
+
+  it("submits private expert corrections through the chatbot route", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ id: "correction-1", revision: 1 }), {
+        status: 201,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await api.chatbot.submitExpertCorrection("message/id", {
+      client_request_id: "request-1",
+      selected_text: "Texte cité",
+      problem: "Une distinction méthodologique est absente.",
+      proposed_correction: "Ajouter cette distinction dans la réponse.",
+      scope: "this_answer",
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/chatbot/messages/message%2Fid/expert-corrections",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          client_request_id: "request-1",
+          selected_text: "Texte cité",
+          problem: "Une distinction méthodologique est absente.",
+          proposed_correction: "Ajouter cette distinction dans la réponse.",
+          scope: "this_answer",
+        }),
       }),
     );
   });

@@ -13,6 +13,16 @@ const DiagnosticPage = lazy(() =>
     default: module.DiagnosticPage,
   })),
 );
+const ExpertReviewPage = lazy(() =>
+  import("@/features/expert-memory/ExpertReviewPage").then((module) => ({
+    default: module.ExpertReviewPage,
+  })),
+);
+const ExpertDistributionPage = lazy(() =>
+  import("@/features/expert-memory/ExpertDistributionPage").then((module) => ({
+    default: module.ExpertDistributionPage,
+  })),
+);
 const LibraryPage = lazy(() =>
   import("@/features/library/LibraryPage").then((module) => ({
     default: module.LibraryPage,
@@ -35,6 +45,11 @@ export function App() {
       <Route element={<AppShell />}>
         <Route element={<LazyPage page={<ChatbotPage />} />} index />
         <Route element={<LazyPage page={<DiagnosticPage />} />} path="diagnostic" />
+        <Route element={<LazyPage page={<ExpertReviewPage />} />} path="revue-experte" />
+        <Route
+          element={<LazyPage page={<ExpertDistributionPage />} />}
+          path="distribution-experte"
+        />
         <Route element={<LegacyCorpusRedirect />} path="corpus" />
         <Route element={<LazyPage page={<LibraryPage />} />} path="bibliotheque" />
         <Route element={<LazyPage page={<SynthesisPage />} />} path="syntheses" />

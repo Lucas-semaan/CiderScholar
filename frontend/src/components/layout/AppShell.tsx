@@ -2,9 +2,11 @@ import { useCallback, useState } from "react";
 
 import {
   BookOpenText,
+  Boxes,
   BotMessageSquare,
   FlaskConical,
   HeartPulse,
+  ShieldCheck,
   Menu,
   Settings,
   X,
@@ -22,6 +24,8 @@ const navigation = [
   { to: "/bibliotheque", label: "Base documentaire", icon: BookOpenText },
   { to: "/syntheses", label: "Synthèses", icon: FlaskConical },
   { to: "/diagnostic", label: "Diagnostic", icon: HeartPulse },
+  { to: "/revue-experte", label: "Revue experte", icon: ShieldCheck },
+  { to: "/distribution-experte", label: "Distribution experte", icon: Boxes },
   { to: "/parametres", label: "Paramètres", icon: Settings },
 ];
 

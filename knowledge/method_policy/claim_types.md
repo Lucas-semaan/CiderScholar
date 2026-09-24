@@ -6,7 +6,7 @@ kind: "method_policy"
 title: "Distinguer les types d'affirmations"
 language: "multilingual"
 authority: "accepted_user_method"
-provenance: [{"document":"docs/HOW_TO_WORK_ON_CIDERSCHOLAR.md","section":"§5 Produire une réponse scientifique","revision_sha256":"d1902afa3e5f0b59446bed54a01d37fcbf5ad6c798bd57ef164fde953571cf51"}]
+provenance: [{"document":"docs/HOW_TO_WORK_ON_CIDERSCHOLAR.md","section":"§5 Produire une réponse scientifique","revision_sha256":"05140e5d35c03a8f6347ea5627a08216d87a6aacc299548d447b4ba255d27044"}]
 depends_on: []
 stage: "generation"
 required: false

@@ -4,10 +4,13 @@ from uuid import uuid4
 
 from app.corpora import CorpusScope, corpus_paths
 from app.database.sqlite import Database
-from app.models.chatbot import ChatEvidencePassage, ChatEvidenceRecord
+from app.models.chatbot import ChatbotTraceCandidate, ChatEvidencePassage, ChatEvidenceRecord
 from app.retrieval.chat_checkpoint import (
     ChatRetrievalCheckpoint,
     ChatRetrievalCheckpointStore,
+    FigureAnalysisCheckpoint,
+    FigureAnalysisCheckpointItem,
+    FigureAnalysisCheckpointStore,
 )
 from app.retrieval.hypothesis_planning import deterministic_hypothesis_plan
 
@@ -45,6 +48,15 @@ def test_chat_retrieval_checkpoint_persists_identities_without_evidence_text(tmp
         warnings=[],
         timings=[],
         retrieval_traces=[],
+        retrieval_trace_candidates=[
+            ChatbotTraceCandidate(
+                item_id="common:article-1",
+                content_sha256="b" * 64,
+                stage="retrieval",
+                rank=0,
+                decision="retained",
+            )
+        ],
     )
     store = ChatRetrievalCheckpointStore(tmp_path / "checkpoints")
     user_message_id = uuid4()
@@ -64,6 +76,7 @@ def test_chat_retrieval_checkpoint_persists_identities_without_evidence_text(tmp
     assert private_title not in raw_checkpoint
     assert '"chunk_id": 17' in raw_checkpoint
     assert store.load(user_message_id, request_fingerprint=fingerprint) == checkpoint
+    assert checkpoint.retrieval_trace_candidates[0].item_id == "common:article-1"
     assert (
         store.load(
             user_message_id,
@@ -126,6 +139,36 @@ def test_chat_retrieval_checkpoint_rehydrates_prefixed_bibliographic_abstract(se
     assert hydrated[0].title == "Current bibliographic title"
     assert hydrated[0].passages[0].evidence_id == "common-abstract:record-1:abstract"
     assert hydrated[0].passages[0].text == "Current SQLite abstract."
+
+
+def test_figure_checkpoint_persists_only_hashes_and_rejects_other_requests(tmp_path) -> None:
+    store = FigureAnalysisCheckpointStore(tmp_path / "checkpoints")
+    user_message_id = uuid4()
+    fingerprint = "a" * 64
+    checkpoint = FigureAnalysisCheckpoint(
+        request_fingerprint=fingerprint,
+        items=[
+            FigureAnalysisCheckpointItem(
+                element_id="figure-element-1",
+                image_sha256="b" * 64,
+                analysis_contract_sha256="c" * 64,
+                model_name="visual-test",
+                model_revision="revision-a",
+                analysis_id="figure-analysis-" + "d" * 24,
+                admitted=True,
+            )
+        ],
+    )
+
+    store.save(user_message_id, checkpoint=checkpoint)
+
+    raw = (tmp_path / "checkpoints" / str(user_message_id) / "figure_analysis.json").read_text(
+        encoding="utf-8"
+    )
+    assert "observation" not in raw
+    assert "image_bytes" not in raw
+    assert store.load(user_message_id, request_fingerprint=fingerprint) == checkpoint
+    assert store.load(user_message_id, request_fingerprint="e" * 64) is None
 
 
 def test_chat_retrieval_checkpoint_preserves_structural_chunk_coordinates() -> None:

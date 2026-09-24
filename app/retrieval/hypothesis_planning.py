@@ -21,6 +21,46 @@ _NUMERIC_TOKEN = re.compile(r"(?<!\w)[+-]?(?:\d+(?:[.,]\d+)?|[.,]\d+)(?!\w)")
 _DOI_TOKEN = re.compile(r"\b10\.\d{4,9}/\S+", re.IGNORECASE)
 
 
+def _normalized_terms(value: str) -> str:
+    """Return an accent-insensitive form suitable for controlled term detection."""
+
+    normalized = unicodedata.normalize("NFKD", value).casefold()
+    return " ".join(
+        re.findall(
+            r"[a-z0-9]+",
+            "".join(character for character in normalized if not unicodedata.combining(character)),
+        )
+    )
+
+
+def controlled_scientific_alias_queries(question: str) -> list[str]:
+    """Return mandatory lexical queries for unambiguous named scientific entities.
+
+    An LLM plan may recognize an entity yet omit its canonical spelling from every
+    generated verification query.  These compact, deterministic queries keep an
+    exact lexical path to the corpus; they are candidates only and remain subject
+    to the normal scientific semantic filter.
+    """
+
+    normalized = _normalized_terms(question)
+    tca_markers = (
+        "trichloroanisole",
+        "cork taint",
+        "gout de bouchon",
+        "corkiness",
+    )
+    beverage_markers = ("vin", "wine", "biere", "beer", "cidre", "cider", "bouchon", "cork")
+    tca_acronym_is_scoped = "tca" in normalized.split() and any(
+        marker in normalized.split() for marker in beverage_markers
+    )
+    if not any(marker in normalized for marker in tca_markers) and not tca_acronym_is_scoped:
+        return []
+    return [
+        "2,4,6-trichloroanisole TCA",
+        "trichloroanisole cork taint",
+    ]
+
+
 class VerificationNeed(BaseModel):
     """One falsifiable proposition used only to prepare the grouped retrieval wave."""
 
@@ -63,7 +103,10 @@ class HypotheticalResearchPlan(BaseModel):
         return list(dict.fromkeys([" ".join(original_question.split()), self.hypothetical_answer]))
 
     def lexical_queries(self, original_question: str) -> list[str]:
-        values = [" ".join(original_question.split())]
+        values = [
+            " ".join(original_question.split()),
+            *controlled_scientific_alias_queries(original_question),
+        ]
         for need in self.verification_needs:
             values.append(need.search_query)
             if need.contradiction_query:

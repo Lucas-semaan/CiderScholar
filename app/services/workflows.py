@@ -71,12 +71,14 @@ from app.models.chatbot import (
     ChatbotRetrievalTrace,
     ChatbotSource,
     ChatbotTiming,
+    ChatbotTraceCandidate,
     ChatEvidencePassage,
     ChatEvidenceRecord,
     ScientificGenerationTrace,
 )
 from app.models.synthesis import BibliographyEntry, SynthesisResult
 from app.retrieval.article_ranking import (
+    ArticleRankingCandidateTrace,
     ArticleRankingResponse,
     ArticleRankingService,
     RankedArticle,
@@ -86,7 +88,10 @@ from app.retrieval.axis_coverage import (
     merge_axis_rankings,
     select_with_axis_coverage,
 )
-from app.retrieval.chat_checkpoint import ChatRetrievalCheckpoint
+from app.retrieval.chat_checkpoint import (
+    ChatRetrievalCheckpoint,
+    FigureAnalysisCheckpoint,
+)
 from app.retrieval.evidence_selection import distinct_evidence
 from app.retrieval.global_semantic_filter import (
     ArgoGlobalSemanticEvidenceFilter,
@@ -141,6 +146,7 @@ from app.updates.pilot_rag import (
     CiderAbstractRagResult,
     CiderAbstractRagService,
     CiderEvidenceRagService,
+    chatbot_citation_anchors,
 )
 from app.updates.service import BibliographicDiscoveryService
 from app.updates.vector_index import (
@@ -318,6 +324,7 @@ class _ChatRetrievalTraceCollector:
 
     def __init__(self) -> None:
         self._values: dict[str, ChatbotRetrievalTrace] = {}
+        self._candidates: list[ChatbotTraceCandidate] = []
 
     def add(self, stage: str, **measurements: Any) -> None:
         current = self._values.get(stage)
@@ -340,10 +347,23 @@ class _ChatRetrievalTraceCollector:
     def models(self) -> list[ChatbotRetrievalTrace]:
         return list(self._values.values())
 
+    def add_candidates(self, candidates: Sequence[ChatbotTraceCandidate]) -> None:
+        """Keep bounded candidate identities private until the durable manifest is built."""
+
+        remaining = 300 - len(self._candidates)
+        if remaining > 0:
+            self._candidates.extend(candidates[:remaining])
+
+    def candidates(self) -> list[ChatbotTraceCandidate]:
+        return list(self._candidates)
+
     def restore(self, models: Sequence[ChatbotRetrievalTrace]) -> None:
         """Restore completed retrieval traces exactly once for a resumed attempt."""
 
         self._values = {model.stage: model for model in models}
+
+    def restore_candidates(self, candidates: Sequence[ChatbotTraceCandidate]) -> None:
+        self._candidates = list(candidates[:300])
 
 
 @measured("corpus_revision_read")
@@ -410,6 +430,23 @@ class _ChatRetrievalResources:
     def invalidate_corpus_fingerprint(self) -> None:
         self._corpus_fingerprints.clear()
 
+    def release_heavy_models(self) -> None:
+        """Release local ML weights once retrieval has produced durable evidence.
+
+        Semantic validation and final synthesis use the remote provider and do
+        not need E5 or the reranker. Keeping those weights alive across several
+        provider calls can leave too little system memory for the mandatory
+        scientific verifier, even though the retrieved passages themselves are
+        small and already persisted in the job checkpoint.
+        """
+
+        if self._reranker is not None:
+            self._reranker.close()
+            self._reranker = None
+        if self._embedding_backend is not None:
+            self._embedding_backend.close()
+            self._embedding_backend = None
+
     @contextmanager
     def qdrant_wave(self, settings: Settings) -> Iterable[QdrantLocalIndex]:
         """Own one lazy Qdrant client shared by every collection used in a wave."""
@@ -426,12 +463,7 @@ class _ChatRetrievalResources:
             self._result_cache.close()
             self._result_cache = None
         self._corpus_fingerprints.clear()
-        if self._reranker is not None:
-            self._reranker.close()
-            self._reranker = None
-        if self._embedding_backend is not None:
-            self._embedding_backend.close()
-            self._embedding_backend = None
+        self.release_heavy_models()
 
 
 def _chat_retrieval_cache_signature(
@@ -460,13 +492,26 @@ def _chat_retrieval_cache_signature(
             "manifest_sha256": _manifest_sha256(reranker_path),
         },
         filters_limits={
-            "pipeline_version": "rag-v3-conservative-evidence-selection",
+            # v4 invalidates entries written before degraded vector retrieval
+            # was excluded from the reusable result cache.
+            "pipeline_version": "rag-v4-complete-hybrid-retrieval",
             "article_ranking": settings.article_ranking.model_dump(mode="json"),
             "evidence": settings.evidence.model_dump(mode="json"),
             "operation": operation,
             **dict(filters_limits),
         },
     )
+
+
+def _cacheable_hybrid_retrieval(*, vector_search_degraded: bool) -> bool:
+    """Cache only a retrieval wave that did not lose its dense component.
+
+    A lexical fallback remains useful for the current answer, but it is not a
+    complete hybrid result. Persisting it would prevent a later request, made
+    after memory is available again, from retrying the vector search.
+    """
+
+    return not vector_search_degraded
 
 
 def _evidence_rag_service(
@@ -1009,6 +1054,28 @@ def _evidence_level_trace_counts(
     }
 
 
+def _record_article_ranking_candidates(
+    retrieval_trace: _ChatRetrievalTraceCollector | None,
+    ranking: ArticleRankingResponse,
+) -> None:
+    if retrieval_trace is None:
+        return
+    retrieval_trace.add_candidates(
+        [
+            ChatbotTraceCandidate(
+                item_id=f"common:{candidate.article_id}:chunk:{candidate.chunk_id}",
+                content_sha256=candidate.text_sha256,
+                stage="retrieval",
+                rank=candidate.rank,
+                score=min(max(candidate.score, 0.0), 1.0),
+                decision=candidate.decision,
+                reason=candidate.reason,
+            )
+            for candidate in ranking.candidate_traces
+        ]
+    )
+
+
 def _abstract_route_warning(
     question: str,
     *,
@@ -1153,6 +1220,21 @@ def search_common_corpus_abstracts(
                 )
             if cached is not None:
                 if retrieval_trace is not None:
+                    retrieval_trace.add_candidates(
+                        [
+                            ChatbotTraceCandidate(
+                                item_id=item.record_id,
+                                content_sha256=hashlib.sha256(
+                                    item.abstract.encode("utf-8")
+                                ).hexdigest(),
+                                stage="fusion",
+                                rank=max(item.rank - 1, 0),
+                                score=min(max(item.score, 0.0), 1.0),
+                                decision="retained",
+                            )
+                            for item in cached
+                        ]
+                    )
                     retrieval_trace.add(
                         trace_stage,
                         query_variant_count=len(queries),
@@ -1416,6 +1498,23 @@ def search_common_corpus_abstracts(
             )
         ]
     if retrieval_trace is not None:
+        retained_ids = {item.record_id for item in ranked}
+        retrieval_trace.add_candidates(
+            [
+                ChatbotTraceCandidate(
+                    item_id=item.record_id,
+                    content_sha256=hashlib.sha256(item.abstract.encode("utf-8")).hexdigest(),
+                    stage="fusion",
+                    rank=max(item.rank - 1, 0),
+                    score=min(max(item.score, 0.0), 1.0),
+                    decision=("retained" if item.record_id in retained_ids else "rejected"),
+                    reason=(
+                        None if item.record_id in retained_ids else "not_selected_after_reranking"
+                    ),
+                )
+                for item in reranker_candidates
+            ]
+        )
         retrieval_trace.add(
             trace_stage,
             query_variant_count=len(queries),
@@ -1435,7 +1534,11 @@ def search_common_corpus_abstracts(
                 **failure_counts,
             },
         )
-    if retrieval_resources is not None and cache_signature is not None:
+    if (
+        retrieval_resources is not None
+        and cache_signature is not None
+        and _cacheable_hybrid_retrieval(vector_search_degraded=abstract_vector_search_degraded)
+    ):
         with suppress(Exception):
             retrieval_resources.result_cache(scoped_settings).put(
                 cache_signature,
@@ -1461,6 +1564,7 @@ def _lexical_full_text_ranking(
     resolved_candidate_limit = max(candidate_limit or 120, article_count * 12)
     lexical_service = LexicalSearchService(settings, database)
     fused: dict[tuple[str, int], dict[str, Any]] = {}
+    pre_fusion_omitted: dict[tuple[str, int], Any] = {}
     lexical_candidate_count = 0
     with lexical_service.read_session() as lexical_session:
         for variant_index, variant in enumerate(variants):
@@ -1478,6 +1582,7 @@ def _lexical_full_text_ranking(
                     result.text,
                     title=result.article_title,
                 ):
+                    pre_fusion_omitted.setdefault((result.article_id, result.chunk_id), result)
                     continue
                 key = (result.article_id, result.chunk_id)
                 candidate = fused.setdefault(
@@ -1539,8 +1644,22 @@ def _lexical_full_text_ranking(
         diversity_mode="none",
         central_concepts=central_concepts,
     )
+    omitted_traces = [
+        ArticleRankingCandidateTrace(
+            article_id=result.article_id,
+            chunk_id=result.chunk_id,
+            rank=max(result.rank - 1, 0),
+            score=max(result.relevance_score, 0.0),
+            text_sha256=hashlib.sha256(result.text.encode("utf-8")).hexdigest(),
+            decision="omitted",
+            reason="variant_mismatch",
+        )
+        for key, result in sorted(pre_fusion_omitted.items(), key=lambda item: item[0])
+        if key not in fused
+    ]
     return response.model_copy(
         update={
+            "candidate_traces": [*response.candidate_traces, *omitted_traces][:1000],
             "query_variant_count": len(variants),
             "lexical_candidate_count": lexical_candidate_count,
             "dense_candidate_count": 0,
@@ -1700,6 +1819,23 @@ def search_common_corpus_full_text_evidence(
                 cached = hydrated if len(hydrated) == len(cached) else None
             if cached is not None:
                 if retrieval_trace is not None:
+                    retrieval_trace.add_candidates(
+                        [
+                            ChatbotTraceCandidate(
+                                item_id=record.record_id,
+                                content_sha256=hashlib.sha256(
+                                    "\n".join(passage.text for passage in record.passages).encode(
+                                        "utf-8"
+                                    )
+                                ).hexdigest(),
+                                stage="retrieval",
+                                rank=index,
+                                score=min(max(record.score, 0.0), 1.0),
+                                decision="retained",
+                            )
+                            for index, record in enumerate(cached)
+                        ]
+                    )
                     retrieval_trace.add(
                         trace_stage,
                         query_variant_count=len(variants),
@@ -1749,6 +1885,7 @@ def search_common_corpus_full_text_evidence(
                 candidate_limit=candidate_limit,
                 prefix_matching=prefix_matching,
             )
+            _record_article_ranking_candidates(retrieval_trace, ranking)
             for axis_key, queries in cleaned_axis_queries.items():
                 axis_query = queries[0]
                 axis_ranking = ranking_service.search(
@@ -1761,6 +1898,7 @@ def search_common_corpus_full_text_evidence(
                     candidate_limit=candidate_limit,
                     prefix_matching=prefix_matching,
                 )
+                _record_article_ranking_candidates(retrieval_trace, axis_ranking)
                 axis_rankings[axis_key] = axis_ranking.articles
                 if retrieval_trace is not None:
                     retrieval_trace.add(
@@ -1796,6 +1934,7 @@ def search_common_corpus_full_text_evidence(
             candidate_limit=candidate_limit,
             prefix_matching=prefix_matching,
         )
+        _record_article_ranking_candidates(retrieval_trace, ranking)
         for axis_key, queries in cleaned_axis_queries.items():
             axis_variants = [
                 QueryVariant(
@@ -1819,6 +1958,7 @@ def search_common_corpus_full_text_evidence(
                 candidate_limit=candidate_limit,
                 prefix_matching=prefix_matching,
             )
+            _record_article_ranking_candidates(retrieval_trace, axis_ranking)
             axis_rankings[axis_key] = axis_ranking.articles
             if retrieval_trace is not None:
                 retrieval_trace.add(
@@ -1876,6 +2016,7 @@ def search_common_corpus_full_text_evidence(
     chunk_rows = database.chunk_details_by_ids(
         [chunk_id for article in coverage_pool.articles for chunk_id in article.top_chunk_ids]
     )
+    trace_content_by_article: dict[str, str] = {}
     relevance_by_article = {}
     reranker_candidates: list[RerankerCandidate] = []
     for article in coverage_pool.articles:
@@ -1888,6 +2029,7 @@ def search_common_corpus_full_text_evidence(
         # fallback for records without an abstract because references and
         # background passages can contain misleading matrix/process terms.
         searchable = article.abstract or passage_text
+        trace_content_by_article[article.article_id] = searchable
         relevance = score_scientific_text(
             intent,
             title=article.title,
@@ -1984,6 +2126,44 @@ def search_common_corpus_full_text_evidence(
         axis_ranks=selection_axis_ranks,
     )
 
+    if retrieval_trace is not None:
+        retrieval_trace.add_candidates(
+            [
+                ChatbotTraceCandidate(
+                    item_id=f"common:{article.article_id}",
+                    content_sha256=hashlib.sha256(
+                        trace_content_by_article[article.article_id].encode("utf-8")
+                    ).hexdigest(),
+                    stage="fusion",
+                    rank=max(article.base_rank - 1, 0),
+                    score=article.adjusted_score,
+                    decision="retained",
+                )
+                for article in coverage_pool.articles
+            ]
+        )
+        selected_ids = {article.article_id for article in selected_articles[:article_count]}
+        retrieval_trace.add_candidates(
+            [
+                ChatbotTraceCandidate(
+                    item_id=f"common:{article.article_id}",
+                    content_sha256=hashlib.sha256(
+                        trace_content_by_article[article.article_id].encode("utf-8")
+                    ).hexdigest(),
+                    stage="retrieval",
+                    rank=max(article.rank - 1, 0),
+                    score=article.adjusted_score,
+                    decision=("retained" if article.article_id in selected_ids else "rejected"),
+                    reason=(
+                        None
+                        if article.article_id in selected_ids
+                        else "not_selected_after_scientific_ranking"
+                    ),
+                )
+                for _score, article in assessed_articles
+            ]
+        )
+
     selector = EvidencePassageSelector(scoped_settings, database)
     records: list[ChatEvidenceRecord] = []
     selected_passage_count = (
@@ -2067,7 +2247,11 @@ def search_common_corpus_full_text_evidence(
                 ),
             },
         )
-    if retrieval_resources is not None and cache_signature is not None:
+    if (
+        retrieval_resources is not None
+        and cache_signature is not None
+        and _cacheable_hybrid_retrieval(vector_search_degraded=ranking.vector_search_degraded)
+    ):
         with suppress(Exception):
             retrieval_resources.result_cache(scoped_settings).put(
                 cache_signature,
@@ -2115,6 +2299,93 @@ def abstract_candidates_to_chat_evidence(
             )
         )
     return converted
+
+
+ASCOCID_WIKI_PROVIDER = "ascocid_wiki"
+HYPOTHESIS_PLAN_CACHE_VERSION = "hypothesis-v4-ascocid-direct-retrieval"
+
+
+def _is_ascocid_wiki_record(record: ChatEvidenceRecord) -> bool:
+    return ASCOCID_WIKI_PROVIDER in record.providers
+
+
+def _ascocid_wiki_search_options(
+    query: str,
+    *,
+    maximum_variants: int,
+    deep: bool,
+) -> dict[str, Any]:
+    """Keep generated hypotheses from displacing an exact AsCoCid match.
+
+    The wiki contains operational vocabulary and curated cross-references.  The
+    original user wording therefore carries more authority than hypothetical
+    answers or verification queries generated by the planner.  A small set of
+    deterministic bilingual variants preserves synonym recall without allowing
+    several broad generated queries to accumulate RRF weight on unrelated
+    records.
+    """
+
+    return {
+        "search_queries": (),
+        "dense_queries": (),
+        "intent_override": analyze_scientific_intent(query, deep=deep),
+        "max_query_variants": min(3, maximum_variants),
+        "max_vector_query_variants": 0,
+        "include_fallback_variants": True,
+    }
+
+
+def _label_ascocid_wiki_records(
+    database: Database,
+    records: Sequence[ChatEvidenceRecord],
+) -> list[ChatEvidenceRecord]:
+    """Apply the original Ascocid filename to wiki-routed SQLite evidence."""
+
+    aliases = database.ascocid_wiki_documents([record.article_id or "" for record in records])
+    filename_by_article: dict[str, str] = {}
+    for alias in aliases:
+        filename_by_article.setdefault(str(alias["article_id"]), str(alias["filename"]))
+    return [
+        record.model_copy(
+            update={
+                "title": filename_by_article.get(record.article_id or "", record.title),
+                "authors": ["Ascocid"],
+                "doi": None,
+                "journal": "Ascocid",
+                "providers": [ASCOCID_WIKI_PROVIDER],
+                "url": None,
+            }
+        )
+        for record in records
+        if record.article_id in filename_by_article
+    ]
+
+
+def _prefer_complete_ascocid_wiki_answer(
+    evidence: Sequence[ChatEvidenceRecord],
+    semantic_filter: GlobalSemanticFilterResult,
+    verification_needs: Sequence[Any],
+    *,
+    answer_effort: AnswerEffort,
+) -> list[ChatEvidenceRecord]:
+    """Use only Ascocid evidence for concise answers when it covers every planned check."""
+
+    selected = list(evidence)
+    if answer_effort is not AnswerEffort.CONCISE:
+        return selected
+    wiki_ids = {record.record_id for record in selected if _is_ascocid_wiki_record(record)}
+    if not wiki_ids:
+        return selected
+    required_need_ids = {str(need.need_id) for need in verification_needs}
+    supported_need_ids = {
+        need_id
+        for decision in semantic_filter.decisions
+        if decision.candidate_id in wiki_ids and decision.relevance in {"direct", "supportive"}
+        for need_id in decision.supported_need_ids
+    }
+    if required_need_ids and required_need_ids <= supported_need_ids:
+        return [record for record in selected if record.record_id in wiki_ids]
+    return selected
 
 
 def merge_chat_evidence(
@@ -2467,6 +2738,7 @@ def _fallback_chatbot_result(
     answer_effort: AnswerEffort = AnswerEffort.BALANCED,
     timings: Sequence[ChatbotTiming] = (),
     retrieval_traces: Sequence[ChatbotRetrievalTrace] = (),
+    retrieval_trace_candidates: Sequence[ChatbotTraceCandidate] = (),
     generation_traces: Sequence[ScientificGenerationTrace] = (),
     diagnostic_codes: Sequence[str] = (),
 ) -> ChatbotResult:
@@ -2582,6 +2854,7 @@ def _fallback_chatbot_result(
         answer_effort=answer_effort,
         timings=list(timings),
         retrieval_traces=list(retrieval_traces),
+        retrieval_trace_candidates=list(retrieval_trace_candidates),
         generation_traces=list(generation_traces),
     )
 
@@ -2643,6 +2916,8 @@ def answer_chatbot(
     interaction_mode: str = "research",
     previous_sources: Sequence[ChatbotSource] = (),
     on_figure_analysis: Callable[[], None] | None = None,
+    figure_checkpoint: FigureAnalysisCheckpoint | None = None,
+    on_figure_checkpoint: Callable[[FigureAnalysisCheckpoint], None] | None = None,
     on_argo_reserved: Callable[[], None] | None = None,
     on_argo_response: Callable[[], None] | None = None,
     on_progress: ChatbotProgressCallback | None = None,
@@ -2668,6 +2943,8 @@ def answer_chatbot(
                 interaction_mode=interaction_mode,
                 previous_sources=previous_sources,
                 on_figure_analysis=on_figure_analysis,
+                figure_checkpoint=figure_checkpoint,
+                on_figure_checkpoint=on_figure_checkpoint,
                 on_argo_reserved=on_argo_reserved,
                 on_argo_response=on_argo_response,
                 on_progress=on_progress,
@@ -2694,6 +2971,8 @@ def _answer_chatbot(
     interaction_mode: str = "research",
     previous_sources: Sequence[ChatbotSource] = (),
     on_figure_analysis: Callable[[], None] | None = None,
+    figure_checkpoint: FigureAnalysisCheckpoint | None = None,
+    on_figure_checkpoint: Callable[[FigureAnalysisCheckpoint], None] | None = None,
     on_argo_reserved: Callable[[], None] | None = None,
     on_argo_response: Callable[[], None] | None = None,
     on_progress: ChatbotProgressCallback | None = None,
@@ -2750,6 +3029,10 @@ def _answer_chatbot(
             f"({type(exc).__name__}); la recherche reste fondée sur le corpus scientifique."
         )
     source_database = Database(corpus_paths(settings, CorpusScope.COMMON).database_path)
+    try:
+        corpus_fingerprint_before = retrieval_resources.corpus_fingerprint(settings)
+    except (OSError, RuntimeError, sqlite3.Error):
+        corpus_fingerprint_before = None
 
     def reserve_llm_request() -> None:
         if on_argo_reserved is not None:
@@ -2856,6 +3139,7 @@ def _answer_chatbot(
                 answer_effort=answer_effort,
                 timings=timings.models(),
                 retrieval_traces=retrieval_traces.models(),
+                retrieval_trace_candidates=retrieval_traces.candidates(),
             )
         except MemoryLimitError:
             timings.add(
@@ -2886,6 +3170,7 @@ def _answer_chatbot(
                 answer_effort=answer_effort,
                 timings=timings.models(),
                 retrieval_traces=retrieval_traces.models(),
+                retrieval_trace_candidates=retrieval_traces.candidates(),
             )
         except ArgoError as exc:
             timings.add(
@@ -2926,6 +3211,7 @@ def _answer_chatbot(
                 answer_effort=answer_effort,
                 timings=timings.models(),
                 retrieval_traces=retrieval_traces.models(),
+                retrieval_trace_candidates=retrieval_traces.candidates(),
                 generation_traces=failed_traces,
                 diagnostic_codes=_argo_diagnostic_codes(exc),
             )
@@ -2942,11 +3228,28 @@ def _answer_chatbot(
         sources = chatbot_sources_from_evidence(
             evidence, answer.cited_evidence_ids, source_database
         )
-        return ChatbotResult(
+        source_by_record_id = {source.record_id: source for source in sources}
+        structured_answer = getattr(answer, "answer", None)
+        citation_anchors = [
+            anchor.model_copy(
+                update={
+                    "local_pdf_url": source_by_record_id[anchor.record_id].local_pdf_url,
+                    "source_url": source_by_record_id[anchor.record_id].url,
+                }
+            )
+            for anchor in (
+                chatbot_citation_anchors(structured_answer, evidence)
+                if structured_answer is not None
+                else []
+            )
+            if anchor.record_id in source_by_record_id
+        ]
+        result = ChatbotResult(
             message=" ".join(message.split()),
             retrieval_query=retrieval_query,
             answer_markdown=answer.answer_markdown,
             sources=sources,
+            citation_anchors=citation_anchors,
             warnings=[
                 *warnings,
                 *_generation_quality_warnings(
@@ -2975,7 +3278,18 @@ def _answer_chatbot(
             answer_effort=answer_effort,
             timings=timings.models(),
             retrieval_traces=retrieval_traces.models(),
+            retrieval_trace_candidates=retrieval_traces.candidates(),
             generation_traces=getattr(answer, "generation_traces", []),
+        )
+        try:
+            corpus_fingerprint_after = retrieval_resources.corpus_fingerprint(settings)
+        except (OSError, RuntimeError, sqlite3.Error):
+            corpus_fingerprint_after = None
+        return result.model_copy(
+            update={
+                "trace_corpus_fingerprint_before": corpus_fingerprint_before,
+                "trace_corpus_fingerprint_after": corpus_fingerprint_after,
+            }
         )
 
     def complete_retrieved_evidence(
@@ -2987,7 +3301,13 @@ def _answer_chatbot(
     ) -> ChatbotResult:
         """Resume the provider-bound stages from one SQLite-authoritative evidence set."""
 
+        # Retrieval is complete and its checkpoint is persisted before this
+        # function is entered. Free local model weights before opening any
+        # provider-bound validation/generation stage so the memory guard does
+        # not reject a later verifier request because of obsolete ML state.
+        retrieval_resources.release_heavy_models()
         evidence = list(retrieved_evidence)
+        semantic_input = list(evidence)
         semantic_prompt_tokens = 0
         semantic_completion_tokens = 0
         semantic_unassessed_count = 0
@@ -3033,8 +3353,37 @@ def _answer_chatbot(
                 decision.relevance == "unassessed" for decision in semantic_filter.decisions
             )
             evidence = semantic_filter.selected_records(evidence)
+            evidence = _prefer_complete_ascocid_wiki_answer(
+                evidence,
+                semantic_filter,
+                planning.plan.verification_needs,
+                answer_effort=answer_effort,
+            )
         else:
             semantic_unassessed_count = len(retrieved_evidence)
+        retained_semantic_ids = {record.record_id for record in evidence}
+        retrieval_traces.add_candidates(
+            [
+                ChatbotTraceCandidate(
+                    item_id=record.record_id,
+                    content_sha256=hashlib.sha256(
+                        "\n".join(passage.text for passage in record.passages).encode("utf-8")
+                    ).hexdigest(),
+                    stage="semantic_filter",
+                    rank=index,
+                    score=min(max(record.score, 0.0), 1.0),
+                    decision=(
+                        "retained" if record.record_id in retained_semantic_ids else "rejected"
+                    ),
+                    reason=(
+                        None
+                        if record.record_id in retained_semantic_ids
+                        else "global_semantic_grade_c_or_d"
+                    ),
+                )
+                for index, record in enumerate(semantic_input)
+            ]
+        )
         semantic_trace_input_count = len(retrieved_evidence)
         retrieval_traces.add(
             "semantic_filter",
@@ -3070,6 +3419,7 @@ def _answer_chatbot(
                 answer_effort=answer_effort,
                 timings=timings.models(),
                 retrieval_traces=retrieval_traces.models(),
+                retrieval_trace_candidates=retrieval_traces.candidates(),
             )
 
         # Every semantically relevant record retained by the RAG reaches generation.
@@ -3093,6 +3443,8 @@ def _answer_chatbot(
                         retrieval_query,
                         figure_references_from_chat_records(evidence),
                         on_analysis_started=publish_figure_analysis,
+                        checkpoint=figure_checkpoint,
+                        on_checkpoint=on_figure_checkpoint,
                     )
             except FigureAnalysisUnavailable as exc:
                 warnings.append(str(exc))
@@ -3146,6 +3498,7 @@ def _answer_chatbot(
         if len(resumed_evidence) == len(retrieval_checkpoint.evidence):
             timings.restore(retrieval_checkpoint.timings)
             retrieval_traces.restore(retrieval_checkpoint.retrieval_traces)
+            retrieval_traces.restore_candidates(retrieval_checkpoint.retrieval_trace_candidates)
             warnings[:] = list(dict.fromkeys([*retrieval_checkpoint.warnings, *warnings]))
             return complete_retrieved_evidence(
                 resumed_evidence,
@@ -3244,7 +3597,7 @@ def _answer_chatbot(
             plan_cache = ValidationCache(settings.paths.cache_dir / "hypothesis_plans")
             plan_key = content_key(
                 {
-                    "version": "hypothesis-v3-wiki",
+                    "version": HYPOTHESIS_PLAN_CACHE_VERSION,
                     "client": client_identity(planning_client),
                     "question": retrieval_query,
                     "history": context,
@@ -3313,10 +3666,51 @@ def _answer_chatbot(
     publish_progress("search")
     retrieval_failed = False
     abstract_diagnostics: list[str] = []
+    ascocid_article_ids = source_database.ascocid_wiki_article_ids()
+    ascocid_article_id_set = set(ascocid_article_ids)
+    ascocid_records: list[ChatEvidenceRecord] = []
+    ascocid_record_limit = min(
+        effort_budget.article_count,
+        max(2, effort_budget.evidence_record_limit // 2),
+    )
+    ascocid_search_options = _ascocid_wiki_search_options(
+        retrieval_query,
+        maximum_variants=maximum_variants,
+        deep=answer_effort is AnswerEffort.DEEP,
+    )
     with (
         _serialized_chat_retrieval_scope(timing=timings),
         retrieval_resources.qdrant_wave(settings) as qdrant_client_owner,
     ):
+        if ascocid_article_ids:
+            try:
+                ascocid_records = _timed_chat_retrieval_operation(
+                    search_common_corpus_full_text_evidence,
+                    settings,
+                    query=retrieval_query,
+                    article_count=ascocid_record_limit,
+                    article_ids=ascocid_article_ids,
+                    axis_queries=None,
+                    candidate_limit=candidate_limit,
+                    prefix_matching=False,
+                    passage_count=effort_budget.passages_per_article,
+                    candidate_chunks_per_article=effort_budget.candidate_chunks_per_article,
+                    context_radius=effort_budget.context_radius,
+                    retrieval_resources=retrieval_resources,
+                    retrieval_trace=retrieval_traces,
+                    qdrant_client_owner=qdrant_client_owner,
+                    supplemental=True,
+                    timing=timings,
+                    timing_stage="ascocid_wiki_search",
+                    **ascocid_search_options,
+                )
+                ascocid_records = _label_ascocid_wiki_records(source_database, ascocid_records)
+            except Exception as exc:
+                warnings.append(
+                    "La recherche dans les documents Ascocid est indisponible "
+                    f"({type(exc).__name__}); le corpus scientifique général reste utilisé."
+                )
+                ascocid_records = []
         try:
             local_results = _timed_chat_retrieval_operation(
                 search_common_corpus_abstracts,
@@ -3395,6 +3789,12 @@ def _answer_chatbot(
                 "La recherche groupée dans les textes intégraux SQLite est indisponible "
                 f"({type(exc).__name__}); repli sur les abstracts persistés."
             )
+        else:
+            full_text_records = [
+                record
+                for record in full_text_records
+                if record.article_id not in ascocid_article_id_set
+            ]
 
     if abstract_warning := _abstract_route_warning(
         message,
@@ -3445,20 +3845,31 @@ def _answer_chatbot(
         limit=effort_budget.abstract_result_limit,
     )
     abstract_evidence = abstract_candidates_to_chat_evidence(local_candidates)
-    evidence = merge_chat_evidence(
+    general_evidence_limit = max(
+        1,
+        effort_budget.evidence_record_limit - len(ascocid_records),
+    )
+    general_evidence = merge_chat_evidence(
         full_text_records,
         abstract_evidence,
         query=retrieval_query,
-        limit=effort_budget.evidence_record_limit,
+        limit=general_evidence_limit,
         intent_override=intent,
     )
+    ascocid_record_ids = {item.record_id for item in ascocid_records}
+    evidence = [
+        *ascocid_records[: effort_budget.evidence_record_limit],
+        *[record for record in general_evidence if record.record_id not in ascocid_record_ids][
+            : max(0, effort_budget.evidence_record_limit - len(ascocid_records))
+        ],
+    ]
     # Defense in depth: generated or unpersisted external snippets cannot reach
     # semantic validation or final synthesis.
     evidence = [
         record for record in evidence if record.origin == "local_rag" and record.scope is not None
     ]
     timings.add("evidence_merge", perf_counter() - merge_started, before=merge_memory)
-    merge_input_count = len(full_text_records) + len(abstract_evidence)
+    merge_input_count = len(ascocid_records) + len(full_text_records) + len(abstract_evidence)
     retrieval_traces.add(
         "evidence_merge",
         pre_rerank_candidate_count=merge_input_count,
@@ -3490,6 +3901,7 @@ def _answer_chatbot(
             answer_effort=answer_effort,
             timings=timings.models(),
             retrieval_traces=retrieval_traces.models(),
+            retrieval_trace_candidates=retrieval_traces.candidates(),
         )
 
     if on_retrieval_checkpoint is not None:
@@ -3503,6 +3915,7 @@ def _answer_chatbot(
                 warnings=warnings,
                 timings=timings.models(),
                 retrieval_traces=retrieval_traces.models(),
+                retrieval_trace_candidates=retrieval_traces.candidates(),
             )
         )
     return complete_retrieved_evidence(
