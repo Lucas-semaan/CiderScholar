@@ -1,5 +1,4 @@
-import { Dialog } from "@/components/ui/Dialog";
-import { ErrorState, LoadingState } from "@/components/ui/Feedback";
+import { CorpusDetailDialog } from "@/features/corpus/CorpusDetailDialog";
 import type { CorpusArticle, CorpusInspection } from "@/types/api";
 
 export function CorpusInspectionDialog({
@@ -18,13 +17,15 @@ export function CorpusInspectionDialog({
   retry: () => void;
 }) {
   return (
-    <Dialog
+    <CorpusDetailDialog
+      article={article}
+      error={error}
+      loading={loading}
+      loadingLabel="Lecture de la provenance…"
       onClose={onClose}
-      open={article !== null}
-      title={article ? `Inspection — ${article.title}` : "Inspection"}
+      retry={retry}
+      title="Inspection"
     >
-      {loading && <LoadingState label="Lecture de la provenance…" />}
-      {error && <ErrorState message={error} retry={retry} />}
       {data && (
         <div className="space-y-5 text-sm text-slate-700">
           <p className="text-xs text-slate-500">
@@ -70,6 +71,6 @@ export function CorpusInspectionDialog({
           </section>
         </div>
       )}
-    </Dialog>
+    </CorpusDetailDialog>
   );
 }

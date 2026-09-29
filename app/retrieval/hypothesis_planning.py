@@ -13,6 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 from app.chat_effort import AnswerEffort, answer_effort_budget
 from app.llm.argo_client import ArgoProtocolError
 from app.llm.contracts import ReservedGenerationClient as HypothesisPlanningClient
+from app.retrieval.generated_json import parse_generated_json
 from app.retrieval.scientific_intent import ScientificIntent, analyze_scientific_intent
 
 ScientificTerm = Annotated[str, Field(min_length=1, max_length=100)]
@@ -169,32 +170,8 @@ class HypothesisPlanningResult(BaseModel):
     used_fallback: bool = False
 
 
-def _clean_generated_value(value: Any) -> Any:
-    if isinstance(value, str):
-        normalized = unicodedata.normalize("NFKC", value)
-        visible = "".join(
-            character
-            for character in normalized
-            if unicodedata.category(character) not in {"Cc", "Cf"}
-        )
-        return " ".join(visible.split())
-    if isinstance(value, list):
-        return [_clean_generated_value(item) for item in value]
-    if isinstance(value, dict):
-        return {key: _clean_generated_value(item) for key, item in value.items()}
-    return value
-
-
 def _parse_plan(content: str) -> HypotheticalResearchPlan:
-    cleaned = content.strip()
-    lines = cleaned.splitlines()
-    if (
-        len(lines) >= 3
-        and lines[0].strip().casefold() in {"```", "```json"}
-        and lines[-1].strip() == "```"
-    ):
-        cleaned = "\n".join(lines[1:-1]).strip()
-    return HypotheticalResearchPlan.model_validate(_clean_generated_value(json.loads(cleaned)))
+    return HypotheticalResearchPlan.model_validate(parse_generated_json(content))
 
 
 def _validate_hypothesis_safety(
@@ -281,6 +258,8 @@ class ArgoHypothesisPlanningService:
         # Compatibility with the retired planner call signature.
         deep: bool | None = None,
     ) -> HypothesisPlanningResult:
+        """Build an untrusted retrieval hypothesis; never pass it to final synthesis as evidence."""
+
         if deep is not None:
             effort = AnswerEffort.DEEP if deep else effort
         cleaned = " ".join(question.split())

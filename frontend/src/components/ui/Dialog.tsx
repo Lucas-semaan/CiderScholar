@@ -22,6 +22,7 @@ export function Dialog({
 
   useEffect(() => {
     if (!open) return;
+    // Preserve the triggering control and keep keyboard focus inside this modal.
     const previousFocus =
       document.activeElement instanceof HTMLElement ? document.activeElement : null;
     const previousOverflow = document.body.style.overflow;

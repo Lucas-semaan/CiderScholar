@@ -30,6 +30,7 @@ const stateLabels: Record<ExpertCandidateSummary["state"], string> = {
   inconclusive: "Inconclusif",
 };
 
+/** Presents hash-bound candidate evaluation before a human review decision. */
 export function ExpertReviewPage() {
   const loadCandidates = useCallback(() => api.expertMemory.candidates(), []);
   const { data, error, loading, refresh } = useRemoteData(loadCandidates);
@@ -44,6 +45,7 @@ export function ExpertReviewPage() {
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   const selected = data?.candidates.find((candidate) => candidate.id === selectedId) ?? null;
+  // A candidate is reviewable only for the exact evaluation hash shown here.
   const canReview =
     selected?.state === "awaiting_review" &&
     selected.evaluation_state === "passed" &&

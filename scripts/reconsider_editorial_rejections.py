@@ -12,13 +12,40 @@ from pathlib import Path
 from app.config import load_settings
 from app.corpora import CorpusScope, settings_for_corpus
 from app.database.sqlite import Database
-from app.services.corpus_migration import (
-    BIBLIOGRAPHIC_COLUMNS,
-    BIBLIOGRAPHIC_SOURCE_COLUMNS,
-)
 from app.updates.doi_exclusions import DoiExclusionRegistry
 from app.updates.editorial_scope import classify_editorial_record
 from scripts.review_historical_titles import backup_editorial_state
+
+BIBLIOGRAPHIC_COLUMNS = (
+    "id",
+    "canonical_key",
+    "doi",
+    "title",
+    "abstract",
+    "authors",
+    "journal",
+    "publication_year",
+    "citation_count",
+    "url",
+    "content_hash",
+    "embedding_status",
+    "created_at",
+    "updated_at",
+    "relevance_status",
+    "relevance_score",
+    "relevance_reason",
+    "relevance_theme",
+    "manual_decision",
+    "manual_reviewed_at",
+)
+BIBLIOGRAPHIC_SOURCE_COLUMNS = (
+    "record_id",
+    "source",
+    "source_id",
+    "first_seen_at",
+    "last_seen_at",
+    "source_title",
+)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -29,6 +56,8 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def main() -> int:
+    """Apply explicit review decisions from a report while preserving the source audit."""
+
     arguments = _parser().parse_args()
     source_report = arguments.source_report.resolve()
     payload = json.loads(source_report.read_text(encoding="utf-8"))

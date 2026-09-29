@@ -221,6 +221,8 @@ def _import_official_pdfs(
     limit: int | None,
     run_ocr: bool,
 ) -> tuple[dict[str, object], list[str]]:
+    """Ingest only selected official PDFs and retain their catalog provenance."""
+
     target_dir = settings.paths.pdf_dir / "ifpc" / "cahiers-techniques"
     target_dir.mkdir(parents=True, exist_ok=True)
     pipeline = IngestionPipeline(settings, database)

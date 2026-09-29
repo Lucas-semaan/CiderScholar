@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import unicodedata
 from collections.abc import Callable, Mapping, Sequence
 from typing import Annotated, Any, Literal
 
@@ -11,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 
 from app.llm.argo_client import ArgoProtocolError
 from app.llm.contracts import ReservedGenerationClient as QueryPlanningClient
+from app.retrieval.generated_json import parse_generated_json
 from app.retrieval.scientific_intent import (
     ScientificFacet,
     ScientificIntent,
@@ -58,34 +58,10 @@ def _planning_protocol_diagnostic(
     )
 
 
-def _sanitize_generated_payload(value: Any) -> Any:
-    if isinstance(value, str):
-        normalized = unicodedata.normalize("NFKC", value)
-        visible = "".join(
-            character
-            for character in normalized
-            if unicodedata.category(character) not in {"Cc", "Cf"}
-        )
-        return " ".join(visible.split())
-    if isinstance(value, list):
-        return [_sanitize_generated_payload(item) for item in value]
-    if isinstance(value, dict):
-        return {key: _sanitize_generated_payload(item) for key, item in value.items()}
-    return value
-
-
 def _parse_generated_plan(content: str) -> ResearchQueryPlan:
     """Validate one ARGO plan, accepting only an optional whole-document JSON fence."""
 
-    cleaned = content.strip()
-    lines = cleaned.splitlines()
-    if (
-        len(lines) >= 3
-        and lines[0].strip().casefold() in {"```", "```json"}
-        and lines[-1].strip() == "```"
-    ):
-        cleaned = "\n".join(lines[1:-1]).strip()
-    return ResearchQueryPlan.model_validate(_sanitize_generated_payload(json.loads(cleaned)))
+    return ResearchQueryPlan.model_validate(parse_generated_json(content))
 
 
 class ResearchAxis(BaseModel):
@@ -303,6 +279,8 @@ class ArgoQueryPlanningService:
         conversation_history: Sequence[Mapping[str, str]] | None = None,
         on_argo_reserved: Callable[[], None] | None = None,
     ) -> QueryPlanningResult:
+        """Validate a generated research plan and preserve a deterministic local fallback."""
+
         cleaned = " ".join(question.split())
         if not 2 <= len(cleaned) <= 4000:
             raise ValueError("research question must contain between 2 and 4000 characters")

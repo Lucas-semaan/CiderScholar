@@ -193,6 +193,8 @@ def _restore_evidence(
 
 
 def _apply_staging(settings: Settings, staging_path: Path) -> dict[str, int]:
+    """Swap staged chunks into SQLite only after their index and source checks pass."""
+
     with closing(sqlite3.connect(settings.paths.database_path, timeout=60)) as connection:
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys=ON")

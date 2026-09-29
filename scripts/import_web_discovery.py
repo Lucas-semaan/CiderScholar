@@ -120,6 +120,8 @@ def _validate_candidate(
     crossref: CrossrefClient,
     settings: Any,
 ) -> dict[str, Any]:
+    """Require bibliographic identity before a web discovery candidate can enter the corpus."""
+
     base = {
         key: candidate.get(key)
         for key in (

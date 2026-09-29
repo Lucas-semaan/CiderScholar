@@ -204,6 +204,8 @@ class ArticleRankingService:
         chunks: Sequence[HybridChunkResult],
         concepts: Sequence[str],
     ) -> list[_Candidate]:
+        """Group chunk hits by article before applying article-level evidence ranking."""
+
         grouped: dict[str, list[HybridChunkResult]] = defaultdict(list)
         for chunk in chunks:
             grouped[chunk.article_id].append(chunk)
@@ -477,6 +479,8 @@ class ArticleRankingService:
         candidate_limit: int | None = None,
         prefix_matching: bool | None = None,
     ) -> ArticleRankingResponse:
+        """Rank articles from bounded chunk candidates while retaining their evidence locators."""
+
         if self.hybrid is None:
             raise RuntimeError("hybrid search service is required for search")
         started = perf_counter()

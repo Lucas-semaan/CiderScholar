@@ -1,4 +1,11 @@
-"""Framework-agnostic application workflows shared by API and scripts."""
+"""Framework-agnostic application workflows shared by API and scripts.
+
+The public functions are grouped by ingestion/indexing, corpus search, chat,
+synthesis, and article maintenance. ``answer_chatbot`` is the chat entry point;
+``_answer_chatbot`` owns its bounded retrieval and generation lifecycle. The
+HTTP routes and durable job handlers call these functions rather than opening
+models or indexes at API startup.
+"""
 
 from __future__ import annotations
 
@@ -3057,6 +3064,8 @@ def _answer_chatbot(
         figure_analysis_duration: float = 0.0,
         figure_analysis_model: str | None = None,
     ) -> ChatbotResult:
+        """Generate from the selected SQLite evidence and attach its validated trace."""
+
         evidence, redundant_count = distinct_evidence(evidence, message)
         retrieval_traces.add(
             "llm_context",

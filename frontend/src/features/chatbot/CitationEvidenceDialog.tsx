@@ -5,6 +5,7 @@ import { Badge } from "@/components/ui/Badge";
 import type { ChatbotCitationAnchor, ChatbotCitationEvidence } from "@/types/chat";
 
 function evidenceLocation(evidence: ChatbotCitationEvidence): string | null {
+  // Persisted page numbers take precedence over XML paragraph locators.
   if (evidence.page_start !== null && evidence.page_end !== null) {
     return evidence.page_start === evidence.page_end
       ? `Page ${evidence.page_start}`

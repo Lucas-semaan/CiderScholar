@@ -49,6 +49,8 @@ class BibliographicWatchHandler:
         self.store.save(checkpoint)
 
     def handle(self, job: JobRecord, context: JobProgressContext) -> JobHandlerResult:
+        """Run the administrator watch only when online, then persist its resumable outcome."""
+
         if load_local_profile() is not LocalProfile.ADMIN:
             raise PermissionError("administrator watch required")
         if self.settings.app.offline_mode:

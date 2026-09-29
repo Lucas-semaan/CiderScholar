@@ -1,5 +1,4 @@
-import { Dialog } from "@/components/ui/Dialog";
-import { ErrorState, LoadingState } from "@/components/ui/Feedback";
+import { CorpusDetailDialog } from "@/features/corpus/CorpusDetailDialog";
 import type { CorpusArticle, TableEvidenceView } from "@/types/api";
 
 export function TableEvidenceDialog({
@@ -18,13 +17,15 @@ export function TableEvidenceDialog({
   retry: () => void;
 }) {
   return (
-    <Dialog
+    <CorpusDetailDialog
+      article={article}
+      error={error}
+      loading={loading}
+      loadingLabel="Lecture des cellules source…"
       onClose={onClose}
-      open={article !== null}
-      title={article ? `Tableaux source — ${article.title}` : "Tableaux source"}
+      retry={retry}
+      title="Tableaux source"
     >
-      {loading && <LoadingState label="Lecture des cellules source…" />}
-      {error && <ErrorState message={error} retry={retry} />}
       {data && (
         <div className="space-y-5 text-sm text-slate-700">
           <p className="text-xs text-slate-500">
@@ -67,7 +68,7 @@ export function TableEvidenceDialog({
           )}
         </div>
       )}
-    </Dialog>
+    </CorpusDetailDialog>
   );
 }
 

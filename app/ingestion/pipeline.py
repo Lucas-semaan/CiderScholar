@@ -225,6 +225,8 @@ class IngestionPipeline:
         catalog_metadata: PdfCatalogMetadata | None = None,
         precomputed_sha256: str | None = None,
     ) -> IngestionReport:
+        """Record each extraction stage so a verified PDF can resume after a partial failure."""
+
         started = datetime.now(UTC)
         path = Path(pdf_path).resolve()
         sha256: str | None = None
@@ -248,6 +250,7 @@ class IngestionPipeline:
 
             self.memory.check("PDF ingestion")
             sha256 = precomputed_sha256 or sha256_file(path)
+            # The file hash guards duplicate extraction before any parser or model loads.
             existing = self.database.article_by_sha256(sha256)
             if existing is not None and self.database.chunk_count(existing["id"]) > 0:
                 self.database.upsert_ingestion_job(
@@ -307,6 +310,7 @@ class IngestionPipeline:
             self.database.upsert_ingestion_job(pdf_path=str(path), sha256=sha256, state="extracted")
 
             if document.requires_ocr:
+                # An unresolved OCR result is review material, never an indexed proof.
                 if extraction_run_id is not None and extraction_run_started:
                     self.database.mark_extraction_run_review_required(
                         run_id=extraction_run_id,

@@ -6,6 +6,10 @@
 /data.pre-canonical-merge-*/
 
 .venv/
+# Process credentials stay on this machine, outside the Git index.
+.env
+.env.local
+.env.*.local
 __pycache__/
 *.py[cod]
 .pytest_cache/

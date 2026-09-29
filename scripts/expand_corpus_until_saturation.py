@@ -78,6 +78,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Cycle through bounded themes using saved checkpoints and the campaign time budget."""
+
     arguments = build_parser().parse_args(argv)
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
@@ -209,6 +211,8 @@ def _run_source(
     checkpoint_path: Path,
     weekly_closures: WeeklyHarvestClosureRegistry,
 ) -> str:
+    """Resume each query set from its checkpoint and stop at the campaign bounds."""
+
     profiles = checkpoint["profiles"]
     has_active_profile = False
     for query_set in query_sets:

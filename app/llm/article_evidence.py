@@ -339,6 +339,8 @@ class EvidencePassageSelector:
         max_candidate_chunks: int | None = None,
         neighborhood_radius: int = 1,
     ) -> list[SelectedPassage]:
+        """Bound and rank passages before any article text reaches evidence extraction."""
+
         cleaned_query = query.strip()
         if not cleaned_query:
             raise ValueError("evidence passage query cannot be empty")
@@ -634,6 +636,8 @@ class ArticleEvidenceExtractor:
         query_id: str | None = None,
         resume: bool = True,
     ) -> EvidenceExtractionResult:
+        """Extract article claims only from the selected passages and their persisted locators."""
+
         started = perf_counter()
         if not passages:
             raise ValueError("at least one selected passage is required")

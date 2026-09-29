@@ -20,22 +20,6 @@ fichier PDF existant. Les chemins historiques explicitement persistés restent
 lisibles pendant une migration additive ; tout autre cas retourne une erreur
 404 sans révéler le chemin local.
 
-## Migration des installations existantes
-
-Exécuter une fois :
-
-```powershell
-python -m scripts.merge_legacy_split_corpus
-python -m scripts.transfer_legacy_vectors
-```
-
-La première commande consolide les articles, fragments, éléments documentaires,
-traces OCR et PDF gérés des anciens emplacements dans `data/common`. Elle crée
-une sauvegarde SQLite préalable sous `data/backups` et ne supprime pas les
-sources historiques. La seconde commande remappe directement les vecteurs
-existants vers les nouveaux identifiants de fragments, sans recalculer les
-embeddings déjà indexés.
-
 ## Sauvegarde
 
 `python -m scripts.backup_corpus` crée une archive vérifiée du corpus commun.

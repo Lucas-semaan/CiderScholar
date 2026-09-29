@@ -101,9 +101,13 @@ resserrer les requêtes si la précision se dégrade.
   sont consolidés ; une base applicative ou un ancien chemin de migration ne reçoit jamais une
   collection bibliographique scientifique parallèle.
 - Les nouveaux PDF, caches d'extraction et index du corpus sont écrits sous `data/common/`
-  (`pdf`, `extracted`, `qdrant` et `database`). Les anciens chemins restent lisibles uniquement
-  pendant une migration explicite, sauvegardée et additive : elle copie les fichiers vérifiés,
-  conserve les originaux et ne remplace jamais un fichier existant.
+  (`pdf`, `extracted`, `qdrant` et `database`). Les anciens chemins ne sont pas des destinations
+  d'écriture. Une éventuelle nouvelle migration exige une procédure explicite, sauvegardée et
+  additive : elle copie les fichiers vérifiés, conserve les originaux et ne remplace jamais un fichier
+  existant.
+- Décision utilisateur du 25 septembre 2026 : les commandes ponctuelles de migration des anciennes
+  installations et leurs services dédiés sont retirés. Les migrations versionnées du schéma SQLite
+  restent nécessaires au fonctionnement courant.
 - Normaliser et vérifier le DOI avant insertion. Comparer le DOI à l’ensemble du corpus actif, pas à
   une seule table ou un seul ancien chemin.
 - À DOI normalisé identique, conserver une seule entrée documentaire et privilégier le texte intégral.

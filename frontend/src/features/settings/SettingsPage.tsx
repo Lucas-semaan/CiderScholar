@@ -20,6 +20,7 @@ import type { LlmProviderId } from "@/types/api";
 const errorMessage = (caught: unknown, fallback: string) =>
   caught instanceof Error ? caught.message : fallback;
 
+/** Coordinates session settings and provider actions through the API. */
 export function SettingsPage() {
   const loadSettings = useCallback(() => api.system.settings(), []);
   const loadProviders = useCallback(() => api.llmProviders.list(), []);

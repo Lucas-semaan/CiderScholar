@@ -48,13 +48,18 @@ Services applicatifs (`app/services`)
 Ingestion · recherche · LLM · collecte
         ▼
 SQLite (autorité) · Qdrant local · fichiers locaux
+```
 
 L'acquisition DOI-first des textes intégraux (Europe PMC, ISTEX et replis OA), son ordre de priorité,
 la variable d'environnement ISTEX et la commande administrateur sont décrits dans le
 [guide d'acquisition full text](docs/FULL_TEXT_ACQUISITION.md).
-```
 
-Le détail de l’arborescence est dans [`docs/PROJECT_TREE.md`](docs/PROJECT_TREE.md) et les conventions de contribution dans [`AGENTS.md`](AGENTS.md).
+Pour reprendre le code, suivre la [carte du dépôt](docs/PROJECT_TREE.md) : elle indique les points
+d'entrée de l'interface, de l'API et du worker, ainsi que le rôle de chaque package. Les règles de
+contribution sont dans [`AGENTS.md`](AGENTS.md) et la méthode scientifique applicable au corpus et au
+RAG dans [`docs/HOW_TO_WORK_ON_CIDERSCHOLAR.md`](docs/HOW_TO_WORK_ON_CIDERSCHOLAR.md). Les documents
+d'architecture datés et la roadmap décrivent leur état ou leur cible à la date indiquée ; vérifier
+le chemin effectivement appelé avant de modifier le comportement.
 
 ## Prérequis de développement
 
@@ -103,7 +108,8 @@ Vite ouvre l’interface sur `http://127.0.0.1:5173` et relaie `/api` et `/healt
 
 Sur la VM Linux, la clé ARGO est injectée au processus par le gestionnaire de secrets de l'unité
 systemd dans `LOCAL_SCIENCE_RAG_ARGO_API_KEY`. Elle n'est ni écrite dans YAML, ni passée sur la ligne
-de commande, ni journalisée. Le coffre DPAPI et les commandes PowerShell ci-dessous sont conservés
+de commande, ni journalisée. Le fichier `.env` local est ignoré par Git et ne doit pas être ajouté au
+dépôt. Le coffre DPAPI et les commandes PowerShell ci-dessous sont conservés
 uniquement pour le développement Windows historique.
 
 Dans l’état actuel du dépôt, les secrets ne sont jamais écrits dans YAML. Ils sont lus depuis les
@@ -139,15 +145,16 @@ La page d’accueil est l’interface conversationnelle principale. Pour chaque 
 1. charge le cœur du wiki et jusqu'à deux pages thématiques pour cadrer les distinctions et les
    compromis, puis recherche les documents Ascocid persistés ; en mode concis, une couverture
    Ascocid complète ferme la réponse sur ces documents, cités `Ascocid — <nom du fichier>` ;
-2. complète la requête de recherche avec les deux dernières questions utilisateur lorsque la
-   conversation contient une relance ;
-3. recherche dans les chunks des articles complets avec FTS5, agrège les résultats par article et
-   sélectionne des passages pertinents avec leurs pages ;
-4. complète ces preuves par les abstracts qualifiés uniquement lorsque le texte intégral manque ;
-5. transmet à ARGO un ensemble borné de passages full-text et d’abstracts de repli, avec un historique
+2. reformule la relance à partir de l'historique borné et produit une hypothèse de recherche interne,
+   qui n'est jamais présentée comme une preuve ;
+3. lance une vague groupée de recherche lexicale FTS5 et dense Qdrant, fusionne et classe les
+   candidats, puis recharge les passages et abstracts depuis SQLite ;
+4. sélectionne un contexte intra-article borné et fait qualifier les candidats A à D par ARGO. Une
+   lacune de couverture ne déclenche pas une seconde recherche automatique ;
+5. transmet à la synthèse uniquement les preuves persistées et retenues, avec un historique
    conversationnel limité ;
-6. rejette toute réponse qui cite une preuve absente, invente une valeur numérique ou transforme un
-   résultat expérimental en recommandation non étayée ;
+6. rejette ou corrige toute affirmation qui cite une preuve absente, invente une valeur numérique ou
+   transforme un résultat expérimental en recommandation non étayée ;
 7. affiche le niveau de preuve, les pages, DOI, fournisseurs et limites avec la réponse.
 
 La réponse est rédigée en prose par défaut. Pour obtenir des puces, demandez explicitement une

@@ -106,6 +106,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Apply the campaign bounds and resume from the saved Aureli checkpoint."""
+
     args = build_parser().parse_args(argv)
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
@@ -601,6 +603,8 @@ def _export_run_audit(
     *,
     screened_out_path: Path,
 ) -> tuple[Path, dict[str, int]]:
+    """Write admission decisions through a temporary file before publishing the audit."""
+
     destination = run_dir / "records-audit.jsonl"
     temporary = destination.with_suffix(".jsonl.tmp")
     decisions = {

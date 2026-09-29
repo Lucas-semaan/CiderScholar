@@ -27,6 +27,7 @@ import { ExpertCorrectionDialog } from "./ExpertCorrectionDialog";
 import { formatResponseTime, type ChatMessage as ChatMessageValue } from "./chatSession";
 import { sourceEvidenceLabel, sourceOriginLabel } from "./sourcePresentation";
 
+// Older persisted traces can contain stages retired from the current chat path.
 const timingLabels: Record<string, string> = {
   argo_planning: "Planification ARGO",
   retrieval_lock_wait: "Attente de la recherche locale",
@@ -72,6 +73,7 @@ const diagnosticLabels: Record<string, string> = {
   unknown: "Cause précise indéterminée",
 };
 
+/** Renders citations from server-provided anchors, never from parsed answer text alone. */
 export function ChatMessage({
   message,
   onFeedback,
@@ -143,7 +145,7 @@ export function ChatMessage({
                       }}
                       type="button"
                     >
-                      {children}
+                      {citation.display_index}
                     </button>
                   );
                 },

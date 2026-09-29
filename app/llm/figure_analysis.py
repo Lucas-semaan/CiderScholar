@@ -544,6 +544,8 @@ class OllamaFigureAnalysisService:
         *,
         checkpoint: FigureAnalysisCheckpoint | None = None,
     ) -> tuple[FigureEvidence | None, FigureAnalysisCheckpointItem]:
+        """Cache bounded visual analysis as a candidate, separate from validated text evidence."""
+
         crop = self._render(candidate)
         image_sha256 = hashlib.sha256(crop.image).hexdigest()
         cleaned_question = " ".join(question.split())

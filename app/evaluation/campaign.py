@@ -243,6 +243,8 @@ class EvaluationCampaignRunner:
         self.report_path = self.output_dir / "report.md"
 
     def run(self, spec: EvaluationCampaignSpec) -> EvaluationCampaignResult:
+        """Resume campaign cells and record comparable outputs without rerunning completed work."""
+
         self.repository.initialize()
         self.output_dir.mkdir(parents=True, exist_ok=True)
         state = self._load_or_create_state(spec)

@@ -10,6 +10,16 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
+def _request_hash(request: BaseModel) -> str:
+    canonical = json.dumps(
+        request.model_dump(mode="json"),
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 class VisualContextCell(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -106,13 +116,7 @@ class ImageCaptionRequest(BaseModel):
 
     @property
     def idempotency_key(self) -> str:
-        canonical = json.dumps(
-            self.model_dump(mode="json"),
-            ensure_ascii=True,
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+        return _request_hash(self)
 
 
 class ImageCaptionResponse(BaseModel):
@@ -155,13 +159,7 @@ class ScientificFigureAnalysisRequest(BaseModel):
 
     @property
     def idempotency_key(self) -> str:
-        canonical = json.dumps(
-            self.model_dump(mode="json"),
-            ensure_ascii=True,
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+        return _request_hash(self)
 
 
 class ScientificFigureAnalysisResponse(BaseModel):

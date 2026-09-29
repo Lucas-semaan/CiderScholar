@@ -11,7 +11,7 @@ describe("ChatMessage", () => {
       id: "assistant-citation",
       role: "assistant",
       content:
-        "La gamme optimale se situe entre 6 et 10 °C. [(Ascocid — Fermentation.docx, p. 4)](#citation-cite-0123456789abcdef)",
+        "La gamme optimale se situe entre 6 et 10 °C. [(Ascocid — Fermentation.docx, p. 4)](#citation-cite-0123456789abcdef) Cette plage est retenue pour le suivi. [(Ascocid — Fermentation.docx, p. 4)](#citation-cite-0123456789abcdef)",
       response: {
         message: "Question",
         retrieval_query: "température fermentation",
@@ -61,6 +61,7 @@ describe("ChatMessage", () => {
 
     expect(markup).toContain('aria-haspopup="dialog"');
     expect(markup).toContain("Voir la preuve (Ascocid — Fermentation.docx, p. 4)");
+    expect(markup).toMatch(/<button[^>]*>1<\/button>.*<button[^>]*>1<\/button>/);
     expect(markup).toContain('aria-label="Copier la réponse"');
     expect(markup).not.toContain('href="#citation-cite-0123456789abcdef"');
   });

@@ -156,6 +156,8 @@ def _case_metrics(
     question: CiderQAQuestion,
     result: CiderQAInferenceResult,
 ) -> CiderQACaseMetrics:
+    """Score answerability and evidence quality for one matched CiderQA question."""
+
     if question.id != result.question_id:
         raise ValueError("CiderQA inference result does not match its question")
     abstention_correct = result.answered == question.answerable

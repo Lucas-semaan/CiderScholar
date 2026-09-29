@@ -31,6 +31,7 @@ import {
   workerStatePresentation,
 } from "./diagnosticPresentation";
 
+/** Reads readiness and worker state without starting a scientific workflow. */
 export function DiagnosticPage() {
   const loadReadiness = useCallback(() => api.diagnostics.readiness(), []);
   const { data, error, loading, refresh } = useRemoteData(loadReadiness);

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
@@ -17,6 +16,7 @@ from app.evaluation.ciderqa_report import (
     SignedCiderQAReport,
     canonical_json,
     verify_ciderqa_report,
+    write_json_artifact,
 )
 
 AblationVariant = Literal[
@@ -332,12 +332,4 @@ def verify_ablation_report(report: SignedCiderQAAblationReport) -> bool:
 
 
 def write_signed_model(model: BaseModel, destination: str | Path) -> Path:
-    target = Path(destination)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    temporary = target.with_suffix(target.suffix + ".tmp")
-    temporary.write_text(
-        json.dumps(model.model_dump(mode="json"), ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
-    temporary.replace(target)
-    return target
+    return write_json_artifact(model, destination)

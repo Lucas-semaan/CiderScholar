@@ -36,6 +36,7 @@ function download(name: string, content: string, type: string) {
   window.setTimeout(() => URL.revokeObjectURL(url), 0);
 }
 
+/** Starts an explicit resumable synthesis job and rereads its persisted result. */
 export function SynthesisPage() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);

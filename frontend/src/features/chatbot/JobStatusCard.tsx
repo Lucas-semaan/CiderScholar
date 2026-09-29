@@ -48,6 +48,7 @@ export function JobStatusCard({ job, onCancel, onRetry }: JobStatusCardProps) {
   };
 
   const durationEnd = terminal ? Date.parse(job.updated_at) : nowMilliseconds;
+  // A queued validation timeout is a resumable technical state, not an admitted answer.
   const semanticValidationRetry =
     job.state === "queued" &&
     job.error?.code === "timeout" &&

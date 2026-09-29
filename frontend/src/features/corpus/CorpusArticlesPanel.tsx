@@ -42,6 +42,7 @@ export function CorpusArticlesPanel({
   }, [articles, page]);
 
   useEffect(() => {
+    // Deletion or a new filter can shorten the list while a later page is open.
     setPage((current) => Math.min(current, pageCount));
   }, [pageCount]);
 

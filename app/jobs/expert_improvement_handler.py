@@ -29,6 +29,8 @@ class ExpertImprovementHandler:
     clock: Callable[[], float] = monotonic
 
     def handle(self, job: JobRecord, context: JobProgressContext) -> JobHandlerResult:
+        """Advance a candidate through the durable expert-review workflow for its job type."""
+
         if job.type is not JobType.EXPERT_IMPROVEMENT or not isinstance(
             job.payload, ExpertImprovementPayload
         ):

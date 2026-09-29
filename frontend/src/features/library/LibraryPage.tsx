@@ -93,6 +93,7 @@ export function LibraryPage() {
 function BibliographicLibrary({ mode }: { mode: "documents" | "acquisition" }) {
   const startingFilters =
     mode === "acquisition" ? acquisitionLibraryFilters : initialLibraryFilters;
+  // Editing filters does not issue a request until the user applies them.
   const [draft, setDraft] = useState<LibraryRecordFilters>({ ...startingFilters });
   const [applied, setApplied] = useState<LibraryRecordFilters>({ ...startingFilters });
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -104,6 +105,7 @@ function BibliographicLibrary({ mode }: { mode: "documents" | "acquisition" }) {
     () => records.data?.records.find((record) => record.library_id === selectedId) ?? null,
     [records.data, selectedId],
   );
+  // Keep the review queue usable when a selected record leaves the current page.
   const selected =
     explicitlySelected ??
     records.data?.records.find((record) => record.relevance_status === "review") ??

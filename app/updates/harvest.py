@@ -799,6 +799,8 @@ class BibliographicHarvestStore:
         record: BibliographicRecord,
         _connection: Any | None = None,
     ) -> str | None:
+        """Deduplicate by DOI or title fallback and retain auditable source observations."""
+
         if self.doi_exclusions.is_excluded(record.doi):
             self._persist_archived_source_observation(record, connection=_connection)
             return None
@@ -1243,6 +1245,8 @@ class BibliographicHarvestStore:
         survivor_id: str,
         duplicate: dict[str, Any],
     ) -> None:
+        """Merge a duplicate without losing provenance or review state."""
+
         survivor = connection.execute(
             "SELECT * FROM bibliographic_records WHERE id = ?",
             (survivor_id,),
@@ -2525,6 +2529,8 @@ class CiderPilotHarvester:
         self.start_page = start_page
 
     def run(self, *, force: bool = False) -> BibliographicHarvestReport:
+        """Respect the weekly gate and persist one bounded, resumable cider harvest."""
+
         if not self.settings.harvest.enabled:
             raise RuntimeError("bibliographic harvesting is disabled")
         if not force and not self.store.is_due(self.settings):
@@ -2687,6 +2693,8 @@ class CiderAbstractBackfiller:
         self.store = BibliographicHarvestStore(database)
 
     def run(self, *, limit: int = 100) -> AbstractBackfillReport:
+        """Fill missing abstracts for accepted DOI records without changing their identity."""
+
         profile = f"{self.settings.harvest.profile}_abstract_backfill"
         candidates = self.store.missing_abstract_candidates(
             profile=profile,
@@ -2810,6 +2818,8 @@ class CiderBulkHarvester:
         start_page: int = 0,
         progress: Callable[[str], None] | None = None,
     ) -> BulkHarvestReport:
+        """Harvest bounded pages while preserving checkpoints and accepted counts."""
+
         if not 1 <= target_new_accepted_abstracts <= 10000:
             raise ValueError("bulk target must be between 1 and 10000")
         if not 1 <= page_size <= 50:

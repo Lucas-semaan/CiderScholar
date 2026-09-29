@@ -103,6 +103,8 @@ def _sources(value: object) -> list[str]:
 
 
 def _load_rows(database: Database) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Join local articles and bibliographic notices into one library view."""
+
     with closing(database.connect()) as connection:
         notice_rows = [
             dict(row)

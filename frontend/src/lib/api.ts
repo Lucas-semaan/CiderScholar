@@ -79,7 +79,6 @@ function post<T>(path: string, body: unknown): Promise<T> {
 async function download(path: string, body: unknown): Promise<Blob> {
   return fetchChecked(path, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   }).then((response) => response.blob());
 }
@@ -409,7 +408,6 @@ export const api = {
       request<RuntimeSettings>("/api/system/settings", {
         method: "PUT",
         body: JSON.stringify(payload),
-        headers: { "Content-Type": "application/json" },
       }),
     llmHealth: () => request<Record<string, unknown>>("/health/llm"),
     shutdown: () =>

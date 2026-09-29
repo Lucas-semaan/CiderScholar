@@ -176,6 +176,8 @@ class PublisherCollectionService:
         page: Any,
         context: Any,
     ) -> None:
+        """Enforce the authorized host policy before recording a publisher acquisition."""
+
         source_url = _record_url(record)
         parsed_source = urlsplit(source_url)
         if parsed_source.hostname != "doi.org":

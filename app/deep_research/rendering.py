@@ -102,6 +102,8 @@ class SQLiteDeepResearchRenderer:
         claims: AtomicClaimCheckpoint,
         admission: ClaimAdmissionCheckpoint,
     ) -> DeepResearchRenderedAnswer:
+        """Render only admitted claims and reuse an existing immutable output on resume."""
+
         path = self._path(payload)
         if path.is_file():
             return self.load(payload)

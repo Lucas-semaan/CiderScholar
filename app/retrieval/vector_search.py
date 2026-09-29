@@ -585,6 +585,8 @@ class VectorSearchService:
         article_ids: Sequence[str] | None = None,
         sections: Sequence[str] | None = None,
     ) -> list[VectorSearchResult]:
+        """Validate model and index identity before resolving dense hits back to SQLite chunks."""
+
         model_name = str(getattr(self.backend, "model_name", "unknown"))
         if model_name != self.index.model_name:
             raise VectorIndexConfigurationError(

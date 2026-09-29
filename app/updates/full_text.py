@@ -374,6 +374,8 @@ class FullTextStore:
         self,
         values: Sequence[tuple[Mapping[str, Any], FullTextObservation]],
     ) -> None:
+        """Persist availability and native-source observations as one resumable batch."""
+
         if not values:
             return
         rows: list[tuple[Any, ...]] = []
@@ -711,6 +713,8 @@ class OfficialFullTextClient:
         json_body: Mapping[str, Any] | None = None,
         not_found_is_empty: bool = False,
     ) -> dict[str, Any] | list[Any]:
+        """Honor provider cooldowns and bounded retries for one official JSON request."""
+
         source = self._source_for_url(url)
         if self.store is not None:
             cooldown = self.store.active_cooldown(source)
@@ -833,6 +837,8 @@ class FullTextAuditService(OfficialFullTextClient):
             Callable[[Sequence[tuple[Mapping[str, Any], FullTextObservation]]], None] | None
         ) = None,
     ) -> FullTextAuditReport:
+        """Check official sources; callbacks may persist availability for acquisition."""
+
         by_doi = {str(record["doi"]): record for record in records}
         dois = list(by_doi)
         observations: dict[str, dict[str, FullTextObservation]] = {
@@ -1616,6 +1622,8 @@ class FullTextHarvestService:
         record_ids: Sequence[str] | None = None,
         progress: ProgressCallback | None = None,
     ) -> tuple[FullTextAuditReport, FullTextHarvestReport]:
+        """Audit DOI records, then acquire permitted text under download limits."""
+
         records = self.store.doi_records()
         if record_ids is not None:
             selected_ids = set(dict.fromkeys(record_ids))

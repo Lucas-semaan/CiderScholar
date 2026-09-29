@@ -183,6 +183,8 @@ _CORRECTION_ACTIONS: dict[ScientificValidationReason, str] = {
     ),
     ScientificValidationReason.INVALID_PROSE_STRUCTURE: (
         "Transforme les fragments, titres isolés, puces interdites ou emoji en prose scientifique. "
+        "Commence directement par le sujet documenté, jamais par une reprise sans antécédent "
+        "comme « Parmi elles » ou « Parmi les variétés ». "
         "Toute espèce, souche ou comparaison commencée doit être entièrement nommée : ne termine "
         "jamais une phrase par une initiale isolée. Ne répète pas une même affirmation pour les "
         "mêmes preuves ; développe plutôt une condition, une limite ou un résultat distinct."
@@ -483,6 +485,8 @@ class CiderAbstractRagService:
         on_argo_reserved: Callable[[], None] | None = None,
         on_argo_response: Callable[[], None] | None = None,
     ) -> CiderAbstractRagResult:
+        """Generate only from selected abstract records and validate every cited record ID."""
+
         cleaned_question = " ".join(question.split())
         if not cleaned_question:
             raise ValueError("pilot RAG question cannot be empty")
@@ -550,7 +554,9 @@ class CiderAbstractRagService:
                     "question, que la preuve repose sur des abstracts et formule les limites "
                     "explicitement. "
                     "Chaque statement doit être du langage naturel, jamais un titre ou une "
-                    "introduction finissant par deux-points. Toute valeur numérique doit "
+                    "introduction finissant par deux-points. Ne reprends jamais un fragment tel "
+                    "quel : reformule-le et intègre-le à une phrase autonome dont le sujet, le "
+                    "contexte et le sens sont explicites. Toute valeur numérique doit "
                     "figurer dans l'abstract cité. Ne transforme jamais une observation "
                     "expérimentale en norme, seuil réglementaire ou recommandation si "
                     "l'abstract ne le dit pas explicitement. Ne recopie aucun record_id "
@@ -1117,6 +1123,8 @@ class CiderEvidenceRagService:
         on_argo_reserved: Callable[[], None] | None = None,
         on_argo_response: Callable[[], None] | None = None,
     ) -> CiderEvidenceRagResult:
+        """Bound persisted passages and validate an answer before citation."""
+
         cleaned_question = " ".join(question.split())
         if not cleaned_question:
             raise ValueError("evidence RAG question cannot be empty")
@@ -1207,8 +1215,10 @@ class CiderEvidenceRagService:
                     "expérimentale ne constitue jamais à elle seule une donnée d'occurrence. "
                     "Chaque statement doit exprimer une idée scientifique cohérente et citer un "
                     "ou plusieurs passages dans evidence_ids ; chaque passage cité doit soutenir "
-                    "l'idée entière. Croise les fragments convergents ou complémentaires au lieu "
-                    "de produire un résumé fragment par fragment. Utilise section=synthetic_answer "
+                    "l'idée entière. Ne reprends jamais un fragment tel quel : reformule-le et "
+                    "intègre-le à une phrase autonome dont le sujet, le contexte et le sens sont "
+                    "explicites. Croise les fragments convergents ou complémentaires au lieu de "
+                    "produire un résumé fragment par fragment. Utilise section=synthetic_answer "
                     "pour une à "
                     "six phrases directement étayées répondant à la question et fixe alors "
                     "mechanism à "
@@ -2297,6 +2307,8 @@ class CiderEvidenceRagService:
         documented_facet_keys: frozenset[str] = frozenset(),
         request_budget: _GenerationRequestBudget | None = None,
     ) -> tuple[CiderEvidenceAnswer, GenerationResponse, ScientificGenerationTrace]:
+        """Allow only supplied evidence IDs across bounded correction passes."""
+
         allowed_ids = [item["evidence_id"] for item in evidence]
         output_language = question_language(output_language_question)
         output_language_label = output_language_name(output_language)
@@ -3022,6 +3034,10 @@ FORBIDDEN_INTRODUCTION_PATTERN = re.compile(
     r"la question (?:portait|porte|est interpretee)|vous (?:demandez|souhaitez savoir)|"
     r"cette synthese examine|the question (?:was|is)|this synthesis examines)\b"
 )
+_CONTEXTLESS_OPENING_PATTERN = re.compile(
+    r"^(?:parmi\b|among\b|(?:elles|ils|ceux-ci|celles-ci|these|those)\b)",
+    re.IGNORECASE,
+)
 INTERNAL_PROCESS_LEAK_PATTERN = re.compile(
     r"\b(?:rag|argo|record_ids?|evidence_ids?|facet_drafts?|click\s+and\s+read|"
     r"telemetr(?:ie|y)|json\s+schema|consignes?\s+internes?|regles?\s+internes?|"
@@ -3106,6 +3122,8 @@ def _validate_grounding(
     for statement_index, statement in enumerate(answer.statements):
         text = statement.statement.strip()
         plain_statement = _plain_text(text)
+        if statement_index == 0 and _CONTEXTLESS_OPENING_PATTERN.match(plain_statement):
+            raise RuntimeError("ARGO started the answer with a contextless fragment")
         if statement_index == 0 and re.match(
             r"^(?:de plus|en outre|par ailleurs|de même|moreover|furthermore|additionally)\b",
             plain_statement,
@@ -3148,6 +3166,8 @@ def _validate_evidence_grounding(
     required_evidence_ids: frozenset[str] = frozenset(),
     answer_effort: AnswerEffort | None = None,
 ) -> list[str]:
+    """Collect all evidence, language, number, and style violations before admitting an answer."""
+
     violations: list[_ScientificValidationViolation] = []
 
     def reject(reason: ScientificValidationReason, message: str) -> None:
@@ -3255,6 +3275,11 @@ def _validate_evidence_grounding(
             reject(
                 ScientificValidationReason.INVALID_PROSE_STRUCTURE,
                 "ARGO started the answer with a continuation connector",
+            )
+        if statement_index == 0 and _CONTEXTLESS_OPENING_PATTERN.match(plain_statement):
+            reject(
+                ScientificValidationReason.INVALID_PROSE_STRUCTURE,
+                "ARGO started the answer with a contextless fragment",
             )
         if text.endswith(":") or text.startswith(("•", "-", "*")):
             reject(
@@ -3733,6 +3758,8 @@ def _render_evidence_answer(
     question: str = "",
     facet_plans: Sequence[_FacetRenderPlan] = (),
 ) -> str:
+    """Render validated statements with citations resolved from supplied source records."""
+
     language = _question_language(question or answer.definition or "")
     headings = (
         {

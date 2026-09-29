@@ -150,11 +150,16 @@ def verify_ciderqa_report(report: SignedCiderQAReport) -> bool:
 def write_ciderqa_report(report: SignedCiderQAReport, destination: str | Path) -> Path:
     if not verify_ciderqa_report(report):
         raise ValueError("CiderQA report signature is invalid")
+    return write_json_artifact(report, destination)
+
+
+def write_json_artifact(model: BaseModel, destination: str | Path) -> Path:
+    """Atomically write a CiderQA artifact using its JSON representation."""
     target = Path(destination)
     target.parent.mkdir(parents=True, exist_ok=True)
     temporary = target.with_suffix(target.suffix + ".tmp")
     temporary.write_text(
-        json.dumps(report.model_dump(mode="json"), ensure_ascii=False, indent=2) + "\n",
+        json.dumps(model.model_dump(mode="json"), ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
     temporary.replace(target)

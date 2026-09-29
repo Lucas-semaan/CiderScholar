@@ -273,6 +273,8 @@ class DeepResearchRetrievalStage:
         explicit_gap_id: str | None = None,
         explicit_gap_description: str | None = None,
     ) -> DeepResearchSearchSnapshot:
+        """Keep the first search distinct from a second search justified by a persisted gap."""
+
         if iteration == 1 and (explicit_gap_id or explicit_gap_description):
             raise ValueError("the original search cannot carry a research gap")
         if iteration == 2 and (not explicit_gap_id or not explicit_gap_description):

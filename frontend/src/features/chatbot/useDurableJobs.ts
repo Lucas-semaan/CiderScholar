@@ -27,6 +27,7 @@ export function useDurableJobs(options: DurableJobTrackingOptions = {}) {
         optionsRef.current.onTerminal?.(job);
         return;
       }
+      // One browser poller per job; the server-side job survives navigation.
       if (controllersRef.current.has(job.id)) return;
 
       const controller = new AbortController();

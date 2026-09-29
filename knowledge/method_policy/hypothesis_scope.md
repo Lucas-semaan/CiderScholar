@@ -6,7 +6,7 @@ kind: "method_policy"
 title: "Hypothèse réservée à la recherche"
 language: "multilingual"
 authority: "accepted_user_method"
-provenance: [{"document":"docs/HOW_TO_WORK_ON_CIDERSCHOLAR.md","section":"§5.1, points 1 à 3","revision_sha256":"05140e5d35c03a8f6347ea5627a08216d87a6aacc299548d447b4ba255d27044"}]
+provenance: [{"document":"docs/HOW_TO_WORK_ON_CIDERSCHOLAR.md","section":"§5.1, points 1 à 3","revision_sha256":"3f830672cd189b1d65751a2cc3502da6705207989537dff50c0bbab173e43969"}]
 depends_on: []
 stage: "planning"
 required: true

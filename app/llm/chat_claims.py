@@ -30,6 +30,8 @@ class ChatAnswerVerifier:
         answer: CiderEvidenceAnswer,
         evidence: dict[str, tuple[ChatEvidenceRecord, ChatEvidencePassage]],
     ) -> CiderEvidenceAnswer:
+        """Admit answer fields only when each claim is supported by its cited SQLite passages."""
+
         fields: list[tuple[str, str, list[str]]] = []
         for index, statement in enumerate(answer.statements):
             fields.append((f"statement:{index}:text", statement.statement, statement.evidence_ids))

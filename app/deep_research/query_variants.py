@@ -197,6 +197,8 @@ def build_bilingual_variants(
     max_variants: int = 6,
     include_structured_expansion: bool = False,
 ) -> list[QueryVariant]:
+    """Bound multilingual variants while retaining the original question and matrix terms."""
+
     if not 1 <= max_variants <= 6:
         raise ValueError("deep-research variants must be bounded between one and six")
     normalized = " ".join(question.split())

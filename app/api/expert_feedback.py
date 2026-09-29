@@ -340,6 +340,8 @@ def list_expert_candidates(
     candidate_state: Annotated[str | None, Query(alias="state", max_length=40)] = None,
     limit: Annotated[int, Query(ge=1, le=100)] = 50,
 ) -> dict[str, object]:
+    """Expose only candidate states permitted for the requested review view."""
+
     allowed_states = {
         "draft",
         "structurally_valid",
@@ -945,6 +947,8 @@ def _enqueue_expert_evaluation(
     database: Database,
     settings: Settings,
 ) -> JobPublic:
+    """Validate the selected evaluation before creating its durable job."""
+
     evaluation = get_evaluation(database, evaluation_id)
     if evaluation is None:
         raise HTTPException(

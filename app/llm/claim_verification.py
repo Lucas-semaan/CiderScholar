@@ -163,6 +163,8 @@ class ClaimVerifier:
     def verify(
         self, question: str, claims: list[dict[str, Any]]
     ) -> list[ClaimSemanticVerification]:
+        """Reuse verified claim decisions and assess only claims missing from the cache."""
+
         results: dict[str, ClaimSemanticVerification] = {}
         pending = []
         keys = {}

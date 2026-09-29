@@ -18,7 +18,11 @@ experte et d’une boucle de correction évaluée, avec contrats techniques, lot
 tests. Il s’agit d’un plan à exécuter, pas d’une fonctionnalité déjà livrée ni d’une nouvelle méthode
 scientifique automatiquement adoptée.
 
-## Cible produit confirmée
+## Cible historique Windows, remplacée le 24 septembre 2026
+
+Les points ci-dessous décrivent le pilote sur postes personnels conservé pour retracer les décisions
+et les travaux Windows déjà réalisés. La cible interne en vigueur est la VM Linux partagée décrite en
+tête de ce document ; ne pas utiliser cette liste comme contrat de déploiement actuel.
 
 - environ dix utilisateurs, chacun sur son poste personnel Windows 11 ;
 - installation guidée sans terminal, distribuée depuis SharePoint ;

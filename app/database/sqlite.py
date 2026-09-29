@@ -442,6 +442,8 @@ class Database:
         error_type: str | None = None,
         error_message: str | None = None,
     ) -> None:
+        """Validate counters and provenance before committing a terminal extraction state."""
+
         if state not in _EXTRACTION_RUN_STATES - {"started"}:
             raise ValueError("extraction run terminal state is invalid")
         _validate_extraction_run_text(run_id, field_name="run ID", maximum=128)

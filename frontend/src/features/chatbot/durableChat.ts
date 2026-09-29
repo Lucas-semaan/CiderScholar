@@ -19,7 +19,7 @@ export interface PendingChatSubmission {
   mode: "quick" | "deep_research";
   interactionMode: ChatInteractionMode;
   answerEffort: AnswerEffort;
-  clientRequestId: string;
+  clientRequestId: string; // Stable across a retry of the same submission.
 }
 
 export interface SubmissionLock {
@@ -91,6 +91,7 @@ export function reloadTerminalConversation(
   job: DurableJob,
   load: (conversationId: string) => Promise<ChatConversation> = api.chatbot.conversation,
 ): Promise<ChatConversation> {
+  // Job status contains progress, not the authoritative answer or citations.
   if (job.state !== "succeeded" && job.state !== "failed" && job.state !== "cancelled") {
     return Promise.reject(new Error("Cannot reload a conversation before the job is terminal."));
   }

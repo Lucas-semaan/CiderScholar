@@ -816,6 +816,20 @@ def test_evidence_grounding_rejects_a_sentence_truncated_after_scientific_initia
 
     assert ScientificValidationReason.INVALID_PROSE_STRUCTURE in connector_error.value.reasons
 
+    contextless_answer = answer.model_copy(deep=True)
+    contextless_answer.statements[0] = contextless_answer.statements[0].model_copy(
+        update={"statement": "Parmi elles figurent Douce Coët Ligné et Doux Normandie."}
+    )
+    with pytest.raises(RuntimeError) as contextless_error:
+        _validate_evidence_grounding(
+            contextless_answer,
+            {evidence_id: (record, passage)},
+            {evidence_id},
+            None,
+        )
+
+    assert ScientificValidationReason.INVALID_PROSE_STRUCTURE in contextless_error.value.reasons
+
     orphan_answer = answer.model_copy(deep=True)
     orphan_answer.statements[0] = orphan_answer.statements[0].model_copy(
         update={"statement": "marxianus atteint la concentration la plus élevée."}

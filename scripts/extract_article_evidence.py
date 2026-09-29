@@ -142,6 +142,8 @@ def _print_output(output: dict[str, object], *, strict_json: bool, offline: bool
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Rank local articles and persist source-validated evidence under requested limits."""
+
     args = build_parser().parse_args(argv)
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")

@@ -316,6 +316,8 @@ def build_verified_bibliography(
     fermentation_target: int,
     contaminant_target: int,
 ) -> tuple[list[VerifiedArticle], dict[str, Any]]:
+    """Keep fermentation and contaminant quotas separate while verifying every selected source."""
+
     if target < 1 or fermentation_target < 0 or contaminant_target < 0:
         raise ValueError("bibliography targets must be non-negative and target must be positive")
     if fermentation_target + contaminant_target != target:

@@ -41,6 +41,8 @@ class WatchHarvester:
         )
 
     def run(self, checkpoint: WatchCheckpoint, boundary: Callable[[], bool]) -> None:
+        """Continue from the saved provider cursor and commit each page with its checkpoint."""
+
         if not checkpoint.harvest_run_id:
             checkpoint.harvest_run_id, _ = self.bibliography.start_run(
                 self.settings,
@@ -152,8 +154,9 @@ class WatchHarvester:
             self.store.save(checkpoint)
 
     def _persist_page(self, checkpoint, records, source, theme, lane, key, cursor, turn, finished):
+        """Commit the provider page and next cursor atomically in scientific SQLite."""
+
         candidate = checkpoint.model_copy(deep=True)
-        # The page and its cursor commit together in the scientific SQLite database.
         with self.store.database.transaction() as connection:
             for rank, record in enumerate(records, cursor.offset + 1):
                 existed = (

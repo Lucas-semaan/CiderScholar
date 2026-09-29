@@ -355,6 +355,8 @@ def index_bibliographic_abstracts(
     max_batches: int | None = None,
     record_ids: Sequence[str] | None = None,
 ) -> BibliographicIndexReport:
+    """Index accepted abstracts in bounded batches and persist progress for safe restart."""
+
     if max_batches is not None and max_batches <= 0:
         raise ValueError("max_batches must be positive when provided")
     selected_ids = set(record_ids) if record_ids is not None else None
@@ -678,6 +680,8 @@ class BibliographicHybridSearchService:
         vector_search_degraded: bool = False,
         degradation_codes: Sequence[str] = (),
     ) -> BibliographicHybridResponse:
+        """Fuse lexical and vector ranks, then rehydrate record text from SQLite."""
+
         started = perf_counter()
         lexical_ranks = {str(row["id"]): rank for rank, row in enumerate(lexical_rows, start=1)}
         vector_ranks = {

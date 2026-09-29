@@ -69,6 +69,8 @@ class WindowsOcrPdfExtractor:
         self.ocr_script = Path(__file__).parents[2] / "scripts" / "windows_ocr_images.ps1"
 
     def extract(self, pdf_path: Path) -> ExtractedDocument:
+        """Run OCR in a temporary directory and return its pages with extraction warnings."""
+
         if not self.ocr_script.is_file():
             raise FileNotFoundError(f"Windows OCR helper not found: {self.ocr_script}")
         self.cache_dir.mkdir(parents=True, exist_ok=True)

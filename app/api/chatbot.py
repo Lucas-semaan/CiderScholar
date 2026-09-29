@@ -132,6 +132,8 @@ def enqueue_chat_job(
     database: Annotated[Database, Depends(get_database)],
     settings: Annotated[Settings, Depends(get_settings)],
 ) -> ChatJobSubmitResponse:
+    """Validate the requested chat mode before persisting one idempotent durable job."""
+
     try:
         repository = JobRepository(database.path)
         if payload.mode == "deep_research":

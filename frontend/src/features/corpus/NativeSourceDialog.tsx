@@ -1,5 +1,4 @@
-import { Dialog } from "@/components/ui/Dialog";
-import { ErrorState, LoadingState } from "@/components/ui/Feedback";
+import { CorpusDetailDialog } from "@/features/corpus/CorpusDetailDialog";
 import type { CorpusArticle, NativeSourceView } from "@/types/api";
 
 export function NativeSourceDialog({
@@ -18,13 +17,15 @@ export function NativeSourceDialog({
   retry: () => void;
 }) {
   return (
-    <Dialog
+    <CorpusDetailDialog
+      article={article}
+      error={error}
+      loading={loading}
+      loadingLabel="Lecture de la source structurée…"
       onClose={onClose}
-      open={article !== null}
-      title={article ? `Source native — ${article.title}` : "Source native"}
+      retry={retry}
+      title="Source native"
     >
-      {loading && <LoadingState label="Lecture de la source structurée…" />}
-      {error && <ErrorState message={error} retry={retry} />}
       {data && (
         <div className="space-y-5 text-sm text-slate-700">
           <p className="text-xs text-slate-500">
@@ -58,6 +59,6 @@ export function NativeSourceDialog({
           )}
         </div>
       )}
-    </Dialog>
+    </CorpusDetailDialog>
   );
 }

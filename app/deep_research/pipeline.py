@@ -187,6 +187,8 @@ class DeepResearchPreparationOperations:
         )
 
     def extract_evidence(self, payload: DeepResearchPayload) -> None:
+        """Resume the persisted research loop or advance only the current evidence iteration."""
+
         if self._resolve_cache(payload)[1] is not None:
             return
         self._extract_iteration(payload, 1)

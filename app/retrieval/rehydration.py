@@ -15,6 +15,8 @@ from app.models.chatbot import ChatEvidencePassage, ChatEvidenceRecord
 def rehydrate_records(
     settings: Settings, records: Sequence[ChatEvidenceRecord]
 ) -> list[ChatEvidenceRecord]:
+    """Reload source text from SQLite; search-index payloads never become evidence authority."""
+
     result = []
     for scope in CorpusScope:
         candidates = [

@@ -222,6 +222,8 @@ class HierarchicalSynthesisService:
     def _prepared_sources(
         self, query_id: str
     ) -> tuple[str, list[ArticleSynthesisCard], list[EvidenceSource], list[str]]:
+        """Reload and validate the complete SQLite source set before generation or resume."""
+
         query_row = self.database.query_by_id(query_id)
         if query_row is None:
             raise SynthesisSourceValidationError("query is unavailable in SQLite")
@@ -532,6 +534,8 @@ class HierarchicalSynthesisService:
         cards: Sequence[ArticleSynthesisCard],
         sources: Sequence[EvidenceSource],
     ) -> tuple[ThemeSynthesis, list[GenerationMetrics], int]:
+        """Generate one theme only from its assigned evidence and persist the validated result."""
+
         theme_sources = self._theme_sources(assignment, sources)
         allowed = {source.evidence_id: source for source in theme_sources}
         if not allowed:
@@ -795,6 +799,8 @@ class HierarchicalSynthesisService:
         evidence: Mapping[str, EvidenceSource],
         bibliography: Sequence[BibliographyEntry],
     ) -> str:
+        """Assemble persisted theme text and application-owned citations in question language."""
+
         language = question_language(question)
         labels = (
             {
@@ -961,6 +967,8 @@ class HierarchicalSynthesisService:
         query_id: str,
         resume: bool = True,
     ) -> SynthesisExecutionResult:
+        """Resume persisted themes and final synthesis after validating their source set."""
+
         started = perf_counter()
         question, cards, sources, gaps = self._prepared_sources(query_id)
         existing_final = self.database.load_final_synthesis(query_id) if resume else None

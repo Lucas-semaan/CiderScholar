@@ -343,6 +343,8 @@ class ArgoSemanticEvidenceFilter:
         *,
         on_argo_reserved: Callable[[], None] | None,
     ) -> tuple[AxisSemanticAssessment, str, int, int]:
+        """Assess a bounded legacy axis batch with IDs fixed by the supplied candidates."""
+
         candidate_ids = [candidate.candidate_id for candidate in candidates]
         schema = _decision_schema(candidate_ids, axis.key)
         user_payload = {

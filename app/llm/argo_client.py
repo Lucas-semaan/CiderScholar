@@ -458,6 +458,8 @@ class OpenAICompatibleClient:
         max_output_tokens: int | None = None,
         on_request_reserved: Callable[[], None] | None = None,
     ) -> GenerationResponse:
+        """Send one bounded ARGO request with validated model, messages, and response contract."""
+
         del num_ctx  # ARGO controls the server-side context window.
         selected_model = self._selected_model(model or self.model)
         validated_messages = self._messages(messages)

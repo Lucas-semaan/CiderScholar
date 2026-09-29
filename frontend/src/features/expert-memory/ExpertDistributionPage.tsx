@@ -30,6 +30,7 @@ const stateTones: Record<ExpertDistributionState, "neutral" | "warning" | "succe
 };
 
 export function ExpertDistributionPage() {
+  // Activation and rollback use the displayed generation/release values as CAS guards.
   const loadDistributions = useCallback(() => api.expertMemory.distributions(), []);
   const { data, error, loading, refresh } = useRemoteData(loadDistributions);
   const [selectedId, setSelectedId] = useState<string | null>(null);

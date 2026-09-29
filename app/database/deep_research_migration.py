@@ -6,6 +6,8 @@ import sqlite3
 
 
 def add_deep_research_job_contract(connection: sqlite3.Connection) -> None:
+    """Apply the versioned job schema needed by resumable deep research."""
+
     connection.executescript(
         """
         DROP INDEX IF EXISTS idx_jobs_claim;

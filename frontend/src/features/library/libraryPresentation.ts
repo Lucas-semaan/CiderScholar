@@ -20,6 +20,7 @@ export const initialLibraryFilters: LibraryRecordFilters = {
 };
 
 export const acquisitionLibraryFilters: LibraryRecordFilters = {
+  // A review queue view, not an automatic scientific admission decision.
   ...initialLibraryFilters,
   statuses: ["accepted", "review"],
   abstract: "without",

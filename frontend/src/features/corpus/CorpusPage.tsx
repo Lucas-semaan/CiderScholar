@@ -37,6 +37,7 @@ const corpusTabs: Array<{ id: CorpusTab; label: string }> = [
   { id: "activity", label: "Journal d’ingestion" },
 ];
 
+/** Coordinates explicit ingestion actions and read-only views of persisted source material. */
 export function CorpusPage({ embedded = false }: { embedded?: boolean }) {
   const [searchParams, setSearchParams] = useSearchParams();
   const { data, error, loading, refresh } = useRemoteData(useCallback(() => api.corpus.list(), []));

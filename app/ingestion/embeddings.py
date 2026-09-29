@@ -307,6 +307,8 @@ class EmbeddingBatchProcessor:
         close_backend: bool = True,
         article_ids: Sequence[str] | None = None,
     ) -> EmbeddingRunReport:
+        """Recover interrupted batches and persist vectors only for the selected article set."""
+
         started = datetime.now(UTC)
         recovered = self.database.reset_processing_embeddings(article_ids)
         report = EmbeddingRunReport(

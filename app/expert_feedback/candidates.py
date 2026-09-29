@@ -34,6 +34,8 @@ class ExpertCandidateCompiler:
         diagnosis_id: UUID,
         now: datetime | None = None,
     ) -> tuple[dict[str, object], bool]:
+        """Bind a proposed patch to its reviewed diagnosis and content hashes before evaluation."""
+
         timestamp = now or datetime.now(UTC)
         diff_sha256 = content_hash(patch.model_dump(mode="json"))
         diagnosis, diagnosis_payload = self._load_diagnosis(diagnosis_id)

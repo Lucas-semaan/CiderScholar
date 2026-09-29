@@ -272,6 +272,8 @@ class HybridSearchService:
         article_ids: Sequence[str] | None = None,
         sections: Sequence[str] | None = None,
     ) -> HybridSearchResponse:
+        """Run one bounded lexical and dense wave, then fuse chunk identifiers by RRF."""
+
         started = perf_counter()
         queries = self._queries(query, query_variants)
         result_limit = self.settings.retrieval.hybrid_default_limit if limit is None else limit
@@ -349,6 +351,8 @@ class HybridSearchService:
                 try:
                     dense_article_filters: list[Sequence[str] | None] | None = None
                     if dense_prefilter_article_ids:
+                        # Keep the original dense query global. Only later variants use
+                        # the sufficiently broad lexical article pool as a cost bound.
                         dense_article_filters = [
                             article_ids,
                             *[dense_prefilter_article_ids] * (vector_query_limit - 1),

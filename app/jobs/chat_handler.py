@@ -140,6 +140,8 @@ def _trace_manifest(
     budgets: tuple[TraceBudget, ...] = (),
     routing_decisions: tuple[TraceRoutingDecision, ...] = (),
 ) -> ExpertRunManifest:
+    """Persist hashes and evidence IDs for audit without logging question or passage text."""
+
     def digest(value: str) -> str:
         return sha256(value.encode("utf-8")).hexdigest()
 
@@ -294,6 +296,8 @@ class ChatAnswerHandler:
     answer: ChatbotAnswerer = answer_chatbot
 
     def handle(self, job: JobRecord, context: JobProgressContext) -> JobHandlerResult:
+        """Resume the job trace and conversation before committing a terminal chat result."""
+
         routing_items, routing_budgets, routing_decisions = _shadow_routing_trace(
             job=job,
             settings=self.settings,

@@ -162,6 +162,8 @@ class ExpertCorrectionRepository:
         *,
         now: datetime | None = None,
     ) -> dict[str, object]:
+        """Apply a correction only against its expected revision to prevent lost reviews."""
+
         updated_at = now or datetime.now(UTC)
         request_json = payload.model_dump_json()
         replacement = ExpertCorrectionCreate.model_validate(

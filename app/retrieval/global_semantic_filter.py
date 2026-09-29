@@ -160,6 +160,8 @@ class ArgoGlobalSemanticEvidenceFilter:
         *,
         on_argo_reserved: Callable[[], None] | None = None,
     ) -> GlobalSemanticFilterResult:
+        """Grade the complete candidate set in bounded batches without triggering another search."""
+
         cleaned_question = " ".join(question.split())
         if not 2 <= len(cleaned_question) <= 4_000:
             raise ValueError("semantic filter question must contain between 2 and 4000 characters")
@@ -329,6 +331,8 @@ class ArgoGlobalSemanticEvidenceFilter:
         *,
         on_argo_reserved: Callable[[], None] | None,
     ) -> tuple[_GlobalSemanticPayload, GenerationResponse, int, int]:
+        """Grade one bounded batch against the full question and verification needs."""
+
         candidate_ids = [candidate.candidate_id for candidate in candidates]
         need_ids = [need.need_id for need in verification_needs]
         messages = self._messages(question, verification_needs, candidates)

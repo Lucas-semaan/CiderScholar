@@ -1,5 +1,4 @@
-import { Dialog } from "@/components/ui/Dialog";
-import { ErrorState, LoadingState } from "@/components/ui/Feedback";
+import { CorpusDetailDialog } from "@/features/corpus/CorpusDetailDialog";
 import type { CorpusArticle, FigureEvidenceView } from "@/types/api";
 
 export function FigureEvidenceDialog({
@@ -18,13 +17,15 @@ export function FigureEvidenceDialog({
   retry: () => void;
 }) {
   return (
-    <Dialog
+    <CorpusDetailDialog
+      article={article}
+      error={error}
+      loading={loading}
+      loadingLabel="Lecture des légendes source…"
       onClose={onClose}
-      open={article !== null}
-      title={article ? `Figures source — ${article.title}` : "Figures source"}
+      retry={retry}
+      title="Figures source"
     >
-      {loading && <LoadingState label="Lecture des légendes source…" />}
-      {error && <ErrorState message={error} retry={retry} />}
       {data && (
         <div className="space-y-5 text-sm text-slate-700">
           <p className="text-xs text-slate-500">
@@ -57,6 +58,6 @@ export function FigureEvidenceDialog({
           )}
         </div>
       )}
-    </Dialog>
+    </CorpusDetailDialog>
   );
 }

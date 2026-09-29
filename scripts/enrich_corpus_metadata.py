@@ -634,6 +634,8 @@ def _build_updates(
     settings: Settings,
     run_dir: Path,
 ) -> tuple[list[MetadataUpdate], list[dict[str, Any]]]:
+    """Separate safe metadata updates from ambiguous records that still need review."""
+
     updates: list[MetadataUpdate] = []
     reviews: list[dict[str, Any]] = []
     targets_by_id = {target.record_id: target for target in targets}
@@ -962,6 +964,8 @@ def _assert_target_snapshot(
 
 
 def main() -> int:
+    """Prepare conservative metadata updates and report ambiguous matches."""
+
     args = _arguments()
     if args.title_limit is not None and args.title_limit < 0:
         raise ValueError("--title-limit cannot be negative")

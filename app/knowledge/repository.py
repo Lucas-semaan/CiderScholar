@@ -53,6 +53,8 @@ class KnowledgeRepository:
     def import_candidate(
         self, package: KnowledgePackage, *, base_release_id: UUID | None = None
     ) -> StoredRelease:
+        """Validate the package and persist it as a candidate without activating its content."""
+
         try:
             package = KnowledgePackage.model_validate(package.model_dump(mode="python"))
         except ValidationError as error:

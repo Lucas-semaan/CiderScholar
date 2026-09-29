@@ -31,6 +31,7 @@ import {
 import { JobCompletionNotice } from "./JobCompletionNotice";
 import { useDurableJobs } from "./useDurableJobs";
 
+/** Rebuilds the visible conversation from SQLite after a durable job finishes. */
 export function ChatbotPage() {
   const [messages, setMessages] = useState<ChatMessageValue[]>([welcomeMessage]);
   const [conversations, setConversations] = useState<ChatConversationSummary[]>([]);
@@ -154,6 +155,7 @@ export function ChatbotPage() {
     );
     if (!terminalJob) return;
 
+    // A terminal poll may be delivered repeatedly; reread the persisted answer once.
     handledTerminalsRef.current.add(terminalJob.id);
     void reloadTerminalConversation(terminalJob)
       .then((conversation) => {
@@ -299,6 +301,7 @@ export function ChatbotPage() {
     if (question.length < 2 || interactionDisabled || !acquireSubmissionLock(submissionLockRef))
       return;
 
+    // Reuse the request ID on an identical retry so the API cannot enqueue twice.
     const existingPending = pendingSubmissionRef.current;
     const pending =
       existingPending?.message === question &&

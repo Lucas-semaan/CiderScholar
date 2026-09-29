@@ -54,6 +54,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Reconcile or rebuild only the explicitly requested index generation."""
+
     parser = build_parser()
     args = parser.parse_args(argv)
     if (args.verify_generation or args.reconcile) and args.retry_failed:
